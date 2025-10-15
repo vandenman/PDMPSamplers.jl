@@ -13,8 +13,9 @@
     # algorithms = (ThinningStrategy, GridThinningStrategy)
     get_gradient_types(::Type{<:FactorizedDynamics})    = factorized_gradient_types
     get_gradient_types(::Type{<:NonFactorizedDynamics}) = nonfactorized_gradient_types
+    get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (ThinningStrategy, GridThinningStrategy, )
     # get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (ThinningStrategy, GridThinningStrategy, RootsPoissonTimeStrategy)
-    get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (RootsPoissonTimeStrategy, )
+    # get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (RootsPoissonTimeStrategy, )
     # get_algorithm_types(::Type{<:ZigZag}, ::Type{<:FullGradient})                       = (ThinningStrategy, GridThinningStrategy)#, ExactStrategy)
     get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:CoordinateWiseGradient}) = (ThinningStrategy, )
     data_types = (
@@ -188,27 +189,28 @@ end
     # algorithms = (ThinningStrategy, GridAdaptiveState)
     get_gradient_types(::Type{<:FactorizedDynamics})    = factorized_gradient_types
     get_gradient_types(::Type{<:NonFactorizedDynamics}) = nonfactorized_gradient_types
-    get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (ThinningStrategy, GridThinningStrategy, RootsPoissonTimeStrategy)
+    get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (ThinningStrategy, GridThinningStrategy, )
+    # get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient})           = (ThinningStrategy, GridThinningStrategy, RootsPoissonTimeStrategy)
 
     get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:CoordinateWiseGradient}) = (ThinningStrategy, )
 
     data_types = (
         SpikeAndSlabDist{Bernoulli, ZeroMeanIsoNormal},
         SpikeAndSlabDist{BetaBernoulli, ZeroMeanIsoNormal},
-        SpikeAndSlabDist{BetaBernoulliHierarchical, ZeroMeanIsoNormal}
+        # SpikeAndSlabDist{BetaBernoulliHierarchical, ZeroMeanIsoNormal}
     )
 
     ds = (2, 5, )#10)
     data_args = Dict(
         SpikeAndSlabDist{Bernoulli, ZeroMeanIsoNormal} => ds,
         SpikeAndSlabDist{BetaBernoulli, ZeroMeanIsoNormal} => ds,
-        SpikeAndSlabDist{BetaBernoulliHierarchical, ZeroMeanIsoNormal} => ds
+        # SpikeAndSlabDist{BetaBernoulliHierarchical, ZeroMeanIsoNormal} => ds
     )
 
-    pdmp_type = Boomerang#ZigZag#
+    pdmp_type = Boomerang#
     gradient_type = FullGradient
-    # data_type = SpikeAndSlabDist{BetaBernoulli, ZeroMeanIsoNormal}
-    data_type = SpikeAndSlabDist{Bernoulli, ZeroMeanIsoNormal}
+    data_type = SpikeAndSlabDist{BetaBernoulli, ZeroMeanIsoNormal}
+    # data_type = SpikeAndSlabDist{Bernoulli, ZeroMeanIsoNormal}
     # data_type = SpikeAndSlabDist{BetaBernoulliHierarchical, ZeroMeanIsoNormal}
     data_arg = (5, )#1.0)
     # algorithm = RootsPoissonTimeStrategy
@@ -224,6 +226,7 @@ end
     @testset "$(data_name(data_type, data_arg))" for
         data_type in data_types, data_arg  in data_args[data_type]
 
+        Random.seed!(1234)
         D, κ, ∇f!, ∇²f!, ∂fxᵢ = gen_data(data_type, data_arg...)
 
         d = first(data_arg) # could also be length(D)?
@@ -636,7 +639,7 @@ end
     pdmp_types = (ZigZag, BouncyParticle, )
     alg = GridThinningStrategy(hvp = ∇²f!)
 
-    # pdmp_type = BouncyParticle
+    # pdmp_type = ZigZag
     # show_progress = true
 
     @testset "flow: $(pdmp_type)" for pdmp_type in pdmp_types

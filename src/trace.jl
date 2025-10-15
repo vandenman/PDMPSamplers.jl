@@ -189,7 +189,7 @@ function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, Bouncy
     return segment_integral
 end
 
-function _integrate(trace::PDMPTrace, f::Function, args...)
+function _integrate(trace::AbstractPDMPTrace, f::Function, args...)
 
     flow = trace.flow
     events = trace.events
@@ -203,17 +203,47 @@ function _integrate(trace::PDMPTrace, f::Function, args...)
     # ideally we only define _integrate_segment once, but the best way is to use in-place operations...
     # could also use a initialize function that is called once?
 
-    integral = sum(
-        i -> _integrate_segment(
+    # integral = sum(
+    #     i -> _integrate_segment(
+    #         f,
+    #         flow,
+    #         events[i].position, events[i+1].position,
+    #         events[i].velocity, events[i+1].velocity,
+    #         events[i].time,     events[i+1].time,
+    #         args...
+    #     ),
+    #     1:length(events)-1
+    # )
+
+    # the stuff below works for both traces
+    iter = trace
+    next = iterate(iter)
+    t₀, xt₀, θt₀, _ = next[2]
+    next = iterate(iter, next[2])
+    t₁, xt₁, θt₁, _ = next[2]
+    integral = _integrate_segment(
+        f,
+        flow,
+        xt₀, xt₁,
+        θt₀, θt₁,
+        t₀,  t₁,
+        args...
+    )
+    t₀, xt₀, θt₀ = t₁, xt₁, θt₁
+    next = iterate(iter, next[2])
+    while next !== nothing
+        t₁, xt₁, θt₁, _ = next[2]
+        integral .+= _integrate_segment(
             f,
             flow,
-            events[i].position, events[i+1].position,
-            events[i].velocity, events[i+1].velocity,
-            events[i].time,     events[i+1].time,
+            xt₀, xt₁,
+            θt₀, θt₁,
+            t₀,  t₁,
             args...
-        ),
-        1:length(events)-1
-    )
+        )
+        t₀, xt₀, θt₀ = t₁, xt₁, θt₁
+        next = iterate(iter, next[2])
+    end
 
     return integral / total_time
 end

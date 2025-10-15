@@ -916,6 +916,14 @@ function test_approximation(samples, D::SpikeAndSlabDist)
         q_expected = quantile(marginal_slab_i, qprobs)
         q_observed = quantile(x, qprobs)
 
+        # TODO: make this plot a bit easier to see for all dimensions
+        # next, device a better test that is less strict/ flaky
+        # f = Figure()
+        # ax = Axis(f[1, 1]; xlabel = "theoretical quantiles", ylabel = "observed quantiles", title = "Quantile–quantile plot for slab")
+        # ablines!(ax, 0, 1, color = :grey, linestyle = :dash)
+        # scatter!(ax, q_expected, q_observed; markersize = 4, color = :blue)
+        # f
+
         dens = pdf.(marginal_slab_i, q_expected)                     # f(q_p)
 
         # llm-inspired multivariate test
@@ -931,9 +939,9 @@ function test_approximation(samples, D::SpikeAndSlabDist)
         ϵ = 1e-12 * maximum(view(Σ, diagind(Σ)))
         Σ += ϵ * I
 
-        d = q_observed .- q_expected
+        q_diff = q_observed .- q_expected
 
-        T = dot(d, Σ \ d)   # d' Σ^{-1} d
+        T = dot(q_diff, Σ \ q_diff)   # d' Σ^{-1} d
 
         no_chisq_tests += 1
         chisq_thresh_passed_desired += T <= chisq_thresh_desired

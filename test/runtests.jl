@@ -17,7 +17,9 @@ import Statistics
 import LogExpFunctions
 
 import DifferentiationInterface as DI
-import Mooncake
+# for now, because this does not work with Julia 1.12
+# import Mooncake
+# import ForwardDiff
 
 include("helper-gen_data.jl")
 

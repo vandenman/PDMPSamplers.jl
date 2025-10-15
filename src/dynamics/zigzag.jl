@@ -38,21 +38,20 @@ end
 λ_i(i::Integer, ξ::SkeletonPoint, ∇ϕ_i::Real, ::ZigZag) = pos(ξ.θ[i] * ∇ϕ_i)
 
 
-function move_forward_time!(state::PDMPState, τ::Real, ::ZigZag)
+function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::ZigZag)
     state.t[] += τ
-    state.ξ.x .+= τ .* state.ξ.θ
-    # LinearAlgebra.axpy!(τ, state.ξ.θ, state.ξ.x)
-    state
-end
-function move_forward_time!(state::StickyPDMPState, τ::Real, ::ZigZag)
-    state.t[] += τ
-    state.ξ.x .+= τ .* state.ξ.θ
-    # LinearAlgebra.axpy!(τ, state.ξ.θ, state.ξ.x)
+    move_forward_time!(state.ξ, τ, flow)
     state
 end
 
-move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag) = LinearAlgebra.axpy!(τ, ξ.θ, ξ.x)
-# move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag) = ξ.x .+= τ .* ξ.θ
+# this signature is a bit ugly, but avoids some errors...
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag)
+    LinearAlgebra.axpy!(τ, ξ.θ, ξ.x)
+end
+
+# fallbacks for AD (mostly ForwardDiff) that allocates new arrays
+# move_forward_time(ξ::SkeletonPoint, τ::Real, ::ZigZag) = SkeletonPoint(ξ.x .+ τ .* ξ.θ, ξ.θ)
+
 
 # factorized
 function reflect!(ξ::SkeletonPoint, ∇ϕ::Real, i::Integer, flow::ZigZag)
