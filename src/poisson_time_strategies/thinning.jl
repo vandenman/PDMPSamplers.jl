@@ -57,7 +57,7 @@ ab_i(i::Int, ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics
 
 function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
         # TODO: these only exist temporarily due to issues/ testing in gridthinning
-        ignored1::Any, ignored2::Any
+        ignored1::Any = nothing, ignored2::Any = nothing
     )
 
     # t = state.t[]
