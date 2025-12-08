@@ -228,11 +228,11 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
 
             # sometimes we can obtain this from the meta information
             # for example for gridthinning
-            if meta isa NamedTuple && haskey(meta, :∇ϕx)
-                ∇ϕx = meta.∇ϕx
-            else
+            # if meta isa NamedTuple && haskey(meta, :∇ϕx)
+            #     ∇ϕx = meta.∇ϕx
+            # else
                 ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
-            end
+            # end
 
             # meta == abc for ThinningStrategy
             if accept_reflection_event(alg, state.ξ, ∇ϕx, flow, τ, cache, meta)

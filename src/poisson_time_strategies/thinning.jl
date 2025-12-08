@@ -55,7 +55,10 @@ get_bounds(b::GlobalBounds) = FillArrays.Fill(b.c, b.d)
 ab(          ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab(     ξ, get_bounds(c), flow, cache)
 ab_i(i::Int, ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab_i(i, ξ, get_bounds(c), flow, cache)
 
-function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
+        # TODO: these only exist temporarily due to issues/ testing in gridthinning
+        ignored1::Any, ignored2::Any
+    )
 
     # t = state.t[]
     ξ = state.ξ
@@ -93,7 +96,8 @@ end
 
 function next_event_time(::CoordinateWiseGradient, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::StatisticCounter)
     pq = cache.pq # rename for clarity
-    i₀, t_event = dequeue_pair!(pq)
+    # i₀, t_event = dequeue_pair!(pq)
+    i₀, t_event = Base.popfirst!(pq)
     τ = t_event - state.t[]
     @assert ispositive(τ) "$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event"
     return τ, nothing, i₀ # meta = winning coordinate

@@ -687,7 +687,9 @@ function test_approximation(samples, D::Distributions.AbstractMvNormal)
     @test isapprox(sample_cov,  cov(D), rtol=0.2)
     # test quantiles in the first dimension
     probs = .1:.1:.99
-    q_expected = quantile(Normal(mean(D)[1], sqrt(D.Σ[1, 1])), probs)
+    # q_expected = quantile(Normal(mean(D)[1], sqrt(D.Σ[1, 1])), probs)
+    dist = Normal(mean(D)[1], sqrt(D.Σ[1, 1]))
+    q_expected = map(Base.Fix1(quantile, dist), probs)
     q_observed = quantile(samples[:, 1], probs)
     @test isapprox(q_observed, q_expected, rtol=0.15)
 

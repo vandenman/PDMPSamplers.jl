@@ -388,13 +388,13 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
 
     # use the minimum of algorithm's horizon and provided max_horizon (e.g., sticky time)
     # effective_t_max = min(alg.t_max[], max_horizon)
-    if max_horizon < alg.t_max[]
-        alg.t_max[] = max_horizon
-        recompute_time_grid!(alg)
-        effective_t_max = max_horizon
-    else
-        effective_t_max = alg.t_max[]
-    end
+    # if max_horizon < alg.t_max[]
+    #     alg.t_max[] = max_horizon
+    #     recompute_time_grid!(alg)
+    #     effective_t_max = max_horizon
+    # else
+    #     effective_t_max = alg.t_max[]
+    # end
 
     safety_limit = alg.safety_limit
     while safety_limit > 0
@@ -414,24 +414,24 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
         # @show τ_reflection, τ_refresh, alg.t_max[]
         # Check if the proposal is beyond the horizon
 
-        # if τ_reflection >= alg.t_max[]
-        if τ_reflection >= effective_t_max
+        if τ_reflection >= alg.t_max[]
+        # if τ_reflection >= effective_t_max
 
-            # if τ_refresh < alg.t_max[]
-            if τ_refresh < effective_t_max
+            if τ_refresh < alg.t_max[]
+            # if τ_refresh < effective_t_max
                 return τ_refresh + total_time, :refresh, default_return
             end
 
 
-            if isinf(max_horizon)
+            # if isinf(max_horizon)
                 t_max = alg.t_max[]
                 alg.t_max[] *= alg.α⁺[]
                 recompute_time_grid!(alg)
-                effective_t_max = alg.t_max[]
-            end
+                # effective_t_max = alg.t_max[]
+            # end
 
-            # return t_max, :horizon_hit, default_return
-            return effective_t_max, :horizon_hit, default_return
+            return t_max, :horizon_hit, default_return
+            # return effective_t_max, :horizon_hit, default_return
 
         end
         # @show time_refresh, τ_reflection
@@ -474,7 +474,7 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
         else
             # Reflection rejected - shrink horizon and retry
             alg.t_max[] *= alg.α⁻
-            effective_t_max = min(alg.t_max[], max_horizon)
+            # effective_t_max = min(alg.t_max[], max_horizon)
             recompute_time_grid!(alg)
             # reset time
             state_.t[] = state2_.t[]
