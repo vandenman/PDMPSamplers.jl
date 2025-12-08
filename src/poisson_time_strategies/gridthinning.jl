@@ -349,7 +349,8 @@ end
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
 
 
-function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    max_horizon::Float64 = Inf, include_refresh::Bool = true)
 
     # TODO: need to rethink the logic once more
     # ghost events also allow for separating the logic w.r.t. other events
@@ -377,11 +378,23 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
     grad_func = make_grad_U_func(state_, flow, gradient_strategy, cache)
     grad_and_hvp = (grad_func, hvp_func)
 
-    λ_refresh = flow.λref
+    λ_refresh = include_refresh ? flow.λref : zero(flow.λref)
 
     # Sample refresh time independently once -- does not work!
     # time_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
 
+    # ensure the return type is type-stable
+    default_return = (; ∇ϕx = similar(state.ξ.x, 0))
+
+    # use the minimum of algorithm's horizon and provided max_horizon (e.g., sticky time)
+    # effective_t_max = min(alg.t_max[], max_horizon)
+    if max_horizon < alg.t_max[]
+        alg.t_max[] = max_horizon
+        recompute_time_grid!(alg)
+        effective_t_max = max_horizon
+    else
+        effective_t_max = alg.t_max[]
+    end
 
     safety_limit = alg.safety_limit
     while safety_limit > 0
@@ -400,42 +413,31 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
         # @show τ_refresh, τ_reflection, lb_reflection
         # @show τ_reflection, τ_refresh, alg.t_max[]
         # Check if the proposal is beyond the horizon
-        if τ_reflection >= alg.t_max[]
 
-            if τ_refresh < alg.t_max[]
-                return τ_refresh + total_time, :refresh, nothing
+        # if τ_reflection >= alg.t_max[]
+        if τ_reflection >= effective_t_max
+
+            # if τ_refresh < alg.t_max[]
+            if τ_refresh < effective_t_max
+                return τ_refresh + total_time, :refresh, default_return
             end
 
 
-            # @assert iszero(lb_total)
-            t_max = alg.t_max[]
+            if isinf(max_horizon)
+                t_max = alg.t_max[]
+                alg.t_max[] *= alg.α⁺[]
+                recompute_time_grid!(alg)
+                effective_t_max = alg.t_max[]
+            end
 
-            # Adapt t_max upwards
-            alg.t_max[] *= alg.α⁺[]
-
-            # safety_limit <= 300 && iszero(safety_limit % 10) && @show τ_proposed, alg.t_max[], t_max, alg.α⁺, safety_limit
-
-            # update time-grid
-            recompute_time_grid!(alg)
-
-            # move_forward_time!(state_, t_max, flow)
-            # state2_.t[] = state_.t[]
-            # copyto!(state2_.ξ, state_.ξ)
-            # total_time += t_max
-
-            # time_refresh -= t_max
-
-            # # restart the while loop
-            # safety_limit -= 1
-            # continue
-
-            return t_max, :horizon_hit, nothing
+            # return t_max, :horizon_hit, default_return
+            return effective_t_max, :horizon_hit, default_return
 
         end
         # @show time_refresh, τ_reflection
          # Return whichever event happens first
         if τ_refresh < τ_reflection
-            return τ_refresh + total_time, :refresh, nothing
+            return τ_refresh + total_time, :refresh, default_return
         end
 
         # Test reflection acceptance
@@ -468,10 +470,11 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
         if rand() * lb_reflection <= l_reflection
             # @show :reflect
             # @assert l_reflection <= lb_reflection "incorrect bounds, $(l_reflection), $(lb_reflection)"
-            return τ_reflection + total_time, :reflect, nothing
+            return τ_reflection + total_time, :reflect, (; ∇ϕx)
         else
             # Reflection rejected - shrink horizon and retry
             alg.t_max[] *= alg.α⁻
+            effective_t_max = min(alg.t_max[], max_horizon)
             recompute_time_grid!(alg)
             # reset time
             state_.t[] = state2_.t[]

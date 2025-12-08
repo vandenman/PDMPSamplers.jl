@@ -409,7 +409,7 @@ function gen_data(::Type{LogisticRegressionModel}, d, n,
     # ∇f_sub_cv_var = var.(eachcol(∇²f_sub_samples))
     # ∇f_sub_cv_exp .- ∇²f!(out, β_true, v)
 
-    return obj, ∇f!, ∇²f!, ∇f_sub_cv!, ∇²f_sub!, resample_indices!, set_anchor!, anchor_info
+    return obj, ∇f!, ∇²f!, ∇f_sub_cv!, ∇²f_sub!, resample_indices!, set_anchor!, anchor_info, β_true
 
 #= minibatch approach, variance is too high
     # Negative log posterior gradient: ∇f(β) = Σ0⁻¹(β-μ0) + X' (σ(Xβ) - y)

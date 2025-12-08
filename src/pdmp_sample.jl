@@ -9,9 +9,12 @@ function pdmp_sample(
         alg::PoissonTimeStrategy,
         # needs to be a separate type to determine when it's finished!
         # options: Time and/ or no.events + ess (advanced)
-        t₀::Real = 0.0, T::Real = 10_000;
+        t₀::Real = 0.0, T::Real = 10_000, t_warmup::Real = 0.0; # TODO: better default!
         progress::Bool=true
     )
+
+    # TODO: it's possible to sample to have t_warmup < T...
+    # we should always sample T + t_warmup!
 
     # TODO: this is a better design!
     # stats = StatisticCounter()
@@ -32,13 +35,31 @@ function pdmp_sample(
 
     state, grad_, alg_, cache, stats = initialize_state(flow, grad, alg, t₀, ξ₀)
 
+    validate_state(state, flow, "at initialization")
+
     TT = _trace_type(flow, alg)
     trace = TT(state, flow)
+
+    # if there is no warmup, the initial state is already fine
+    # if there is warmup, we need to set the first state to be saved as the initial state.
+    saved_first_time = t₀ == t_warmup
 
     if progress
         progress_stops = 300
         prg = ProgressMeter.Progress(progress_stops, dt = 1)
         tstop = T / progress_stops
+    end
+
+    if grad_ isa SubsampledGradient
+        last_anchor_update_t = t₀
+        anchor_update_Δt = (t_warmup - t₀) / grad_.no_anchor_updates
+        update_anchor_during_warmup = ispositive(anchor_update_Δt) && isfinite(anchor_update_Δt)
+        saved_warmup_trace_first_time = false
+        warmup_trace = update_anchor_during_warmup ? TT(state, flow) : nothing
+    else
+        last_anchor_update_t = t₀
+        anchor_update_Δt = -1
+        update_anchor_during_warmup = false
     end
 
     consecutive_reject_count = 0
@@ -47,21 +68,48 @@ function pdmp_sample(
 
         τ, event_type, meta = next_event_time(grad_, flow, alg_, state, cache, stats)
 
-        @assert ispositive(τ) "Proposed event time τ is non-positive. Sampler is stuck!"
+        @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
         needs_saving, saving_args = handle_event!(τ, grad_, flow, alg_, state, trace, cache, event_type, meta, stats)
 
         if needs_saving
-            if !isnothing(saving_args) && trace isa FactorizedTrace
-                @assert flow isa FactorizedDynamics "saving_args provided, but trace is not FactorizedTrace, flow = $(typeof(flow)), trace = $(typeof(trace))!"
-                push!(trace, state, saving_args)
-            else
-                push!(trace, state)
+
+            if state.t[] >= t_warmup
+
+                if !saved_first_time
+                    trace = TT(state, flow)
+                    saved_first_time = true
+                end
+
+                if !isnothing(saving_args) && trace isa FactorizedTrace
+                    @assert flow isa FactorizedDynamics "saving_args provided, but trace is not FactorizedTrace, flow = $(typeof(flow)), trace = $(typeof(trace))!"
+                    push!(trace, state, saving_args)
+                else
+                    push!(trace, state)
+                end
+            elseif update_anchor_during_warmup
+                if !saved_warmup_trace_first_time
+                    warmup_trace = TT(state, flow)
+                    saved_warmup_trace_first_time = true
+                end
+                if !isnothing(saving_args) && warmup_trace isa FactorizedTrace
+                    @assert flow isa FactorizedDynamics "saving_args provided, but trace is not FactorizedTrace, flow = $(typeof(flow)), trace = $(typeof(trace))!"
+                    push!(warmup_trace, state, saving_args)
+                else
+                    push!(warmup_trace, state)
+                end
             end
         end
 
-        # let's do this only once per iteration
-        grad_ isa SubsampledGradient && grad_.resample_indices!(grad_.nsub)
+        # let's do this only once per event
+        if grad_ isa SubsampledGradient
+            grad_.resample_indices!(grad_.nsub)
+
+            if update_anchor_during_warmup && state.t[] <= t_warmup && state.t[] - last_anchor_update_t >= anchor_update_Δt
+                last_anchor_update_t = state.t[]
+                grad_.update_anchor!(warmup_trace)
+            end
+        end
 
         if stats.last_rejected
             consecutive_reject_count += 1
@@ -139,7 +187,8 @@ function initialize_cache(flow::ZigZag, ::CoordinateWiseGradient, thinningstrate
     for i in eachindex(ξ.x)
         abc_i = ab_i(i, ξ, thinningstrategy, flow, nothing)
         t_event = t + poisson_time(abc_i[1], abc_i[2], rand())
-        enqueue!(pq, i => t_event)
+        # enqueue!(pq, i => t_event)
+        push!(pq, i => t_event)
     end
 
     return (; pq)
@@ -177,12 +226,20 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
             # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
         else
 
-            ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
+            # sometimes we can obtain this from the meta information
+            # for example for gridthinning
+            if meta isa NamedTuple && haskey(meta, :∇ϕx)
+                ∇ϕx = meta.∇ϕx
+            else
+                ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
+            end
 
             # meta == abc for ThinningStrategy
             if accept_reflection_event(alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
                 stats.reflections_accepted += 1
+                # @show "before reflect", state, ∇ϕx, flow, cache
                 saving_args = reflect!(state, ∇ϕx, flow, cache)
+                # @show "after reflect", state
                 needs_saving = true
 
                 alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
@@ -198,7 +255,9 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
     elseif event_type == :refresh
 
         # meta == nothing for ThinningStrategy
+        # @show "before refresh", state
         refresh_velocity!(state, flow)
+        # @show "after refresh", state
         # saving_args = nothing # could be informed by the refresh function?
         needs_saving = true
         stats.refreshment_events += 1
@@ -287,12 +346,14 @@ function handle_event!(τ::Real, gradient_strategy::CoordinateWiseGradient, flow
             # we recalculate all bounds with the fully updated state (t, x, θ).
             abc_i_new = ab_i(i, ξ, alg, flow, nothing)
             t_event = state.t[] + poisson_time(abc_i_new[1], abc_i_new[2], rand())
-            enqueue!(pq, i => t_event)
+            # enqueue!(pq, i => t_event)
+            push!(pq, i => t_event)
         end
     else
         abc_i₀_new = ab_i(i₀, ξ, alg, flow, nothing)
         t_event = state.t[] + poisson_time(abc_i₀_new[1], abc_i₀_new[2], rand())
-        enqueue!(pq, i₀ => t_event)
+        # enqueue!(pq, i₀ => t_event)
+        push!(pq, i₀ => t_event)
     end
 
     return needs_saving, saving_args

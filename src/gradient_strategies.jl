@@ -4,17 +4,23 @@ struct FullGradient{F} <: GlobalGradientStrategy
 end
 
 
-struct SubsampledGradient{F1, F2} <: GlobalGradientStrategy
+struct SubsampledGradient{F1, F2, F3} <: GlobalGradientStrategy
     f::F1
     resample_indices!::F2
+    update_anchor!::F3
     nsub::Int
+    no_anchor_updates::Int
 end
+
+# temporary backwards compatibility constructor for now
+SubsampledGradient(f::F1, resample_indices!::F2, nsub::Int) where {F1, F2} =
+    SubsampledGradient(f, resample_indices!, (trace) -> nothing, nsub, 0)
 
 struct CoordinateWiseGradient{F} <: CoordinateWiseGradientStrategy
     f::F
 end
 with_stats(grad::FullGradient,       stats::StatisticCounter) = FullGradient(with_stats(grad.f, stats))
-with_stats(grad::SubsampledGradient, stats::StatisticCounter) = SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.nsub)
+with_stats(grad::SubsampledGradient, stats::StatisticCounter) = SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.nsub, grad.no_anchor_updates)
 with_stats(grad::CoordinateWiseGradient, stats::StatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))
 
 function with_stats(f::Function, stats::StatisticCounter)

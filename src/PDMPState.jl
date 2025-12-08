@@ -39,6 +39,16 @@ Base.copy(state::StickyPDMPState) = StickyPDMPState(Ref(state.t[]), copy(state.�
 function reflect!(state::AbstractPDMPState, ∇ϕ::AbstractVector, flow::ContinuousDynamics, cache)
     reflect!(state.ξ, ∇ϕ, flow, cache)
 end
+
+# TODO: this breaks ZigZag, but fixes BouncyParticle & Boomerang?
+# the logic for these kinds of subflow/ substate needs to be rethought properly...
+# there could be a generic fallback, but for the best performance each flow should perhaps implement something custom
+# a generic fallback would also need "subflow", i.e., for the boomerang..., so this is nontrivial.
+# function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::ContinuousDynamics, cache)
+#     # this does not work in general! we'd need some kind of sub-cache here as well...
+#     reflect!(substate(state), view(∇ϕ, state.free), flow, cache)
+# end
+
 function reflect!(state::AbstractPDMPState, ∇ϕ::Real, i::Integer, flow::ContinuousDynamics)
     # assumes that the algorithm always suggest a valid non-sticking i
     reflect!(state.ξ, ∇ϕ, i, flow)

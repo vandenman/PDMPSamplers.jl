@@ -55,7 +55,7 @@ get_bounds(b::GlobalBounds) = FillArrays.Fill(b.c, b.d)
 ab(          ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab(     ξ, get_bounds(c), flow, cache)
 ab_i(i::Int, ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab_i(i, ξ, get_bounds(c), flow, cache)
 
-function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::ThinningStrategy, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter)
 
     # t = state.t[]
     ξ = state.ξ

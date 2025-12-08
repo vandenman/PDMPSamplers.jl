@@ -46,7 +46,8 @@ end
 
 # this signature is a bit ugly, but avoids some errors...
 function move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag)
-    LinearAlgebra.axpy!(τ, ξ.θ, ξ.x)
+    # LinearAlgebra.axpy!(τ, ξ.θ, ξ.x)
+    ξ.x .+= τ .* ξ.θ
 end
 
 # fallbacks for AD (mostly ForwardDiff) that allocates new arrays

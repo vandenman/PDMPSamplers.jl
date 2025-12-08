@@ -265,6 +265,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
         # TODO: maybe we need to update other freezing times here as well
 
     end
+    validate_state(state, flow, "after stick_or_unstick! at index $i")
 end
 
 function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
@@ -275,16 +276,57 @@ function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics,
 
     tᶠ, i = findmin(sticky_time) # could be implemented with a queue or a MinHeap
     # non_sticky_state = PDMPState(state.t, state.ξ) # or substate, but that messes with dimensionality
+
+
     if any(state.free)
         # only propose reflection/ refreshment times when at least one parameter is free
-        τ, event_type, meta = next_event_time(grad, flow, inner_alg_state, state, cache, stats)
+        # max_horizon = tᶠ - t
+        # if iszero(max_horizon)
+        #     # sticky event happens now
+        #     return 0.0, :sticky, i
+        # end
+
+        # TODO: this could be written in a cleaner way!
+        # τ, event_type, meta = if inner_alg_state isa GridAdaptiveState
+        #     # Pass max_horizon to GridThinning
+
+        #     if iszero(max_horizon)
+        #         @show max_horizon, state, sticky_time, tᶠ, t
+        #         max_horizon = Inf
+        #     end
+        #     next_event_time(grad, flow, inner_alg_state, state, cache, stats, 5 * max_horizon)
+        # else
+        #     next_event_time(grad, flow, inner_alg_state, state, cache, stats)
+        # end
+        # @show τ
+
+                # Sample refresh time independently at the sticky level
+        λ_refresh = flow.λref
+        τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+        tʳ = t + τ_refresh
+
+        τ, event_type, meta = next_event_time(grad, flow, inner_alg_state, state, cache, stats, Inf, false)
+
         t′ = t + τ
-        if tᶠ < t′
+
+        if tᶠ < t′ && tᶠ < tʳ #  sticky event happens first
             Δt = tᶠ - t
+            # iszero(Δt) && @warn "Sticky event time equals current time t = $t. This may lead to infinite loops."
             return Δt, :sticky, i
+        elseif tʳ < t′# && tʳ < tᶠ
+            return τ_refresh, :refresh, (; ∇ϕx = similar(state.ξ.x, 0))
         else
             return τ, event_type, meta
         end
+
+        # original
+        # if tᶠ < t′
+        #     Δt = tᶠ - t
+        #     # iszero(Δt) && @warn "Sticky event time equals current time t = $t. This may lead to infinite loops."
+        #     return Δt, :sticky, i
+        # else
+        #     return τ, event_type, meta
+        # end
     else
         Δt = tᶠ - t
         return Δt, :sticky, i

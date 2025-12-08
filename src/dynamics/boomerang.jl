@@ -18,7 +18,7 @@ function Boomerang(Γ, μ, λ = 0.1; ρ=0.0)
     end
 end
 Boomerang(d::Integer) = Boomerang(I(d), zeros(d), 0.1)
-
+Boomerang(d::Integer, λref::Real) = Boomerang(I(d), zeros(d), λref)
 
 initialize_velocity(flow::Boomerang, d::Integer) = refresh_velocity!(Vector{Float64}(undef, d), flow)
 
@@ -80,6 +80,12 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::Boomerang, cac
     # θ
     return nothing
 end
+
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::Boomerang, cache)
+    # this does not work in general! we'd need some kind of sub-cache here as well...
+    reflect!(substate(state), view(∇ϕ, state.free), flow, cache)
+end
+
 
 function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::Boomerang)
     state.t[] += τ

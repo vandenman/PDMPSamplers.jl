@@ -20,18 +20,23 @@ function BouncyParticle(Γ, μ, λref = 0.1; ρ=0.0)
 end
 
 BouncyParticle(d::Integer) = BouncyParticle(I(d), zeros(d), 0.1)
+BouncyParticle(d::Integer, λref::Real) = BouncyParticle(I(d), zeros(d), λref)
 
-move_forward_time!(ξ::SkeletonPoint, τ::Real, ::BouncyParticle) = LinearAlgebra.axpy!(τ, ξ.θ, ξ.x)
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, ::BouncyParticle)
+    # LinearAlgebra.axpy!(τ, ξ.θ, ξ.x)
+    ξ.x .+= τ .* ξ.θ
+end
 
-function move_forward_time!(state::PDMPState, τ::Real, ::BouncyParticle)
+function move_forward_time!(state::PDMPState, τ::Real, flow::BouncyParticle)
     state.t[] += τ
-    state.ξ.x .+= τ .* state.ξ.θ
+    move_forward_time!(state.ξ, τ, flow)
+    # state.ξ.x .+= τ .* state.ξ.θ
     # LinearAlgebra.axpy!(τ, state.ξ.θ, state.ξ.x)
     state
 end
-function move_forward_time!(state::StickyPDMPState, τ::Real, ::BouncyParticle)
+function move_forward_time!(state::StickyPDMPState, τ::Real, flow::BouncyParticle)
     state.t[] += τ
-    state.ξ.x .+= τ .* state.ξ.θ
+    move_forward_time!(state.ξ, τ, flow)
     # LinearAlgebra.axpy!(τ, state.ξ.θ, state.ξ.x)
     state
 end
@@ -48,11 +53,17 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, ::BouncyParticle, ca
     if ispositive(grad_norm_sq) # isn't this always true? unless ∇ϕ is zero?? and there is probability zero to be there?
         reflection_coeff = 2 * dot(θ, ∇ϕ) / grad_norm_sq
         θ .-= reflection_coeff .* ∇ϕ # use axpy!
-        θ1 = θ .- reflection_coeff .* ∇ϕ
+        # LinearAlgebra.axpy!(-reflection_coeff, ∇ϕ, θ)
+        # θ1 = θ .- reflection_coeff .* ∇ϕ
     end
 
     return nothing
     # θ2 = θ .- (2*dot(∇ϕ, θ)/normsq(flow.L\∇ϕ))*(flow.L'\(flow.L\∇ϕ))
+end
+
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache)
+    # this does not work in general! we'd need some kind of sub-cache here as well...
+    reflect!(substate(state), view(∇ϕ, state.free), flow, cache)
 end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))

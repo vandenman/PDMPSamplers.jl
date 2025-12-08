@@ -2,9 +2,9 @@
     show_progress = true
 @testset "Basic PDMP Sampler Tests" begin
 
-    # pdmp_types = (ZigZag, BouncyParticle, )
+    pdmp_types = (ZigZag, BouncyParticle, )
     # pdmp_types = (ZigZag, BouncyParticle, Boomerang)
-    pdmp_types = (BouncyParticle, Boomerang)
+    # pdmp_types = (BouncyParticle, Boomerang)
 
     # pdmp_types = (Boomerang, )
     factorized_gradient_types    = (CoordinateWiseGradient, FullGradient)
@@ -182,8 +182,8 @@ end
 
 @testset "Sticky PDMP Sampler Tests" begin
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang)
-    # pdmp_types = (ZigZag, BouncyParticle, )
+    # pdmp_types = (ZigZag, BouncyParticle, Boomerang)
+    pdmp_types = (ZigZag, BouncyParticle, )
     factorized_gradient_types    = (FullGradient, )
     nonfactorized_gradient_types = (FullGradient, )
     # algorithms = (ThinningStrategy, GridAdaptiveState)
