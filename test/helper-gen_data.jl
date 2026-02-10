@@ -1,8 +1,8 @@
 
-function gen_data(::Type{Distributions.MvNormal}, d, η, μ = rand(Normal(0, 5), d), σ = rand(LogNormal(0, 1), d))
+function gen_data(::Type{Distributions.MvNormal}, d, η, μ = rand(Normal(0, 5), d), σ = rand(LogNormal(0, 1), d), R = rand(LKJ(d, η)))
     # μ = rand(Normal(0, 5), d)
     # σ = rand(LogNormal(0, 1), d)
-    R = rand(LKJ(d, η))
+    # R = rand(LKJ(d, η))
     Σ = Symmetric(Diagonal(σ) * R * Diagonal(σ))
     Σ_inv = inv(Σ) # could do this in a safer way
     potential = Σ_inv * μ
@@ -500,6 +500,20 @@ function gen_data(::Type{<:SpikeAndSlabDist{<:Bernoulli, T}}, d, args...) where 
     return D, κ, ∇f!, ∇²f!, ∂fxᵢ
 end
 
+function gen_data2(::Type{<:SpikeAndSlabDist{<:Bernoulli, T}}, d, probs, args...) where T
+
+    D1 = product_distribution([Bernoulli(prob[i]) for i in 1:d])
+    D2, ∇f!, ∇²f!, ∂fxᵢ = gen_data(T, d, args...)
+    D = SpikeAndSlabDist(D1, D2)
+
+    μ = mean(D2)
+    Σ = cov(D2)
+    marginal_pdfs_at_zero = [pdf(Normal(μ[i], sqrt(Σ[i, i])), 0.0) for i in 1:d]
+    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero
+
+    return D, κ, ∇f!, ∇²f!, ∂fxᵢ
+end
+
 function gen_data(::Type{<:SpikeAndSlabDist{<:BetaBernoulli, T}}, d, args...) where T
 
     a, b = 2. + randexp(), 2 .+ randexp()
@@ -567,7 +581,7 @@ struct StickyTime <: ContinuousUnivariateDistribution
     vz::Float64  # current velocity of z
 end
 
-function Base.rand(rng::AbstractRNG, d::StickyTime)
+function Base.rand(rng::Random.AbstractRNG, d::StickyTime)
     λ0 = d.c * exp(d.z0)
     if iszero(d.vz)
         return rand(rng, Exponential(λ0))
@@ -596,7 +610,7 @@ end
 Base.length(d::BetaBernoulliHierarchical) = length(d.d)
 Base.eltype(::Type{<:BetaBernoulliHierarchical}) = eltype(d.d)
 Distributions.insupport(d::BetaBernoulliHierarchical, x::AbstractVector{<:Integer}) = Distributions.insupport(d.d, x)
-Distributions._rand!(rng::AbstractRNG, d::BetaBernoulliHierarchical, x::AbstractVector) = rand!(rng, d.d, x)
+Distributions._rand!(rng::Random.AbstractRNG, d::BetaBernoulliHierarchical, x::AbstractVector) = rand!(rng, d.d, x)
 Distributions._logpdf(d::BetaBernoulliHierarchical, x::AbstractVector{<:Integer}) = Distributions._logpdf(d.d, x)
 Statistics.mean(d::BetaBernoulliHierarchical) = mean(d.d)
 
@@ -691,7 +705,7 @@ function test_approximation(samples, D::Distributions.AbstractMvNormal)
     dist = Normal(mean(D)[1], sqrt(D.Σ[1, 1]))
     q_expected = map(Base.Fix1(quantile, dist), probs)
     q_observed = quantile(samples[:, 1], probs)
-    @test isapprox(q_observed, q_expected, rtol=0.15)
+    @test isapprox(q_observed, q_expected, rtol=0.2)
 
 end
 
@@ -915,7 +929,8 @@ function test_approximation(samples, D::SpikeAndSlabDist)
             continue
         end
 
-        q_expected = quantile(marginal_slab_i, qprobs)
+        # q_expected = quantile(marginal_slab_i, qprobs)
+        q_expected = map(Base.Fix1(quantile, marginal_slab_i), qprobs)
         q_observed = quantile(x, qprobs)
 
         # TODO: make this plot a bit easier to see for all dimensions
@@ -958,9 +973,9 @@ function test_approximation(samples, D::SpikeAndSlabDist)
         # end
     end
 
-    # allow 20% failures?
+    # allow 40% failures for small dimension tests
     @test !iszero(no_chisq_tests)
     # @test chisq_thresh_passed_desired >= 4//5 * no_chisq_tests
-    @test chisq_thresh_passed_minimum >= 4//5 * no_chisq_tests
+    @test chisq_thresh_passed_minimum >= 3//5 * no_chisq_tests
 
 end

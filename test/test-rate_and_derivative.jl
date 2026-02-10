@@ -1,4 +1,3 @@
-# broken until Mooncake works with Julia 1.12
 @testset "Test get_rate_and_deriv against ad" begin
 
 
@@ -15,7 +14,7 @@
         λ(state.ξ, ∇ϕ, flow)
     end
 
-    pdmp_type = ZigZag
+    # pdmp_type = ZigZag
     pdmp_types = (ZigZag, BouncyParticle, Boomerang)
 
     # TODO: fix this for the Boomerang!
@@ -33,6 +32,8 @@
         state = PDMPState(0.0, ξ)
         cache = PDMPSamplers.add_gradient_to_cache(PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(1.0, 5)), 0.0, ξ), ξ)
 
+        # xvals = sort!(rand(0:.01:10, 25))
+        # issue with this test is compilation speed of Mooncake, not runtime
         xvals = 0:.01:10
 
         f = t->rate_fun(t, x, θ, grad, flow, cache)

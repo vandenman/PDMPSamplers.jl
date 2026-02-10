@@ -43,19 +43,38 @@ end
 
 initialize_velocity(::BouncyParticle, d::Integer) = randn(d)
 refresh_velocity!(ξ::SkeletonPoint, ::BouncyParticle) = randn!(ξ.θ)
+refresh_rate(flow::BouncyParticle) = flow.λref
 
 
 # BPS reflection: bounce against the gradient hyperplane
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, ::BouncyParticle, cache)
     θ = ξ.θ
     # Reflect: v_new = v - 2(v·n̂)n̂ where n̂ = ∇ϕ/||∇ϕ||
-    grad_norm_sq = sum(abs2, ∇ϕ)
-    if ispositive(grad_norm_sq) # isn't this always true? unless ∇ϕ is zero?? and there is probability zero to be there?
-        reflection_coeff = 2 * dot(θ, ∇ϕ) / grad_norm_sq
-        θ .-= reflection_coeff .* ∇ϕ # use axpy!
-        # LinearAlgebra.axpy!(-reflection_coeff, ∇ϕ, θ)
-        # θ1 = θ .- reflection_coeff .* ∇ϕ
-    end
+
+    # TODO: this can be computed more numerically stably:
+    # view ∇ϕ as norm times unit vector and then simplify
+    # z = cache.z
+    # ng = norm(∇ϕ)
+    # z .= ∇ϕ ./ ng  # Unit normal vector
+    # reflection_coeff = 2 * dot(θ, z) / ng
+    # θ .- reflection_coeff .* ∇ϕ
+    # θ .- 2 * dot(θ, ∇ϕ) / sum(abs2, θ)
+
+    z = cache.z
+    copyto!(z, ∇ϕ)
+    LinearAlgebra.normalize!(z)  # in-place normalization
+    # ng = norm(∇ϕ)
+    # z .= ∇ϕ ./ ng           # unit normal
+    coeff = 2 * dot(θ, z)
+    θ .-= coeff .* z
+
+    # grad_norm_sq = sum(abs2, ∇ϕ)
+    # if ispositive(grad_norm_sq) # isn't this always true? unless ∇ϕ is zero?? and there is probability zero to be there?
+    #     reflection_coeff = 2 * dot(θ, ∇ϕ) / grad_norm_sq
+    #     θ .-= reflection_coeff .* ∇ϕ # use axpy!
+    #     # LinearAlgebra.axpy!(-reflection_coeff, ∇ϕ, θ)
+    #     # θ1 = θ .- reflection_coeff .* ∇ϕ
+    # end
 
     return nothing
     # θ2 = θ .- (2*dot(∇ϕ, θ)/normsq(flow.L\∇ϕ))*(flow.L'\(flow.L\∇ϕ))
@@ -63,16 +82,17 @@ end
 
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache)
     # this does not work in general! we'd need some kind of sub-cache here as well...
-    reflect!(substate(state), view(∇ϕ, state.free), flow, cache)
+    subcache = (; z = view(cache.z, 1:sum(state.free)))
+    reflect!(substate(state), view(∇ϕ, state.free), flow, subcache)
 end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))
 
 
 """
-    τ = freezing_time(ξ::SkeletonPoint, flow::ZigZag, i::Integer)
+    τ = freezing_time(ξ::SkeletonPoint, flow::BouncyParticle, i::Integer)
 
-computes the hitting time of the particle to hit 0 given the position `ξ.x[i]` and the velocity `ξ.θ[i]`.
+Compute the hitting time for the particle to reach 0 given position `ξ.x[i]` and velocity `ξ.θ[i]`.
 """
 function freezing_time(ξ::SkeletonPoint, ::BouncyParticle, i::Integer)
     x = ξ.x[i]
@@ -101,7 +121,8 @@ function ab(ξ::SkeletonPoint, c::AbstractVector, flow::BouncyParticle, cache)
     a = c_val + A
     b = pos(B)
 
-    refresh_time = ispositive(flow.λref) ? rand(Exponential(inv(flow.λref))) : Inf
+    refresh_time = rand_refresh_time(flow)
+    # refresh_time = ispositive(refresh_rate(flow)) ? rand(Exponential(inv(refresh_rate(flow)))) : Inf
     # refresh_time = flow.λref > 0 ? flow.λref : Inf
     return (a, b, refresh_time)
 end

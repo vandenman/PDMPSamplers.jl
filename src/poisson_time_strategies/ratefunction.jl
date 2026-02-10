@@ -1,21 +1,24 @@
-abstract type AbstractPoissonProcess end
+# NOTE: This file is an unfinished design sketch and is NOT included in the module.
+# It is kept for reference only. The name `RateFunction` conflicts with the one in sticky.jl.
 
-struct HomogeneousPoissonProcess <: AbstractPoissonProcess
-    rate::Float64
-end
+# abstract type AbstractPoissonProcess end
 
-struct InhomogeneousPoissonProcess <: AbstractPoissonProcess
-    rate_function::Function
-end
+# struct HomogeneousPoissonProcess <: AbstractPoissonProcess
+#     rate::Float64
+# end
 
-struct RateFunction <: AbstractPoissonProcess
-     # independent priors
-     fixed_rate::Float64
-     # model contribution/ dependent spike priors
-     # could also be a vector of callables?
-     # but we could also just have 2 here for now?
-     rate_function::Vector{Function}
-end
+# struct InhomogeneousPoissonProcess <: AbstractPoissonProcess
+#     rate_function::Function
+# end
+
+# struct RateFunction <: AbstractPoissonProcess
+#      # independent priors
+#      fixed_rate::Float64
+#      # model contribution/ dependent spike priors
+#      # could also be a vector of callables?
+#      # but we could also just have 2 here for now?
+#      rate_function::Vector{Function}
+# end
 
 # There are three components to the overall rate function:
 # 1. deterministic components

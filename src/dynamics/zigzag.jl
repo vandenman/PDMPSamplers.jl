@@ -13,6 +13,7 @@ end
 ZigZag(Γ, μ, σ=(Vector(diag(Γ))).^(-0.5); λref=0.0, ρ=0.0) = ZigZag(Γ, μ, σ, λref, ρ, sqrt(1-ρ^2))
 ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
 
+refresh_rate(::ZigZag) = 0.0
 initialize_velocity(::ZigZag, d::Integer) = rand((-1., 1.), d)
 refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)

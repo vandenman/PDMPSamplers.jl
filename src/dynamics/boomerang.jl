@@ -23,6 +23,7 @@ Boomerang(d::Integer, λref::Real) = Boomerang(I(d), zeros(d), λref)
 initialize_velocity(flow::Boomerang, d::Integer) = refresh_velocity!(Vector{Float64}(undef, d), flow)
 
 # Boomerang-specific velocity refreshment (complete refresh from Gaussian)
+refresh_rate(flow::Boomerang) = flow.λref
 refresh_velocity!(ξ::SkeletonPoint, flow::Boomerang) = refresh_velocity!(ξ.θ, flow)
 refresh_velocity!(θ::AbstractVector, flow::Boomerang) = ldiv!(flow.L', randn!(θ))
 function refresh_velocity!(state::StickyPDMPState, flow::Boomerang)
@@ -186,71 +187,36 @@ end
 # end
 
 function ab(ξ::SkeletonPoint, c::AbstractVector, flow::Boomerang, cache)
-
-    x, θ = ξ.x, ξ.θ
-    μ = flow.μ
-    Γ = flow.Γ
+    # Boomerang sampler with reference Gaussian N(μ, Γ⁻¹).
+    #
+    # The CORRECTED gradient is: ∇ϕ_corrected = ∇ϕ_target - Γ(x - μ)
+    # The corrected rate is: λ(t) = max(0, ⟨∇ϕ_corrected(x(t)), θ(t)⟩)
+    #
+    # The user-provided c_val has two interpretations:
+    #
+    # 1. c_val = 0: The target matches the reference Gaussian exactly.
+    #    In this case, ∇ϕ_corrected = 0, so the bound should be 0.
+    #    Only refreshments drive exploration (correct and efficient).
+    #
+    # 2. c_val > 0: The target differs from the reference by at most c_val.
+    #    Specifically, c_val bounds max_t |⟨∇ϕ_target(x(t)) - Γ(x(t)-μ), θ(t)⟩|.
+    #    This is the bound on the CORRECTED gradient's dot product with velocity.
+    #
+    # Note: Unlike BPS/ZigZag, c_val for Boomerang should bound the deviation
+    # from the reference, not the raw target gradient.
 
     c_val = maximum(c)
 
-    x_centered = cache.z
-    Γx = cache.Γx
-    Γθ = cache.Γθ
+    # When c_val = 0, user asserts target = reference, so no bounces needed
+    # When c_val > 0, it directly bounds the corrected rate
+    a = c_val
+    b = 0.0  # No linear growth for Boomerang (periodic dynamics)
 
-
-    # For Boomerang with Gaussian target, we can compute an exact bound
-    # The rate is λ(t) = max(0, (Γ(x(t)-μ))·θ(t))
-
-    # With x(t) = (x₀-μ)cos(t) + θ₀sin(t) + μ
-    #      θ(t) = -(x₀-μ)sin(t) + θ₀cos(t)
-
-    x_centered .= x .- μ
-
-
-    # The dot product becomes:
-    # (Γ((x₀-μ)cos(t) + θ₀sin(t))) · (-(x₀-μ)sin(t) + θ₀cos(t))
-    # = (Γ(x₀-μ))·θ₀ cos²(t) + (Γθ₀)·(x₀-μ) sin²(t) +
-    #   ((Γ(x₀-μ))·(x₀-μ) - (Γθ₀)·θ₀) cos(t)sin(t)
-
-    # Γx = Γ * x_centered
-    # Γθ = Γ * θ
-    mul!(Γx, Γ, x_centered)
-    mul!(Γθ, Γ, θ)
-
-    # Coefficients of the trigonometric expansion
-    # A = dot(Γx, θ)      # coefficient of cos²(t)
-    # B = dot(Γθ, x_centered)  # coefficient of sin²(t)
-    # C = dot(Γx, x_centered) - dot(Γθ, θ)  # coefficient of cos(t)sin(t)
-
-    # CORRECTED Coefficients of the trigonometric expansion
-    A = dot(Γx, θ)
-    B = -dot(Γθ, x_centered)  # Fixed: Added minus sign
-    C = dot(Γθ, θ) - dot(Γx, x_centered) # Fixed: Swapped order
-
-    # The rate function is λ(t) = max(0, A cos²(t) + B sin²(t) + C cos(t)sin(t))
-    # This can be rewritten as λ(t) = max(0, P + Q cos(2t) + R sin(2t))
-    # where P = (A+B)/2, Q = (A-B)/2, R = C/2
-
-    P = (A + B) / 2
-    Q = (A - B) / 2
-    R = C / 2
-
-    # Maximum of P + Q cos(2t) + R sin(2t) is P + sqrt(Q² + R²)
-    max_rate = P + sqrt(Q^2 + R^2)
-
-    # The bound is max(0, max_rate)
-    a = c_val + pos(max_rate)
-    b = 0.0  # No linear growth in time
-
-    # Infiltrator.@infiltrate
-
-    refresh_time = ispositive(flow.λref) ? rand(Exponential(inv(flow.λref))) : Inf
-
-    return (a, b, refresh_time)
+    return (a, b, nothing)
 end
 
 function correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, flow::Boomerang, cache)
-    # For Boomerang dynamics, the corrected gradient is: ∇U(x) + Γ(x - μ)
+    # For Boomerang dynamics, the corrected gradient is: ∇U(x) - Γ(x - μ)
     # This ensures sampling from the correct distribution with precision Γ
     z = cache.z
     z .= x .- flow.μ

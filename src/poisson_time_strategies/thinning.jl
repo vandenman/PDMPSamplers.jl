@@ -1,10 +1,10 @@
 struct ThinningStrategy{T<:BoundStrategy} <: PoissonTimeStrategy
     c::T
 end
-_to_internal(x::PoissonTimeStrategy, args...) = x
+_to_internal(x::ThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, args...) = x
 
 function poisson_time(a::Number, u::Number)
-    a <= 0 && return Inf
+    !ispositive(a) && return Inf
     -log(u) / a
 end
 
@@ -26,7 +26,7 @@ function poisson_time(a, b, u)
     end
 end
 
-function next_time(t, abc, z = rand())
+function next_time(t, abc, z=rand())
     a, b, refresh_time = abc
     Δt = poisson_time(a, b, z)
     if Δt > refresh_time
@@ -52,13 +52,13 @@ get_bounds(b::ThinningStrategy) = get_bounds(b.c)
 get_bounds(b::BoundStrategy) = b.c
 get_bounds(b::GlobalBounds) = FillArrays.Fill(b.c, b.d)
 
-ab(          ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab(     ξ, get_bounds(c), flow, cache)
+ab(ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab(ξ, get_bounds(c), flow, cache)
 ab_i(i::Int, ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab_i(i, ξ, get_bounds(c), flow, cache)
 
-function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
-        # TODO: these only exist temporarily due to issues/ testing in gridthinning
-        ignored1::Any = nothing, ignored2::Any = nothing
-    )
+function next_event_time(::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    # TODO: these only exist temporarily due to issues/ testing in gridthinning
+    ignored1::Any=nothing, ignored2::Any=nothing
+)
 
     # t = state.t[]
     ξ = state.ξ
@@ -83,7 +83,7 @@ function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics,
     # determine the first arrival
     if reflect_time < refresh_time
         dt = reflect_time
-        event_type =  :reflect
+        event_type = :reflect
     else
         dt = refresh_time
         event_type = :refresh
@@ -94,7 +94,7 @@ function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics,
 
 end
 
-function next_event_time(::CoordinateWiseGradient, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::StatisticCounter)
+function next_event_time(::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::StatisticCounter)
     pq = cache.pq # rename for clarity
     # i₀, t_event = dequeue_pair!(pq)
     i₀, t_event = Base.popfirst!(pq)

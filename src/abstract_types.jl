@@ -10,3 +10,16 @@ abstract type CoordinateWiseGradientStrategy <: GradientStrategy end # factorize
 abstract type ContinuousDynamics end
 abstract type FactorizedDynamics    <: ContinuousDynamics end
 abstract type NonFactorizedDynamics <: ContinuousDynamics end
+
+isfactorized(flow::ContinuousDynamics) = flow isa FactorizedDynamics
+isfactorized(::Type{T}) where {T<:ContinuousDynamics} = T <: FactorizedDynamics
+
+# Preconditioner abstract type
+abstract type AbstractPreconditioner end
+
+# pdmp trace & events
+abstract type AbstractPDMPTrace end
+abstract type AbstractPDMPEvent end
+
+# adaptation
+abstract type AbstractAdapter end

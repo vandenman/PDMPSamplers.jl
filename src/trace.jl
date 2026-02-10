@@ -1,10 +1,15 @@
-_trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
-_trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
+# _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
+# _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
+# is this type stable? isfactorized depends only on the type of flow though
+_trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = isfactorized(flow) ? FactorizedTrace : PDMPTrace
+# _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
+# _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
+
 # _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = PDMPTrace
 # _trace_type(flow::FactorizedDynamics, alg::Sticky)              = FactorizedTrace
 
 
-abstract type AbstractPDMPEvent end
+
 
 struct PDMPEvent{T,X,V} <: AbstractPDMPEvent
     time::T
@@ -21,22 +26,32 @@ struct FactorizedEvent{T,U,V} <: AbstractPDMPEvent
     velocity::V
 end
 
-abstract type AbstractPDMPTrace end
-
 struct PDMPTrace{T<:PDMPEvent,U<:ContinuousDynamics} <: AbstractPDMPTrace
     events::Vector{T}
     flow::U
 end
 PDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics) = PDMPTrace([PDMPEvent(state)], flow)
+function make_empty_trace(::Type{<:PDMPTrace}, state::AbstractPDMPState, flow::ContinuousDynamics)
+    Tevent = PDMPEvent{typeof(state.t[]), typeof(state.ξ.x), typeof(state.ξ.θ)}
+    PDMPTrace(Vector{Tevent}(), flow)
+end
 
-struct FactorizedTrace{T<:FactorizedEvent, U<:FactorizedDynamics, V<:PDMPEvent} <: AbstractPDMPTrace
-    events::Vector{T}
-    flow::U
+# mutable struct FactorizedTrace{T<:FactorizedEvent, U<:FactorizedDynamics, V<:PDMPEvent} <: AbstractPDMPTrace
+mutable struct FactorizedTrace{T<:FactorizedEvent, U<:ContinuousDynamics, V<:PDMPEvent} <: AbstractPDMPTrace
+    const events::Vector{T}
+    const flow::U
     initial_state::V
 end
 function FactorizedTrace(state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(state)
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
+    # FactorizedTrace(events, flow isa PreconditionedDynamics ? flow.dynamics : flow, initial_state)
+    FactorizedTrace(events, flow, initial_state)
+end
+function make_empty_trace(::Type{<:FactorizedTrace}, state::AbstractPDMPState, flow::ContinuousDynamics)
+    initial_state = PDMPEvent(-one(state.t[]), state.ξ.x, state.ξ.θ)
+    events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
+    # FactorizedTrace(events, flow isa PreconditionedDynamics ? flow.dynamics : flow, initial_state)
     FactorizedTrace(events, flow, initial_state)
 end
 
@@ -68,7 +83,14 @@ Base.push!(trace::FactorizedTrace, event::FactorizedEvent)   = push!(trace.event
 
 function Base.push!(trace::FactorizedTrace, event::AbstractPDMPState, i::Integer)
     # TODO: this needs to figure out which index i changed... but it's much easier to have the caller provide it...
-    push!(trace.events, FactorizedEvent(i, event.t[], event.ξ.x[i], event.ξ.θ[i]))
+    if trace.initial_state.time >= zero(trace.initial_state.time)
+        push!(trace.events, FactorizedEvent(i, event.t[], event.ξ.x[i], event.ξ.θ[i]))
+    else
+        # @info "setting initial event to " event
+        trace.initial_state = PDMPEvent(event)
+    end
+    # avoid returning a type unstable value
+    return trace
 end
 
 function _to_next_event!(x::AbstractVector, θ::AbstractVector, event::PDMPEvent)
@@ -92,13 +114,13 @@ function Base.iterate(trace::AbstractPDMPTrace)
     # Start with first event
     e1 = first(trace)
     t, x, θ = e1.time, copy(e1.position), copy(e1.velocity)
-    k = (trace.flow isa FactorizedDynamics ? 1 : 2)
+    k = trace isa FactorizedTrace ? 1 : 2
     return t => copy(x), (t, x, θ, k)
 end
 
 function Base.iterate(trace::AbstractPDMPTrace, (t, x, θ, k))
     k > length(trace.events) && return nothing
-    k == length(trace.events) && return t => x, (t, x, θ, k + 1)
+    # k == length(trace.events) && return t => x, (t, x, θ, k + 1)
 
     Δt = trace.events[k].time - t
     move_forward_time!(SkeletonPoint(x, θ), Δt, trace.flow)
@@ -106,16 +128,66 @@ function Base.iterate(trace::AbstractPDMPTrace, (t, x, θ, k))
     return t => copy(x), (t, x, θ, k + 1)
 end
 
-Base.collect(FT::AbstractPDMPTrace) = collect(t=>x for (t, x) in FT)
+Base.collect(trace::AbstractPDMPTrace) = collect(t => x for (t, x) in trace)
+
+# could be a separate file from here?
+# shouldn't T1 and T2 always be identical?
+struct TraceManager{T}
+    main_trace::T
+    warmup_trace::T
+    t_warmup::Float64
+end
+function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics, alg::PoissonTimeStrategy, t_warmup::Real)
+    TT = _trace_type(flow, alg)
+    main_trace = make_empty_trace(TT, state, flow)
+    warmup_trace = make_empty_trace(TT, state, flow)
+    TraceManager(main_trace, warmup_trace, float(t_warmup))
+end
+
+get_warmup_trace(mgr::TraceManager) = mgr.warmup_trace
+get_main_trace(mgr::TraceManager)   = mgr.main_trace
+
+function record_event!(mgr::TraceManager, state, flow, args)
+    trace = state.t[] < mgr.t_warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
+    push_trace!(trace, state, flow, args)
+    return nothing
+end
+
+# Helper to handle the "Factorized" vs "Standard" check cleanly
+# function push_trace!(trace, state, flow, args)
+#     # @show args, isnothing(args)
+#     if isnothing(args)
+#         # @show "here1"
+#         push!(trace, state)
+#     else
+#         # @show "here2"
+#         # The assertion logic moves here, closer to the data
+#         @assert isfactorized(flow) "Flow/Trace mismatch"
+#         # @show trace, state, args
+#         # push!(trace, state)
+#         push!(trace, state, args)
+#     end
+# end
+
+# needs docs, at least for my future self
+push_trace!(trace, state, flow, args::Nothing) = push!(trace, state)
+push_trace!(trace::FactorizedTrace, state, flow, args::Integer) = push!(trace, state, args)
 
 Statistics.mean(trace::AbstractPDMPTrace) = _integrate(trace, Statistics.mean)
 Statistics.var( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.var, Statistics.mean(trace))
 Statistics.std( trace::AbstractPDMPTrace) = sqrt.(Statistics.var(trace))
 Statistics.cov( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.cov, Statistics.mean(trace))
-Statistics.cor( trace::AbstractPDMPTrace) = StatsBase.cov2cor!(Statistics.cov(trace))
+function Statistics.cor(trace::AbstractPDMPTrace)
+    C = Statistics.cov(trace)
+    StatsBase.cov2cor!(C, sqrt.(diag(C)))
+end
 
 # NEEDS TESTS!
 inclusion_probs(trace::AbstractPDMPTrace) = _integrate(trace, inclusion_probs)
+
+# TODO: this should actually use the flows M matrix!
+_integrate_segment(f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment(f, flow.dynamics, args...)
+
 function _integrate_segment(::typeof(inclusion_probs), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1)
 
     result = zeros(length(x0))
@@ -159,9 +231,23 @@ _integrate_segment(::typeof(Statistics.mean), ::ZigZag,         x0, x1, θ0, θ1
 _integrate_segment(::typeof(Statistics.mean), ::BouncyParticle, x0, x1, θ0, θ1, t0, t1) = x0 * (t1 - t0) + θ0 * (t1 - t0)^2 / 2
 # _integrate_segment(::typeof(Statistics.mean), ::Boomerang,      x0, x1, θ0, θ1, t0, t1) = x0 * (t1 - t0) + θ0 * (t1 - t0)^2 / 2
 
-_integrate_segment(::typeof(Statistics.var), ::ZigZag,         x0, x1, θ0, θ1, t0, t1, μ) = (-(x0 .- μ) .^ 3 + (-t0 .* θ0 .+ t1 .* θ0 .+ x0 .- μ) .^ 3) ./ (3. * θ0)
-_integrate_segment(::typeof(Statistics.var), ::BouncyParticle, x0, x1, θ0, θ1, t0, t1, μ) = (-(x0 .- μ) .^ 3 + (-t0 .* θ0 .+ t1 .* θ0 .+ x0 .- μ) .^ 3) ./ (3. * θ0)#(t0 * θ0 - t1 * θ0 - 2 * x0 + 2 * μ) * (t0 - t1) / 2
+# _integrate_segment(::typeof(Statistics.var), ::ZigZag,         x0, x1, θ0, θ1, t0, t1, μ) = (-(x0 .- μ) .^ 3 + (-t0 .* θ0 .+ t1 .* θ0 .+ x0 .- μ) .^ 3) ./ (3. * θ0)
+# _integrate_segment(::typeof(Statistics.var), ::BouncyParticle, x0, x1, θ0, θ1, t0, t1, μ) = (-(x0 .- μ) .^ 3 + (-t0 .* θ0 .+ t1 .* θ0 .+ x0 .- μ) .^ 3) ./ (3. * θ0)#(t0 * θ0 - t1 * θ0 - 2 * x0 + 2 * μ) * (t0 - t1) / 2
+function _integrate_segment(::typeof(Statistics.var), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
+    dt = t1 - t0
 
+    # 1. Center the variables
+    y0 = x0 .- μ
+
+    # 2. Integrate (y0 + θ*t)^2 from 0 to dt
+    # Expansion: y0^2 + 2*y0*θ*t + θ^2*t^2
+    # Integral:  y0^2*t + y0*θ*t^2 + θ^2*t^3/3
+
+    # Using @evalpoly for stability and speed (evaluates c0*t + c1*t^2 + ...)
+    # Note: We factor out 'dt' to keep coefficients simple
+
+    return @. dt * (y0^2 + y0 * θ0 * dt + (θ0^2 * dt^2) / 3)
+end
 
 function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
 
@@ -189,38 +275,126 @@ function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, Bouncy
     return segment_integral
 end
 
-function _integrate(trace::AbstractPDMPTrace, f::Function, args...)
+# --- Boomerang integration methods ---
+# Boomerang trajectory: x_i(s) = Δ_i cos(s) + θ_i sin(s) + μ_i, where Δ_i = x0_i - μ_i
+# ∫₀^Δt x_i(s) ds = Δ_i sin(Δt) + θ_i (1 - cos(Δt)) + μ_i Δt
+function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    μ = flow.μ
+    return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
+end
+
+function _integrate_segment(::typeof(Statistics.var), flow::Boomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
+    dt = t1 - t0
+    μ = flow.μ
+    s, c = sincos(dt)
+    s2, c2 = sincos(2dt)
+
+    result = similar(x0)
+    for i in eachindex(x0)
+        Δ = x0[i] - μ[i]
+        v = θ0[i]
+        m = μ_est[i]
+
+        # x_i(s) = Δ cos(s) + v sin(s) + μ[i]
+        # (x_i(s) - m)^2 = (Δ cos(s) + v sin(s) + μ[i] - m)^2
+        # let a = Δ, b = v, c0 = μ[i] - m
+        a = Δ
+        b = v
+        c0 = μ[i] - m
+
+        # ∫₀^dt (a cos(s) + b sin(s) + c0)^2 ds
+        # = a²/2 (dt + sin(2dt)/2) + b²/2 (dt - sin(2dt)/2) + c0² dt
+        #   + 2ab/2 (1 - cos(2dt))/2    -- wait, let me be precise:
+        #   - ab cos(2dt)/2  term from cross
+        # Expand: a²cos²(s) + b²sin²(s) + c0² + 2ab cos(s)sin(s) + 2a c0 cos(s) + 2b c0 sin(s)
+        # ∫cos²(s) ds = s/2 + sin(2s)/4
+        # ∫sin²(s) ds = s/2 - sin(2s)/4
+        # ∫cos(s)sin(s) ds = sin²(s)/2  = (1 - cos(2s))/4 ... actually = -cos(2s)/4 + const
+        # more precisely: ∫₀^dt sin(s)cos(s) ds = sin²(dt)/2
+        # ∫cos(s) ds = sin(s)
+        # ∫sin(s) ds = 1 - cos(s)
+
+        result[i] = (a^2 * (dt / 2 + s2 / 4) +
+                      b^2 * (dt / 2 - s2 / 4) +
+                      c0^2 * dt +
+                      a * b * s^2 +
+                      2 * a * c0 * s +
+                      2 * b * c0 * (1 - c))
+    end
+    return result
+end
+
+function _integrate_segment(::typeof(Statistics.cov), flow::Boomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
+    dt = t1 - t0
+    μ = flow.μ
+    d = length(x0)
+    segment_integral = zeros(d, d)
+    s, c = sincos(dt)
+    s2, c2 = sincos(2dt)
+
+    for j in 1:d, i in j:d
+        aᵢ = x0[i] - μ[i]
+        bᵢ = θ0[i]
+        cᵢ = μ[i] - μ_est[i]
+        aⱼ = x0[j] - μ[j]
+        bⱼ = θ0[j]
+        cⱼ = μ[j] - μ_est[j]
+
+        # ∫₀^dt (aᵢ cos + bᵢ sin + cᵢ)(aⱼ cos + bⱼ sin + cⱼ) ds
+        val = (aᵢ * aⱼ * (dt / 2 + s2 / 4) +
+               bᵢ * bⱼ * (dt / 2 - s2 / 4) +
+               (aᵢ * bⱼ + aⱼ * bᵢ) * s^2 / 2 +  # ∫cos sin = sin²/2, but cross has two terms
+               cᵢ * cⱼ * dt +
+               (aᵢ * cⱼ + aⱼ * cᵢ) * s +
+               (bᵢ * cⱼ + bⱼ * cᵢ) * (1 - c))
+
+        segment_integral[i, j] = val
+        segment_integral[j, i] = val
+    end
+    return segment_integral
+end
+
+function _integrate_segment(::typeof(inclusion_probs), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+    result = zeros(length(x0))
+    μ = flow.μ
+    dt = t1 - t0
+    for i in eachindex(x0)
+        # x_i(s) = (x0[i] - μ[i]) cos(s) + θ0[i] sin(s) + μ[i]
+        # x_i(s) == 0 only on a set of measure zero for most initial conditions
+        # so inclusion_probs integral = dt when the trajectory is not identically zero
+        Δ = x0[i] - μ[i]
+        v = θ0[i]
+        if !(iszero(Δ) && iszero(v) && iszero(μ[i]))
+            result[i] = dt
+        end
+    end
+    return result
+end
+
+function _integrate(trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
-    events = trace.events
-    total_time = events[end].time - events[1].time
 
-    # TODO: I think this should use a different iterator, e.g.,
-    # dt => event
-    # and then just loop?
-    # integral = _integrate_segment(f, flow, event, dt args...)
-    # not sure how to do this nicely, though,
-    # ideally we only define _integrate_segment once, but the best way is to use in-place operations...
-    # could also use a initialize function that is called once?
+    # the stuff below works for both traces, but has a few duplications
+    # this should be easier to adapt to avoid allocations though
 
-    # integral = sum(
-    #     i -> _integrate_segment(
-    #         f,
-    #         flow,
-    #         events[i].position, events[i+1].position,
-    #         events[i].velocity, events[i+1].velocity,
-    #         events[i].time,     events[i+1].time,
-    #         args...
-    #     ),
-    #     1:length(events)-1
-    # )
-
-    # the stuff below works for both traces
     iter = trace
     next = iterate(iter)
-    t₀, xt₀, θt₀, _ = next[2]
+
+    # t₀, xt₀, θt₀, _ = next[2]
+    t₀, x_state, θ_state, _ = next[2]
+    xt₀ = copy(x_state) # Copy for safety, though strictly only xt0 needs to be frozen
+    θt₀ = copy(θ_state)
+
+    start_time = t₀
     next = iterate(iter, next[2])
-    t₁, xt₁, θt₁, _ = next[2]
+    # t₁, xt₁, θt₁, _ = next[2]
+    t₁, x_state, θ_state, _ = next[2]
+    xt₁ = copy(x_state) # Copy for safety, though strictly only xt0 needs to be frozen
+    θt₁ = copy(θ_state)
+
     integral = _integrate_segment(
         f,
         flow,
@@ -229,10 +403,15 @@ function _integrate(trace::AbstractPDMPTrace, f::Function, args...)
         t₀,  t₁,
         args...
     )
-    t₀, xt₀, θt₀ = t₁, xt₁, θt₁
+    t₀ = t₁
+    copyto!(xt₀, xt₁)
+    copyto!(θt₀, θt₁)
     next = iterate(iter, next[2])
     while next !== nothing
-        t₁, xt₁, θt₁, _ = next[2]
+        # t₁, xt₁, θt₁, _ = next[2]
+        t₁, x_state, θ_state, _ = next[2]
+        copyto!(xt₁, x_state)
+        copyto!(θt₁, θ_state)
         integral .+= _integrate_segment(
             f,
             flow,
@@ -241,9 +420,14 @@ function _integrate(trace::AbstractPDMPTrace, f::Function, args...)
             t₀,  t₁,
             args...
         )
-        t₀, xt₀, θt₀ = t₁, xt₁, θt₁
+        # t₀, xt₀, θt₀ = t₁, xt₁, θt₁
+        t₀ = t₁
+        copyto!(xt₀, xt₁)
+        copyto!(θt₀, θt₁)
         next = iterate(iter, next[2])
     end
+    end_time = t₁
+    total_time = end_time - start_time
 
     return integral / total_time
 end
@@ -284,7 +468,9 @@ function Base.iterate(D::PDMPDiscretize)
     # 2. The current state of the range's iterator.
     # 3. The position (x) and velocity (θ) at the previously yielded time step.
     # 4. The index (k) of the next continuous-time event to check.
-    k = trace.flow isa FactorizedDynamics ? 1 : 2
+    # k = trace.flow isa FactorizedDynamics ? 1 : 2
+    # k = isfactorized(trace.flow) ? 1 : 2
+    k = trace isa FactorizedTrace ? 1 : 2
 
     iterator_state = (t_range, range_iterator_state, x, θ, k)
 
@@ -317,7 +503,7 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
             t_current = _to_next_event!(x_current, θ_current, trace.events[k_current])
             k_current += 1
         end
-        k_current = max(1, k_current - 1) # step back to the last processed event
+        # do NOT step back for FactorizedTrace: each event was already applied via move_forward_time!
     else
         # for the other case, we can skip to the last one directly once we find it.
         # this could also be searchsortedlast or so? but not sure if that's faster
@@ -332,7 +518,7 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
     # 4. Evolve the state from the time of the last processed event up to t_new
     Δt_final = t_new - t_current
     @assert Δt_final >= 0 "Should be impossible!"
-    if Δt_final > 0
+    if ispositive(Δt_final)
         move_forward_time!(ξ, Δt_final, trace.flow)
     end
 

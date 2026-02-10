@@ -84,7 +84,7 @@ recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integer) = pcb
 # end
 
 function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function(x)
+    return function (x)
         compute_gradient!(x, θ, gradient_strategy, flow, cache)
         # compute_gradient_uncorrected!(x, θ, gradient_strategy, flow, cache)
     end
@@ -94,7 +94,7 @@ function make_grad_U_func(state::AbstractPDMPState, flow::ContinuousDynamics, gr
 end
 
 function make_hvp_func(flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function(x, θ)
+    return function (x, θ)
         dot(compute_gradient!(x, θ, gradient_strategy, flow, cache), θ)
         # dot(compute_gradient_uncorrected!(x, θ, gradient_strategy, flow, cache), θ)
     end
@@ -106,7 +106,7 @@ end
 
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics,
-    grad_and_hess_or_grad_and_hvp::Union{Function, NTuple{2, Function}}, add_rate::Bool = true)
+    grad_and_hess_or_grad_and_hvp::Union{Function,NTuple{2,Function}}, add_rate::Bool=true)
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
@@ -149,43 +149,38 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     end
 end
 
-function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool = true)
+function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool=true)
     construct_upper_bound!(pcb, PDMPState(0.0, ξ), flow, ∇U!, use_hvp)
 end
 function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, flow::ContinuousDynamics, ∇U!::Function,
-    use_hvp::Bool = true)
+    use_hvp::Bool=true)
+
+    @assert use_hvp "Only HVP mode is supported"
 
     g = similar(state.ξ.x)
-    if use_hvp
-
-        out = similar(g)
-        ∇U = Base.Fix1(∇U!, out)
-        f = (x, v) -> dot(∇U(x), v)
-        prep = DI.prepare_gradient(f, DI.AutoMooncake(), g, DI.Constant(copy(g)))
-        hvp(x, v) = DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
-
-        return construct_upper_bound_grad_and_hess!(pcb, state, flow, (∇U, hvp))
-
-    else
-
-        jac = similar(g, length(g), length(g))
-        prep = DI.prepare_jacobian(∇U!, g, DI.AutoMooncake(), g)
-        grad_and_hess(x) = DI.value_and_jacobian!(∇U!, g, jac, prep, DI.AutoMooncake(), x)
-        return construct_upper_bound_grad_and_hess!(pcb, state, flow, grad_and_hess)
+    out = similar(g)
+    ∇U = Base.Fix1(∇U!, out)
+    f = (x, v) -> dot(∇U(x), v)
+    prep = DI.prepare_gradient(f, DI.AutoMooncake(), g, DI.Constant(copy(g)))
+    
+    # Avoid boxing prep by wrapping it in a struct or passing it explicitly
+    hvp = let prep = prep, g = g, f = f
+        (x, v) -> DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
     end
 
+    return construct_upper_bound_grad_and_hess!(pcb, state, flow, (∇U, hvp))
 end
 
 # helper functions for λ(t) and λ'(t) ---
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::NTuple{2, Function}, add_rate::Bool = true)
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::NTuple{2,Function}, add_rate::Bool=true)
 
     xt, vt = state.ξ.x, state.ξ.θ  # state already moved to time t
 
-    ∇U_xt   = grad(xt)
-    Hxt_vt  = hvp(xt, vt)  # Hessian-vector product
+    ∇U_xt = grad(xt)
+    Hxt_vt = hvp(xt, vt)  # Hessian-vector product
 
     # base rate (before positive-part)
-    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? flow.λref : 0.0)
+    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
 
     # @show ∇U_xt,  Hxt_vt, f_t
 
@@ -217,18 +212,18 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
         # @show f_prime_t, vdot, dot(vdot, ∇U_xt)
         f_prime_t += dot(vdot, ∇U_xt)
 
-    elseif !(flow isa ZigZag || flow isa BouncyParticle)
+    elseif !(flow isa ZigZag || flow isa BouncyParticle || flow isa PreconditionedDynamics{<:Any,<:Union{BouncyParticle,ZigZag}})
         throw(ArgumentError("Unsupported flow type!"))
     end
 
-    rate       = pos(f_t)
+    rate = pos(f_t)
     rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 
     return rate, rate_deriv
 
 end
 
-function propose_event_time(pcb::PiecewiseConstantBound, u::Real = rand(Exponential()), refresh_rate::Real = 0.0)
+function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponential()), refresh_rate::Real=0.0)
 
     area_before = zero(eltype(pcb.Λ_vals))
     segment_idx = 0
@@ -246,7 +241,7 @@ function propose_event_time(pcb::PiecewiseConstantBound, u::Real = rand(Exponent
         return (Inf, 0.0)
     end
 
-     # Get the properties of this segment
+    # Get the properties of this segment
     t_start = pcb.t_grid[segment_idx]
     Λ_val = pcb.Λ_vals[segment_idx]
 
@@ -267,56 +262,57 @@ end
 # TODO: there two possible algorithmic optimizations
 # 1. non-equidistant grid points/ adaptive grid ala https://github.com/sschuldenzucker/ParametricAdaptiveSampling.jl
 # 2. use Rational for α⁺ and α⁻. E.g,. when α⁻ = 1 // 2, we can reuse 50% of the previous grid evaluations. Assumes equidistant points though
-Base.@kwdef struct GridThinningStrategy{T<:ADTypes.AbstractADType, U<:Union{Nothing, Function}} <: PoissonTimeStrategy
-    N::Int            = 30  # Number of grid points
-    t_max::Float64    = 2.0 # Initial horizon
-    α⁺::Float64       = 1.5 # Factor to increase t_max
-    α⁻::Float64       = 0.5 # Factor to decrease t_max
-    adtype::T         = DI.AutoMooncake() # Automatic differentiation type
+Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
+    N::Int = 30  # Number of grid points
+    t_max::Float64 = 2.0 # Initial horizon
+    α⁺::Float64 = 1.5 # Factor to increase t_max
+    α⁻::Float64 = 0.5 # Factor to decrease t_max
     safety_limit::Int = 500
-    hvp::U            = nothing # HVP function, if available
+    # adtype::T = DI.AutoMooncake() # Automatic differentiation type
+    # hvp::U = nothing # HVP function, if available
 end
 
-function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
 
-    t = state.t[]
-    ξ = state.ξ
+    # t = state.t[]
+    # ξ = state.ξ
+    # g = similar(ξ.x)
+
+    # if isnothing(strat.hvp)
+    #     f! = make_hvp_func(state, flow, gradient_strategy, cache)
+    #     prep = DI.prepare_gradient(f!, strat.adtype, ξ.x, DI.Constant(ξ.θ))
+    #     hvp = (x, θ) -> begin
+    #         stats.∇²f_calls += 1
+    #         DI.gradient!(f!, g, prep, strat.adtype, x, DI.Constant(θ))
+    #     end
+    # else
+    #     # if state isa StickyPDMPState
+    #     #     θc = similar(ξ.θ)
+    #     #     hvp = (x, θ, free) -> begin
+    #     #         stats.∇²f_calls += 1
+    #     #         copyto!(θc, θ)
+    #     #         for i in eachindex(free)
+    #     #             if !free[i]
+    #     #                 θc[i] = zero(eltype(θc)) # Set frozen coordinates to zero
+    #     #             end
+    #     #         end
+    #     #         strat.hvp(g, x, θc)
+    #     #         for i in eachindex(free)
+    #     #             if !free[i]
+    #     #                 g[i] = zero(eltype(g))
+    #     #             end
+    #     #         end
+    #     #         return g
+    #     #     end
+    #     # else
+    #     hvp = (x, θ) -> begin
+    #         stats.∇²f_calls += 1
+    #         strat.hvp(g, x, θ)
+    #     end
+    #     # end
+    # end
+
     T = typeof(strat.t_max)
-    g = similar(ξ.x)
-
-    if isnothing(strat.hvp)
-        f! = make_hvp_func(state, flow, gradient_strategy, cache)
-        prep = DI.prepare_gradient(f!, strat.adtype, ξ.x, DI.Constant(ξ.θ))
-        hvp = (x, θ) -> begin
-            stats.∇²f_calls += 1
-            DI.gradient!(f!, g, prep, strat.adtype, x, DI.Constant(θ))
-        end
-    else
-        # if state isa StickyPDMPState
-        #     θc = similar(ξ.θ)
-        #     hvp = (x, θ, free) -> begin
-        #         stats.∇²f_calls += 1
-        #         copyto!(θc, θ)
-        #         for i in eachindex(free)
-        #             if !free[i]
-        #                 θc[i] = zero(eltype(θc)) # Set frozen coordinates to zero
-        #             end
-        #         end
-        #         strat.hvp(g, x, θc)
-        #         for i in eachindex(free)
-        #             if !free[i]
-        #                 g[i] = zero(eltype(g))
-        #             end
-        #         end
-        #         return g
-        #     end
-        # else
-            hvp = (x, θ) -> begin
-                stats.∇²f_calls += 1
-                strat.hvp(g, x, θ)
-            end
-        # end
-    end
 
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, strat.N + 1)), zeros(T, strat.N)),
@@ -324,14 +320,14 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, gra
         Base.RefValue{Float64}(strat.t_max),
         strat.α⁺,
         strat.α⁻,
-        strat.safety_limit,
-        hvp
+        strat.safety_limit
+        # hvp
     )
 
 end
 
 # internal state
-struct GridAdaptiveState{T} <: PoissonTimeStrategy # should technically substype something else but oh well
+struct GridAdaptiveState <: PoissonTimeStrategy # should technically substype something else but oh well
     pcb::PiecewiseConstantBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
@@ -342,15 +338,15 @@ struct GridAdaptiveState{T} <: PoissonTimeStrategy # should technically substype
     # prep::T                 # AD prep
     # backend::U              # AD backend
     safety_limit::Int
-    hvp::T
+    # hvp::T
 
 end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
 
 
-function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
-    max_horizon::Float64 = Inf, include_refresh::Bool = true)
+function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    max_horizon::Float64=Inf, include_refresh::Bool=true)
 
     # TODO: need to rethink the logic once more
     # ghost events also allow for separating the logic w.r.t. other events
@@ -369,22 +365,18 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
     state2_ = copy(state)
     total_time = 0.0
 
-    hvp_func = alg.hvp
-    # if state isa PDMPState
-    #     hvp_func = hvp_func0
-    # elseif state isa StickyPDMPState
-    #     hvp_func = (x, θ) -> hvp_func0(x, θ, state.free)
-    # end
-    grad_func = make_grad_U_func(state_, flow, gradient_strategy, cache)
+    # TODO: can't this be done easier?
+    grad_func = make_grad_U_func(state_, flow, model.grad, cache)
+    hvp_func = model.hvp
     grad_and_hvp = (grad_func, hvp_func)
 
-    λ_refresh = include_refresh ? flow.λref : zero(flow.λref)
+    λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
     # Sample refresh time independently once -- does not work!
     # time_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
 
     # ensure the return type is type-stable
-    default_return = (; ∇ϕx = similar(state.ξ.x, 0))
+    default_return = (; ∇ϕx=similar(state.ξ.x, 0))
 
     # use the minimum of algorithm's horizon and provided max_horizon (e.g., sticky time)
     # effective_t_max = min(alg.t_max[], max_horizon)
@@ -415,19 +407,21 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
         # Check if the proposal is beyond the horizon
 
         if τ_reflection >= alg.t_max[]
-        # if τ_reflection >= effective_t_max
+            # if τ_reflection >= effective_t_max
 
             if τ_refresh < alg.t_max[]
-            # if τ_refresh < effective_t_max
+                # if τ_refresh < effective_t_max
                 return τ_refresh + total_time, :refresh, default_return
             end
 
 
             # if isinf(max_horizon)
-                t_max = alg.t_max[]
-                alg.t_max[] *= alg.α⁺[]
-                recompute_time_grid!(alg)
-                # effective_t_max = alg.t_max[]
+            t_max = alg.t_max[]
+            # Cap t_max to prevent overflow to Inf
+            new_t_max = alg.t_max[] * alg.α⁺
+            alg.t_max[] = min(new_t_max, 1e10)  # Cap at 10 billion time units
+            recompute_time_grid!(alg)
+            # effective_t_max = alg.t_max[]
             # end
 
             return t_max, :horizon_hit, default_return
@@ -435,14 +429,14 @@ function next_event_time(gradient_strategy::GlobalGradientStrategy, flow::Contin
 
         end
         # @show time_refresh, τ_reflection
-         # Return whichever event happens first
+        # Return whichever event happens first
         if τ_refresh < τ_reflection
             return τ_refresh + total_time, :refresh, default_return
         end
 
         # Test reflection acceptance
         move_forward_time!(state_, τ_reflection, flow)
-        ∇ϕx = compute_gradient!(state_, gradient_strategy, flow, cache)
+        ∇ϕx = compute_gradient!(state_, model.grad, flow, cache)
 
         l_reflection = λ(state_.ξ, ∇ϕx, flow)  # Only reflection rate, no refresh
 

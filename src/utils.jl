@@ -3,7 +3,7 @@ if VERSION < v"1.13.0"
     ispositive(x::Real) = x > zero(x)
     isnegative(x::Real) = x < zero(x)
 else
-    # code for Julia ≥ 1.12
+    # code for Julia ≥ 1.13
 end
 
 pos(x) = max(zero(x), x)
@@ -24,6 +24,25 @@ end
 StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false)
 
 
+
+mutable struct HealthMonitor
+    consecutive_rejects::Int
+    const limit::Int
+    HealthMonitor(; consecutive_reject_limit=1000) = new(0, consecutive_reject_limit)
+end
+
+function check_health!(monitor::HealthMonitor, stats::StatisticCounter)
+    if stats.last_rejected
+        monitor.consecutive_rejects += 1
+    else
+        monitor.consecutive_rejects = 0
+    end
+
+    if monitor.consecutive_rejects > monitor.limit
+        # error("Stuck! Rejected $(monitor.limit) consecutive moves.")
+        error("The algorithm rejected $(monitor.limit) consecutive proposals. Check the algorithm and model settings.")
+    end
+end
 
 # TODO: remove these!
 function idot(A, j, x)

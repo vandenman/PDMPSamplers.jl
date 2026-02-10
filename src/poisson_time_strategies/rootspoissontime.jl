@@ -73,9 +73,29 @@ mutable struct IntegralCache
 end
 function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, atol=1e-9)
     ic = IntegralCache(0.0, 0.0, Inf, Inf, Inf, Inf)  # only left at (0,0) initially
-
+    state_s = copy(state)
+    
+    # Define rate function outside to avoid boxing
+    ratefun = let state = state, state_s = state_s, grad = grad, flow = flow, cache = cache, λ = λ
+        function (s)
+            # reset temporary
+            state_s.t[] = state.t[]
+            copyto!(state_s.ξ, state.ξ)
+            move_forward_time!(state_s, s, flow)
+            ∇ϕ = compute_gradient!(state_s, grad, flow, cache)
+            # if any(isnan, ∇ϕ)
+            #     @show state_s.t[], s, state.ξ.x, state.ξ.θ
+            #     @assert any(isnan, ∇ϕ) "problem at state [$(state_s.t[])] "
+            # end
+            # @assert !any(isnan, state_s.ξ.x)
+            # @assert !any(isnan, state_s.ξ.θ)
+            result = λ(state_s.ξ, ∇ϕ, flow)
+            # @assert !isnan(result)
+            return result
+        end
+    end
+    
     function f(τ::Real)
-
         τ <= 0 && return -R
         # Shortcuts if τ already cached (should never happen though?)
         τ == ic.τC && return ic.IC - R
@@ -105,25 +125,6 @@ function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, a
         ic.τC, ic.IC = τ, Iτ
 
         return Iτ - R
-    end
-
-    state_s = copy(state)
-    # inline rate function with gradient call
-    function ratefun(s)
-        # reset temporary
-        state_s.t[] = state.t[]
-        copyto!(state_s.ξ, state.ξ)
-        move_forward_time!(state_s, s, flow)
-        ∇ϕ = compute_gradient!(state_s, grad, flow, cache)
-        # if any(isnan, ∇ϕ)
-        #     @show state_s.t[], s, state.ξ.x, state.ξ.θ
-        #     @assert any(isnan, ∇ϕ) "problem at state [$(state_s.t[])] "
-        # end
-        # @assert !any(isnan, state_s.ξ.x)
-        # @assert !any(isnan, state_s.ξ.θ)
-        result = λ(state_s.ξ, ∇ϕ, flow)
-        # @assert !isnan(result)
-        return result
     end
 
     memoize_dict = Dict{Float64,Float64}()
@@ -320,10 +321,11 @@ Compute next event time using root finding. Samples R ~ Exp(1) and solves
 ∫₀^τ λ(x(s), v) ds = R for τ using numerical integration (QuadGK) and
 root finding (Roots.jl).
 """
-function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics,
+function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
                         alg::RootsPoissonTimeStrategy, state::AbstractPDMPState,
                         cache, stats::StatisticCounter)
 
+    grad = model.grad
     # Compare with refresh time --  TODO: we can always use this as an upper bound for the root finding?
     τ_refresh = rand_refresh_time(flow)
 

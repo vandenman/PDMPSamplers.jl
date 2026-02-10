@@ -28,7 +28,7 @@ equals the unfreezing time.
 
 The third should return the rate of an inhomogeneous Poisson process, which is sampled through the algorithm specified by `alg`.
 """
-struct Sticky{T<:PoissonTimeStrategy, U<:Union{Function, RateFunction, AbstractVector}} <: PoissonTimeStrategy
+struct Sticky{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,AbstractVector}} <: PoissonTimeStrategy
     alg::T
     κ::U
     can_stick::BitVector
@@ -36,34 +36,33 @@ end
 Sticky(alg::PoissonTimeStrategy, κ::AbstractVector) = Sticky(alg, κ, .!isinf.(κ))
 Sticky(::PoissonTimeStrategy, ::Function) = throw(ArgumentError("When κ is a function, a can_stick vector must be provided explicitly."))
 
-struct StickyLoopState{T <: PoissonTimeStrategy, U<:Union{Function, RateFunction, AbstractVector}} <: PoissonTimeStrategy
+struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,AbstractVector}} <: PoissonTimeStrategy
     # A' could be the internal version of the wrapped algorithm
     inner_alg_state::T # this should perhaps be the more generic, i.e., _to_internal(Sticky.alg, ...)!
     κ::U
     can_stick::BitVector
     sticky_times::Vector{Float64}  # Absolute times of next freeze/unfreeze event
-    old_velocity::Vector{Float64} # Old velocity at the time of freezing
 end
 
 # this could use less memory by looking at
-function _to_internal(strat::Sticky, flow::ContinuousDynamics, grad::GradientStrategy, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::Sticky, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
 
     d = length(state.ξ)
     sticky_times = Vector{Float64}(undef, d)
 
-    internal_alg_ = _to_internal(strat.alg, flow, grad, state, cache, stats)
+    internal_alg_ = _to_internal(strat.alg, flow, model, state, cache, stats)
 
-    old_velocity = copy(state.ξ.θ)
-    # zero is problematic because the unfreeze time divides by abs(θf[i]), so divide by zero
-    if any(iszero, old_velocity)
-        old_velocity2 = initialize_velocity(flow, d)
-        for i in eachindex(old_velocity, old_velocity2)
-            if iszero(old_velocity[i])
-                old_velocity[i] = old_velocity2[i]
-            end
-        end
-    end
-    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, old_velocity)
+    # old_velocity = copy(state.ξ.θ)
+    # # zero is problematic because the unfreeze time divides by abs(θf[i]), so divide by zero
+    # if any(iszero, old_velocity)
+    #     old_velocity2 = initialize_velocity(flow, d)
+    #     for i in eachindex(old_velocity, old_velocity2)
+    #         if iszero(old_velocity[i])
+    #             old_velocity[i] = old_velocity2[i]
+    #         end
+    #     end
+    # end
+    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times)
     update_all_stick_times!(alg, state, flow)
 
     # do this once
@@ -99,13 +98,13 @@ function unfreeze_time(alg::StickyLoopState, state::StickyPDMPState, i::Integer)
         # @show κ, i, state.ξ.x, state.free
         return retval
     else
-        θf = alg.old_velocity[i]
+        θf = state.old_velocity[i]
         if isnegative(κ)
             @show κ, i, state.ξ.x, state.free
             throw(ArgumentError("κ must be non-negative!"))
         end
 
-    # return -log(rand()) / (κ * abs(θf)) # old approach
+        # return -log(rand()) / (κ * abs(θf)) # old approach
         return rand(Exponential(inv(κ * abs(θf))))
     end
 end
@@ -131,7 +130,7 @@ end
 
 computes the hitting time of the particle to hit 0 given the position `ξ.x[i]` and the velocity `ξ.θ[i]`.
 """
-function freezing_time(ξ::SkeletonPoint, ::Union{BouncyParticle, ZigZag}, i::Integer)
+function freezing_time(ξ::SkeletonPoint, ::Union{BouncyParticle,ZigZag}, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
     if θ * x >= 0
@@ -141,13 +140,13 @@ function freezing_time(ξ::SkeletonPoint, ::Union{BouncyParticle, ZigZag}, i::In
     end
 end
 
-get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy, <:AbstractVector}, i, args...)     = sticky_strat.κ[i]
-get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy, <:Function},       i, args...)     = sticky_strat.κ(i, args...)
-get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy, <:RateFunction},       i, args...) = sticky_strat.κ(i, args...)
+get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_strat.κ[i]
+get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_strat.κ(i, args...)
+get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:RateFunction}, i, args...) = sticky_strat.κ(i, args...)
 
-get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy, <:AbstractVector}, i, args...)     = sticky_state.κ[i]
-get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy, <:Function},       i, args...)     = sticky_state.κ(i, args...)
-get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy, <:RateFunction},       i, args...) = sticky_state.κ(i, args...)
+get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_state.κ[i]
+get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_state.κ(i, args...)
+get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:RateFunction}, i, args...) = sticky_state.κ(i, args...)
 
 function update_all_stick_times!(alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
 
@@ -199,7 +198,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
     t = state.t[]
     ξ = state.ξ
     sticky_times = alg.sticky_times
-    θf = alg.old_velocity
+    θf = state.old_velocity
     tol = sqrt(eps(eltype(ξ.x))) # tolerance for floating point errors in move_forward_time!, could also depend on the flow?
     if state.free[i] # if free -> stuck
 
@@ -252,7 +251,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
         @assert abs(ξ.x[i]) < tol && iszero(ξ.θ[i]) "unfreezing but not frozen: x[i] = $(ξ.x[i]) ≉ 0 or θ[i] = $(ξ.θ[i]) ≉ 0 at $(sticky_times[i]) with tol = $(tol)"# isfrozen
 
         ξ.θ[i] = θf[i] # restore speed
-        θf[i]  = zero(eltype(θf[i])) # perhaps not necessary?
+        θf[i] = zero(eltype(θf[i])) # perhaps not necessary?
         state.free[i] = true # mark as not stuck
 
         # update_all_stick_times!(alg, state, flow)
@@ -268,7 +267,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
     validate_state(state, flow, "after stick_or_unstick! at index $i")
 end
 
-function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
+function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
 
     t = state.t[]
     sticky_time = alg.sticky_times
@@ -294,18 +293,17 @@ function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics,
         #         @show max_horizon, state, sticky_time, tᶠ, t
         #         max_horizon = Inf
         #     end
-        #     next_event_time(grad, flow, inner_alg_state, state, cache, stats, 5 * max_horizon)
+        #     next_event_time(model, flow, inner_alg_state, state, cache, stats, 5 * max_horizon)
         # else
-        #     next_event_time(grad, flow, inner_alg_state, state, cache, stats)
+        #     next_event_time(model, flow, inner_alg_state, state, cache, stats)
         # end
         # @show τ
 
-                # Sample refresh time independently at the sticky level
-        λ_refresh = flow.λref
-        τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+        # Sample refresh time independently at the sticky level
+        τ_refresh = rand_refresh_time(flow)
         tʳ = t + τ_refresh
 
-        τ, event_type, meta = next_event_time(grad, flow, inner_alg_state, state, cache, stats, Inf, false)
+        τ, event_type, meta = next_event_time(model, flow, inner_alg_state, state, cache, stats, Inf, false)
 
         t′ = t + τ
 
@@ -314,7 +312,7 @@ function next_event_time(grad::GlobalGradientStrategy, flow::ContinuousDynamics,
             # iszero(Δt) && @warn "Sticky event time equals current time t = $t. This may lead to infinite loops."
             return Δt, :sticky, i
         elseif tʳ < t′# && tʳ < tᶠ
-            return τ_refresh, :refresh, (; ∇ϕx = similar(state.ξ.x, 0))
+            return τ_refresh, :refresh, (; ∇ϕx=similar(state.ξ.x, 0))
         else
             return τ, event_type, meta
         end
