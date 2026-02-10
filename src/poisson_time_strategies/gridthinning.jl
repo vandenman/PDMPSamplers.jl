@@ -106,18 +106,24 @@ end
 
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics,
-    grad_and_hess_or_grad_and_hvp::Union{Function,NTuple{2,Function}}, add_rate::Bool=true)
+    grad_and_hess_or_grad_and_hvp::Union{Function,NTuple{2,Function}}, add_rate::Bool=true;
+    cached_y0::Float64=NaN, cached_d0::Float64=NaN)
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
     N = length(Λ_vals)
-    y_vals = pcb.y_vals # similar(Λ_vals, N + 1)
-    d_vals = pcb.d_vals # similar(y_vals, N + 1)
+    y_vals = pcb.y_vals
+    d_vals = pcb.d_vals
 
-    #NOTE: asumes t_grid is sorted!
+    #NOTE: assumes t_grid is sorted!
     state_t = copy(state)
     @assert iszero(t_grid[1])
-    y_vals[1], d_vals[1] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
+    if isnan(cached_y0)
+        y_vals[1], d_vals[1] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
+    else
+        y_vals[1] = cached_y0
+        d_vals[1] = cached_d0
+    end
     for i in 2:N+1
         Δt = t_grid[i] - t_grid[i-1]
         move_forward_time!(state_t, Δt, flow) # Move the state forward by Δt
@@ -162,7 +168,7 @@ function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, f
     ∇U = Base.Fix1(∇U!, out)
     f = (x, v) -> dot(∇U(x), v)
     prep = DI.prepare_gradient(f, DI.AutoMooncake(), g, DI.Constant(copy(g)))
-    
+
     # Avoid boxing prep by wrapping it in a struct or passing it explicitly
     hvp = let prep = prep, g = g, f = f
         (x, v) -> DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
@@ -229,7 +235,7 @@ function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponentia
     segment_idx = 0
     integral = zero(eltype(pcb.Λ_vals))
     for i in eachindex(pcb.Λ_vals)
-        integral += (pcb.Λ_vals[i] + refresh_rate) * (pcb.t_grid[i+1] - pcb.t_grid[i])
+        integral += pos(pcb.Λ_vals[i] + refresh_rate) * (pcb.t_grid[i+1] - pcb.t_grid[i])
         if integral >= u
             segment_idx = i
             break
@@ -243,7 +249,7 @@ function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponentia
 
     # Get the properties of this segment
     t_start = pcb.t_grid[segment_idx]
-    Λ_val = pcb.Λ_vals[segment_idx]
+    Λ_val = pos(pcb.Λ_vals[segment_idx])
 
     # This is how much of the random draw `u` we need to "spend" inside this segment
     u_remaining = u - area_before
@@ -388,48 +394,50 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     #     effective_t_max = alg.t_max[]
     # end
 
+    cached_y0 = NaN
+    cached_d0 = NaN
+
+    # Build grid ONCE before entering the rejection loop
+    construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false)
+    cached_y0 = pcb.y_vals[1]
+    cached_d0 = pcb.d_vals[1]
+    grid_valid = true
+    reuse_count = 0
+    max_reuse = state isa StickyPDMPState ? 1 : 5
+
     safety_limit = alg.safety_limit
     while safety_limit > 0
 
-        # Sample refresh time independently every iteration -- does work!
+        # Sample refresh time independently every iteration
         τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
 
-        # Construct bounds for REFLECTION ONLY (no refresh rate)
-        construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false)  # ← false = no refresh
+        # Rebuild grid only when invalidated (horizon extension or too many rejections)
+        if !grid_valid
+            construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
+                cached_y0, cached_d0)
+            grid_valid = true
+            reuse_count = 0
+        end
 
         # Propose reflection event time
         τ_reflection, lb_reflection = propose_event_time(pcb)
 
-        # Infiltrator.@infiltrate isinf(τ_reflection)
-
-        # @show τ_refresh, τ_reflection, lb_reflection
-        # @show τ_reflection, τ_refresh, alg.t_max[]
-        # Check if the proposal is beyond the horizon
-
         if τ_reflection >= alg.t_max[]
-            # if τ_reflection >= effective_t_max
 
             if τ_refresh < alg.t_max[]
-                # if τ_refresh < effective_t_max
                 return τ_refresh + total_time, :refresh, default_return
             end
 
-
-            # if isinf(max_horizon)
             t_max = alg.t_max[]
-            # Cap t_max to prevent overflow to Inf
             new_t_max = alg.t_max[] * alg.α⁺
-            alg.t_max[] = min(new_t_max, 1e10)  # Cap at 10 billion time units
+            alg.t_max[] = min(new_t_max, 1e10)
             recompute_time_grid!(alg)
-            # effective_t_max = alg.t_max[]
-            # end
+            grid_valid = false
 
             return t_max, :horizon_hit, default_return
-            # return effective_t_max, :horizon_hit, default_return
 
         end
-        # @show time_refresh, τ_reflection
-        # Return whichever event happens first
+
         if τ_refresh < τ_reflection
             return τ_refresh + total_time, :refresh, default_return
         end
@@ -438,42 +446,21 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         move_forward_time!(state_, τ_reflection, flow)
         ∇ϕx = compute_gradient!(state_, model.grad, flow, cache)
 
-        l_reflection = λ(state_.ξ, ∇ϕx, flow)  # Only reflection rate, no refresh
+        l_reflection = λ(state_.ξ, ∇ϕx, flow)
 
-
-        # if l_reflection <= 1e-4 && lb_reflection > .1
-        #     @show l_reflection, lb_reflection
-        #     # @info "Very small true rate but large bound detected. This may indicate numerical instability., Try increasing N.", l_reflection, lb_reflection, state_.ξ.x, state_.ξ.θ
-        # end
-
-        # TODO: this does happen for the Boomerang, and the plot shows something is indeed wrong... the left tail is way higher than it should be!
-
-        # Infiltrator.@infiltrate l_reflection <= 1e-4 && lb_reflection > .1
-        # this shows a large mismatch between the true rates and the grid approximation
-        # alg2 = deepcopy(alg)
-        # plot_rate(copy(state.ξ.x), copy(state.ξ.θ), flow, gradient_strategy.f, 3.0, alg2; dt=0.01, c = .1)
-
-        # fig = Figure()
-        # ax = Axis(fig[1, 1])
-
-
-
-
-        # Accept/reject reflection
-        # @show τ_reflection, lb_reflection, l_reflection
         if rand() * lb_reflection <= l_reflection
-            # @show :reflect
-            # @assert l_reflection <= lb_reflection "incorrect bounds, $(l_reflection), $(lb_reflection)"
             return τ_reflection + total_time, :reflect, (; ∇ϕx)
         else
-            # Reflection rejected - shrink horizon and retry
-            alg.t_max[] *= alg.α⁻
-            # effective_t_max = min(alg.t_max[], max_horizon)
-            recompute_time_grid!(alg)
-            # reset time
+            # Rejection: reset state and either reuse grid or rebuild with tighter bounds
             state_.t[] = state2_.t[]
-            # reset position and velocity
             copyto!(state_.ξ, state2_.ξ)
+            reuse_count += 1
+            if reuse_count >= max_reuse
+                # Too many rejections from same grid — tighten bounds
+                alg.t_max[] *= alg.α⁻
+                recompute_time_grid!(alg)
+                grid_valid = false
+            end
             safety_limit -= 1
         end
     end

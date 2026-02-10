@@ -268,15 +268,12 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
             # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
         else
 
-            # sometimes we can obtain this from the meta information
-            # for example for gridthinning
-            # if meta isa NamedTuple && haskey(meta, :∇ϕx)
-            #     ∇ϕx = meta.∇ϕx
-            # else
-            # ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
-            ∇ϕx = compute_gradient_for_reflection!(state, gradient_strategy, flow, cache)
-
-            # end
+            # Reuse gradient from meta when available (e.g., GridThinningStrategy already computed it)
+            if meta isa NamedTuple && haskey(meta, :∇ϕx) && length(meta.∇ϕx) == length(state.ξ.x)
+                ∇ϕx = meta.∇ϕx
+            else
+                ∇ϕx = compute_gradient_for_reflection!(state, gradient_strategy, flow, cache)
+            end
 
             # meta == abc for ThinningStrategy
             if accept_reflection_event(alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
