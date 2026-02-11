@@ -21,20 +21,21 @@ function Base.copyto!(dest::SkeletonPoint, src::SkeletonPoint)
 end
 
 
-struct PDMPState{T<:SkeletonPoint} <: AbstractPDMPState
-    t::Base.RefValue{Float64}
+# the U<: Real is so we can put a Dual number in there for ForwardDiff but it's not ideal though
+struct PDMPState{T<:SkeletonPoint, U<:Real} <: AbstractPDMPState
+    t::Base.RefValue{U}
     ξ::T
 end
-PDMPState(t::Float64, ξ::SkeletonPoint) = PDMPState(Ref(float(t)), ξ)
+PDMPState(t::Real, ξ::SkeletonPoint) = PDMPState(Ref(float(t)), ξ)
 
-struct StickyPDMPState{T<:SkeletonPoint} <: AbstractPDMPState
-    t::Base.RefValue{Float64}
+struct StickyPDMPState{T<:SkeletonPoint, U<:Real} <: AbstractPDMPState
+    t::Base.RefValue{U}
     ξ::T
     free::BitVector
     old_velocity::Vector{Float64} # Old velocity at the time of freezing
 end
 StickyPDMPState(t::Real, args...) = StickyPDMPState(Ref(float(t)), args...)
-StickyPDMPState(t::Base.RefValue{Float64}, ξ::SkeletonPoint) = StickyPDMPState(t, ξ, .!(iszero.(ξ.x) .&& iszero.(ξ.θ)), similar(ξ.θ))
+StickyPDMPState(t::Base.RefValue{<:Real}, ξ::SkeletonPoint) = StickyPDMPState(t, ξ, .!(iszero.(ξ.x) .&& iszero.(ξ.θ)), similar(ξ.θ))
 
 substate(state::StickyPDMPState) = PDMPState(state.t, SkeletonPoint(view(state.ξ.x, state.free), view(state.ξ.θ, state.free)))
 

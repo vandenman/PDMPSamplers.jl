@@ -53,7 +53,13 @@ function construct_upper_bound(ξ::SkeletonPoint, flow, ∇U!::Function, t_max::
     return pcb
 end
 
-recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integer) = pcb.t_grid .= range(0.0, t_max, N + 1)
+function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integer)
+    resize!(pcb.t_grid, N + 1)
+    resize!(pcb.Λ_vals, N)
+    resize!(pcb.y_vals, N + 1)
+    resize!(pcb.d_vals, N + 1)
+    pcb.t_grid .= range(0.0, t_max, N + 1)
+end
 
 # Extract the gradient function for convenience
 # TODO: these are different for Turing models!
@@ -107,7 +113,8 @@ end
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics,
     grad_and_hess_or_grad_and_hvp::Union{Function,NTuple{2,Function}}, add_rate::Bool=true;
-    cached_y0::Float64=NaN, cached_d0::Float64=NaN)
+    cached_y0::Float64=NaN, cached_d0::Float64=NaN,
+    early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing)
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
@@ -115,7 +122,6 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     y_vals = pcb.y_vals
     d_vals = pcb.d_vals
 
-    #NOTE: assumes t_grid is sorted!
     state_t = copy(state)
     @assert iszero(t_grid[1])
     if isnan(cached_y0)
@@ -124,35 +130,55 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
         y_vals[1] = cached_y0
         d_vals[1] = cached_d0
     end
+
+    # Early termination: stop evaluating grid points once cumulative integral is large enough
+    cumulative_integral = 0.0
+    N_evaluated = N  # how many cells we actually computed
+
     for i in 2:N+1
         Δt = t_grid[i] - t_grid[i-1]
-        move_forward_time!(state_t, Δt, flow) # Move the state forward by Δt
+        move_forward_time!(state_t, Δt, flow)
         validate_state(state_t, flow, "after moving forward in time in Grid algorithm")
         y_vals[i], d_vals[i] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
-    end
 
-    for i in 1:N
-        tᵢ, tᵢ₊₁ = t_grid[i], t_grid[i+1]
-        yᵢ, yᵢ₊₁ = y_vals[i], y_vals[i+1]
-        dᵢ, dᵢ₊₁ = d_vals[i], d_vals[i+1]
+        # Compute bound for interval [i-1] immediately so we can track cumulative integral
+        _compute_cell_bound!(Λ_vals, t_grid, y_vals, d_vals, i - 1)
+        cumulative_integral += pos(Λ_vals[i-1]) * Δt
 
-        # Intersection of the tangents
-        if abs(dᵢ - dᵢ₊₁) < 1e-9 # Handle parallel lines # TODO: tolerance should be sqrt(eps(T))
-
-            mᵢ = yᵢ
-        else
-            # See paper for formula (transcribed from their Algorithm 2)
-            x_intersect = (yᵢ₊₁ - yᵢ + dᵢ * tᵢ - dᵢ₊₁ * tᵢ₊₁) / (dᵢ - dᵢ₊₁)
-
-            # Clip the intersection point to the segment
-            x_clipped = clamp(x_intersect, tᵢ, tᵢ₊₁)
-
-            # Height of the tangent line at the (clipped) intersection point
-            mᵢ = dᵢ * x_clipped + yᵢ - dᵢ * tᵢ
+        if cumulative_integral >= early_stop_threshold && i <= N
+            # Enough integrated rate; zero out remaining cells
+            N_evaluated = i - 1
+            for j in i:N
+                Λ_vals[j] = 0.0
+            end
+            if !isnothing(stats)
+                stats.grid_early_stops += 1
+                stats.grid_points_skipped += N - N_evaluated
+            end
+            break
         end
-
-        Λ_vals[i] = max(yᵢ, yᵢ₊₁, mᵢ)
     end
+
+    if !isnothing(stats)
+        stats.grid_builds += 1
+        stats.grid_points_evaluated += N_evaluated + 1  # +1 for the initial point
+    end
+end
+
+function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d_vals::Vector, i::Int)
+    tᵢ, tᵢ₊₁ = t_grid[i], t_grid[i+1]
+    yᵢ, yᵢ₊₁ = y_vals[i], y_vals[i+1]
+    dᵢ, dᵢ₊₁ = d_vals[i], d_vals[i+1]
+
+    if abs(dᵢ - dᵢ₊₁) < 1e-9
+        mᵢ = yᵢ
+    else
+        x_intersect = (yᵢ₊₁ - yᵢ + dᵢ * tᵢ - dᵢ₊₁ * tᵢ₊₁) / (dᵢ - dᵢ₊₁)
+        x_clipped = clamp(x_intersect, tᵢ, tᵢ₊₁)
+        mᵢ = dᵢ * x_clipped + yᵢ - dᵢ * tᵢ
+    end
+
+    Λ_vals[i] = max(yᵢ, yᵢ₊₁, mᵢ)
 end
 
 function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool=true)
@@ -264,88 +290,41 @@ function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponentia
 end
 
 
-# Equidistant for now.
-# TODO: there two possible algorithmic optimizations
-# 1. non-equidistant grid points/ adaptive grid ala https://github.com/sschuldenzucker/ParametricAdaptiveSampling.jl
-# 2. use Rational for α⁺ and α⁻. E.g,. when α⁻ = 1 // 2, we can reuse 50% of the previous grid evaluations. Assumes equidistant points though
 Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
-    N::Int = 30  # Number of grid points
-    t_max::Float64 = 2.0 # Initial horizon
-    α⁺::Float64 = 1.5 # Factor to increase t_max
-    α⁻::Float64 = 0.5 # Factor to decrease t_max
+    N::Int = 30
+    N_min::Int = 5
+    t_max::Float64 = 2.0
+    α⁺::Float64 = 1.5
+    α⁻::Float64 = 0.5
     safety_limit::Int = 500
-    # adtype::T = DI.AutoMooncake() # Automatic differentiation type
-    # hvp::U = nothing # HVP function, if available
+    early_stop_threshold::Float64 = Inf
 end
 
 function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
-
-    # t = state.t[]
-    # ξ = state.ξ
-    # g = similar(ξ.x)
-
-    # if isnothing(strat.hvp)
-    #     f! = make_hvp_func(state, flow, gradient_strategy, cache)
-    #     prep = DI.prepare_gradient(f!, strat.adtype, ξ.x, DI.Constant(ξ.θ))
-    #     hvp = (x, θ) -> begin
-    #         stats.∇²f_calls += 1
-    #         DI.gradient!(f!, g, prep, strat.adtype, x, DI.Constant(θ))
-    #     end
-    # else
-    #     # if state isa StickyPDMPState
-    #     #     θc = similar(ξ.θ)
-    #     #     hvp = (x, θ, free) -> begin
-    #     #         stats.∇²f_calls += 1
-    #     #         copyto!(θc, θ)
-    #     #         for i in eachindex(free)
-    #     #             if !free[i]
-    #     #                 θc[i] = zero(eltype(θc)) # Set frozen coordinates to zero
-    #     #             end
-    #     #         end
-    #     #         strat.hvp(g, x, θc)
-    #     #         for i in eachindex(free)
-    #     #             if !free[i]
-    #     #                 g[i] = zero(eltype(g))
-    #     #             end
-    #     #         end
-    #     #         return g
-    #     #     end
-    #     # else
-    #     hvp = (x, θ) -> begin
-    #         stats.∇²f_calls += 1
-    #         strat.hvp(g, x, θ)
-    #     end
-    #     # end
-    # end
-
     T = typeof(strat.t_max)
-
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, strat.N + 1)), zeros(T, strat.N)),
         Base.RefValue{Int}(strat.N),
         Base.RefValue{Float64}(strat.t_max),
         strat.α⁺,
         strat.α⁻,
-        strat.safety_limit
-        # hvp
+        strat.safety_limit,
+        strat.N_min,
+        strat.N,
+        strat.early_stop_threshold,
     )
-
 end
 
-# internal state
-struct GridAdaptiveState <: PoissonTimeStrategy # should technically substype something else but oh well
+struct GridAdaptiveState <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
-    α⁺::Float64             # Factor to increase t_max
-    α⁻::Float64             # Factor to decrease t_max
-    # g::Vector{Float64}      # Gradient vector
-    # jac::Matrix{Float64}    # Jacobian matrix
-    # prep::T                 # AD prep
-    # backend::U              # AD backend
+    α⁺::Float64
+    α⁻::Float64
     safety_limit::Int
-    # hvp::T
-
+    N_min::Int
+    N_max::Int
+    early_stop_threshold::Float64
 end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
@@ -354,116 +333,122 @@ recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg
 function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64=Inf, include_refresh::Bool=true)
 
-    # TODO: need to rethink the logic once more
-    # ghost events also allow for separating the logic w.r.t. other events
-    # what if we keep this function as is, but add one layer around it that handles the different types of events?
-    # then we remove the refresh time from this function (and the ab function as well)
-    # and then we check afterward which event occurs first.
-    # however, whenever an event is rejected, we would also need to exit the function (right?) TODO: double check this once more!
-
-    # then I can individually sample a time for each event and then move on
-    # the version below does everything within the while loop, so no ghost events
-    # however, for sticky events I think this means that we'd need to make those
-    # a part of this as well, which I don't think is right?
-
     pcb = alg.pcb
     state_ = copy(state)
     state2_ = copy(state)
-    total_time = 0.0
 
-    # TODO: can't this be done easier?
     grad_func = make_grad_U_func(state_, flow, model.grad, cache)
     hvp_func = model.hvp
     grad_and_hvp = (grad_func, hvp_func)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
-    # Sample refresh time independently once -- does not work!
-    # time_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
-
-    # ensure the return type is type-stable
     default_return = (; ∇ϕx=similar(state.ξ.x, 0))
 
-    # use the minimum of algorithm's horizon and provided max_horizon (e.g., sticky time)
-    # effective_t_max = min(alg.t_max[], max_horizon)
-    # if max_horizon < alg.t_max[]
-    #     alg.t_max[] = max_horizon
-    #     recompute_time_grid!(alg)
-    #     effective_t_max = max_horizon
-    # else
-    #     effective_t_max = alg.t_max[]
-    # end
+    # Build grid once for this event
+    construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
+        early_stop_threshold=alg.early_stop_threshold, stats)
+    stats.grid_N_current = alg.N[]
 
-    cached_y0 = NaN
-    cached_d0 = NaN
+    # Draw refresh time once (separate Poisson process)
+    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
 
-    # Build grid ONCE before entering the rejection loop
-    construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false)
-    cached_y0 = pcb.y_vals[1]
-    cached_d0 = pcb.d_vals[1]
-    grid_valid = true
-    reuse_count = 0
-    max_reuse = state isa StickyPDMPState ? 1 : 5
+    # Cumulative exponential sum for correct sequential thinning.
+    # After rejection at time τ_k, the next proposal continues from τ_k
+    # (not from t=0), eliminating the bias from restart-from-zero thinning.
+    cumulative_exp = 0.0
+    rejection_count = 0
+    max_rejections = 100
 
     safety_limit = alg.safety_limit
     while safety_limit > 0
 
-        # Sample refresh time independently every iteration
-        τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
-
-        # Rebuild grid only when invalidated (horizon extension or too many rejections)
-        if !grid_valid
-            construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
-                cached_y0, cached_d0)
-            grid_valid = true
-            reuse_count = 0
-        end
-
-        # Propose reflection event time
-        τ_reflection, lb_reflection = propose_event_time(pcb)
+        cumulative_exp += rand(Exponential())
+        τ_reflection, lb_reflection = propose_event_time(pcb, cumulative_exp)
 
         if τ_reflection >= alg.t_max[]
 
             if τ_refresh < alg.t_max[]
-                return τ_refresh + total_time, :refresh, default_return
+                return τ_refresh, :refresh, default_return
             end
 
             t_max = alg.t_max[]
             new_t_max = alg.t_max[] * alg.α⁺
             alg.t_max[] = min(new_t_max, 1e10)
             recompute_time_grid!(alg)
-            grid_valid = false
+            stats.grid_grows += 1
 
             return t_max, :horizon_hit, default_return
-
         end
 
         if τ_refresh < τ_reflection
-            return τ_refresh + total_time, :refresh, default_return
+            return τ_refresh, :refresh, default_return
         end
 
-        # Test reflection acceptance
+        # Move from original position to proposed time for acceptance test
+        state_.t[] = state2_.t[]
+        copyto!(state_.ξ, state2_.ξ)
         move_forward_time!(state_, τ_reflection, flow)
         ∇ϕx = compute_gradient!(state_, model.grad, flow, cache)
 
         l_reflection = λ(state_.ξ, ∇ϕx, flow)
 
         if rand() * lb_reflection <= l_reflection
-            return τ_reflection + total_time, :reflect, (; ∇ϕx)
-        else
-            # Rejection: reset state and either reuse grid or rebuild with tighter bounds
-            state_.t[] = state2_.t[]
-            copyto!(state_.ξ, state2_.ξ)
-            reuse_count += 1
-            if reuse_count >= max_reuse
-                # Too many rejections from same grid — tighten bounds
-                alg.t_max[] *= alg.α⁻
-                recompute_time_grid!(alg)
-                grid_valid = false
-            end
-            safety_limit -= 1
+            tightness = l_reflection / lb_reflection
+            _adapt_grid_N!(alg, tightness)
+            stats.grid_N_current = alg.N[]
+            return τ_reflection, :reflect, (; ∇ϕx)
         end
+
+        # Rejection: cumulative_exp has advanced, next proposal will be at a later time
+        rejection_count += 1
+        if rejection_count >= max_rejections
+            # Too many rejections — rebuild with a finer grid and restart the
+            # thinning. The cumulative_exp is reset because the new grid has
+            # different cell integrals.
+            _increase_grid_N!(alg)
+            recompute_time_grid!(alg)
+
+            # Also shrink t_max when the grid integral greatly exceeds
+            # cumulative_exp, indicating most of the domain has zero rate.
+            total_integral = sum(i -> pos(pcb.Λ_vals[i]) * (pcb.t_grid[i+1] - pcb.t_grid[i]), 1:alg.N[])
+            if total_integral > 0 && cumulative_exp < 0.1 * total_integral
+                alg.t_max[] = max(alg.t_max[] * alg.α⁻, 0.1)
+                recompute_time_grid!(alg)
+            end
+
+            construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
+                early_stop_threshold=alg.early_stop_threshold, stats)
+            cumulative_exp = 0.0
+            rejection_count = 0
+            max_rejections = min(max_rejections * 2, alg.safety_limit)
+            stats.grid_shrinks += 1
+        end
+        safety_limit -= 1
     end
 
     error("Safety limit reached")
+end
+
+function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)
+    N = alg.N[]
+    if tightness > 0.5 && N > alg.N_min
+        # Bounds are tight enough, try fewer grid cells
+        new_N = max(alg.N_min, N - 2)
+        if new_N != N
+            alg.N[] = new_N
+            recompute_time_grid!(alg)
+        end
+    elseif tightness < 0.1 && N < alg.N_max
+        _increase_grid_N!(alg)
+    end
+end
+
+function _increase_grid_N!(alg::GridAdaptiveState)
+    N = alg.N[]
+    new_N = min(alg.N_max, N + 4)
+    if new_N != N
+        alg.N[] = new_N
+        recompute_time_grid!(alg)
+    end
 end

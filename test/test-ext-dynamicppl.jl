@@ -6,7 +6,7 @@ using DynamicPPL
 using Distributions
 using Statistics
 import ADTypes
-import Mooncake
+import ForwardDiff
 
 @testset "DynamicPPL Extension" begin
 
@@ -22,7 +22,7 @@ import Mooncake
 
     @testset "PDMPModel construction from DynamicPPL model" begin
         dpppl_model = mvnormal_model(d)
-        backend = ADTypes.AutoMooncake()
+        backend = ADTypes.AutoForwardDiff()
 
         # Test without HVP
         model_no_hvp = PDMPModel(dpppl_model, backend; needs_hvp=false)
@@ -35,7 +35,7 @@ import Mooncake
         Random.seed!(456)
 
         dpppl_model = mvnormal_model(d)
-        backend = ADTypes.AutoMooncake()
+        backend = ADTypes.AutoForwardDiff()
         model = PDMPModel(dpppl_model, backend; needs_hvp=false)
 
         # Set up sampler

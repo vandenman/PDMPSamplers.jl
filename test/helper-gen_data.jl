@@ -918,11 +918,9 @@ function test_approximation(samples, D::SpikeAndSlabDist)
         marginal_slab_i = Normal(D.slab_dist.μ[i], sqrt(D.slab_dist.Σ[i, i]))
 
         nonzero_samples = filter(!iszero, samples[:, i])
-        n_eff = length(nonzero_samples)
         x = filter(!iszero, samples[:, i])
 
-        # n_eff = length(x)
-        n_eff = MCMCDiagnosticTools.ess(nonzero_samples)
+        n_eff = min(MCMCDiagnosticTools.ess(nonzero_samples), Float64(length(nonzero_samples)))
 
         if n_eff < 200
             isinteractive() && @info "Skipping column $i (too few nonzero draws)" n_eff

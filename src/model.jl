@@ -86,11 +86,14 @@ function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADTy
 
         x = zeros(d)
         θ = zeros(d)
-        out_hvp = zeros(d)
-        f! = (x, θ) -> dot(compute_gradient!(grad, x, out_hvp), θ)
-        prep = DI.prepare_gradient(f!, backend, x, DI.Constant(θ))
+        f_scalar = (x, θ) -> begin
+            buf = similar(x)
+            grad.f(buf, x)
+            dot(buf, θ)
+        end
+        prep = DI.prepare_gradient(f_scalar, backend, x, DI.Constant(θ))
         (out, x, v) -> begin
-            DI.gradient!(f!, out, prep, backend, x, DI.Constant(v))
+            DI.gradient!(f_scalar, out, prep, backend, x, DI.Constant(v))
             out .= .-out
         end
     else

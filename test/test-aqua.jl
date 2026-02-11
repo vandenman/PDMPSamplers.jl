@@ -1,3 +1,5 @@
+@isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
+
 using Aqua
 
 @testset "Aqua.jl" begin

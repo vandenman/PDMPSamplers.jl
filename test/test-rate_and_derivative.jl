@@ -1,3 +1,9 @@
+@isdefined(PDMPSamplers) || begin
+    include(joinpath(@__DIR__, "testsetup.jl"))
+    import DifferentiationInterface as DI
+end
+import ForwardDiff
+
 @testset "Test get_rate_and_deriv against ad" begin
 
 
@@ -5,7 +11,7 @@
     # TODO: the shenanigans with t as a Ref{Float64} needed to make this work with AD
     # hint at that the design is suboptimal!
     function rate_fun(t, x, θ, grad, flow, cache)
-        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+        state = PDMPState(zero(t), SkeletonPoint(Vector{Real}(copy(x)), Vector{Real}(copy(θ))))
         move_forward_time!(state, t, flow)
         # ξ = SkeletonPoint(copy(x), copy(θ))
         # ξₜ = move_forward_time(ξ, t, flow)
@@ -22,24 +28,41 @@
 
         d = 5
         D, ∇f!, ∇²f!, ∂fxᵢ = gen_data(MvNormal, d, 1.0)
+
+        Σ = D.Σ
+        μ = D.μ
+        Σ_inv = inv(Σ) # could do this in a safer way
+        potential = Σ_inv * μ
+        buffer_real = Vector{Real}(similar(potential))
+
+        ∇f!_real = (out, x) -> begin
+            #out .= -gradlogpdf(D, x)
+            mul!(buffer_real, Σ_inv, x)
+            buffer_real .-= potential
+            out .= buffer_real
+        end
+
         # flow = Boomerang(inv(cov(D)), mean(D), 0.1)
         flow = pdmp_type(inv(cov(D)), mean(D)) # TODO: Boomerang does not work in this case?
         flow = pdmp_type(d)
         x = randn(d)#mean(D) + .2 .* randn(d)
         θ = PDMPSamplers.initialize_velocity(flow, d)
-        grad = FullGradient(∇f!)
+        grad = FullGradient(∇f!_real)
         ξ = SkeletonPoint(x, θ)
         state = PDMPState(0.0, ξ)
-        cache = PDMPSamplers.add_gradient_to_cache(PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(1.0, 5)), 0.0, ξ), ξ)
+        cache0 = PDMPSamplers.add_gradient_to_cache(PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(1.0, 5)), 0.0, ξ), ξ)
+        # Widen cache buffers to Vector{Real} so ForwardDiff Dual numbers can be stored
+        cache_updates = (; ∇ϕx = Vector{Real}(cache0.∇ϕx))
+        if haskey(cache0, :z)
+            cache_updates = merge(cache_updates, (; z = Vector{Real}(cache0.z)))
+        end
+        cache = merge(cache0, cache_updates)
 
         # xvals = sort!(rand(0:.01:10, 25))
-        # issue with this test is compilation speed of Mooncake, not runtime
         xvals = 0:.01:10
 
         f = t->rate_fun(t, x, θ, grad, flow, cache)
-        ad_type = DI.AutoMooncake()
-        # ad_type = DI.AutoForwardDiff()
-        # ad_type = DI.AutoEnzyme()
+        ad_type = DI.AutoForwardDiff()
         prep = DI.prepare_derivative(f, ad_type, 0.0)
 
         n = length(xvals)# - 1

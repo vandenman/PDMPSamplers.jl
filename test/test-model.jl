@@ -1,10 +1,8 @@
+@isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-using PDMPSamplers
-using Test
-using LinearAlgebra
 import ADTypes
 import DifferentiationInterface as DI
-import Mooncake
+import ForwardDiff
 
 @testset "PDMPModel Tests" begin
 
@@ -29,7 +27,7 @@ import Mooncake
 
         # 3. From LogDensity with AD backend
         ld = LogDensity(f_logdensity)
-        backend = DI.AutoMooncake()
+        backend = DI.AutoForwardDiff()
 
         model_ld = PDMPModel(d, ld, backend)
         @test model_ld.d == d
@@ -43,20 +41,19 @@ import Mooncake
         @test out_test ≈ x_test
 
         # 4. From FullGradient + AD backend + HVP
-        model_fg_hvp = PDMPModel(d, grad_strat, backend, true)
+        backend_hvp = DI.AutoForwardDiff()
+        model_fg_hvp = PDMPModel(d, grad_strat, backend_hvp, true)
         @test model_fg_hvp.hvp isa Function
         hvp_result2 = model_fg_hvp.hvp(x_test, [0.0, 1.0])
         @test hvp_result2 isa AbstractVector
     end
 
-    @testset "LogDensity + HVP (broken with Mooncake reverse-over-reverse)" begin
+    @testset "LogDensity + HVP" begin
         ld = LogDensity(f_logdensity)
-        backend = DI.AutoMooncake()
+        backend = DI.AutoForwardDiff()
         x_test = [1.0, 2.0]
-        @test_broken begin
-            model_ld_hvp = PDMPModel(d, ld, backend, true)
-            model_ld_hvp.hvp isa Function
-        end
+        model_ld_hvp = PDMPModel(d, ld, backend, true)
+        @test model_ld_hvp.hvp isa Function
     end
 
     @testset "SkeletonPoint copyto!" begin

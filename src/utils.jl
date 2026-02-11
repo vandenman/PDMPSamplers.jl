@@ -20,8 +20,15 @@ mutable struct StatisticCounter
     ∇f_calls::Int
     ∇²f_calls::Int
     last_rejected::Bool
+    grid_builds::Int
+    grid_shrinks::Int
+    grid_grows::Int
+    grid_early_stops::Int
+    grid_points_evaluated::Int
+    grid_points_skipped::Int
+    grid_N_current::Int
 end
-StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false)
+StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0)
 
 
 

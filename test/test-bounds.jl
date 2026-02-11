@@ -1,3 +1,5 @@
+@isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
+
 @testset "Bound Validation Tests" begin
 
     """
