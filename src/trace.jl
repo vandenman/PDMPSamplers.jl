@@ -182,7 +182,22 @@ function Statistics.cor(trace::AbstractPDMPTrace)
     StatsBase.cov2cor!(C, sqrt.(diag(C)))
 end
 
-# NEEDS TESTS!
+"""
+    inclusion_probs(trace::AbstractPDMPTrace)
+
+Compute marginal inclusion probabilities from a PDMP trace.
+For coordinate i, this equals the fraction of time the trajectory
+spent away from zero.
+
+For a spike-and-slab model with inclusion probability ``p_i`` and slab
+mean ``\\mu_i``, the full-model mean satisfies:
+
+    mean(trace)[i] ≈ p_i * μ_i
+
+so the conditional slab mean can be recovered as:
+
+    mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
+"""
 inclusion_probs(trace::AbstractPDMPTrace) = _integrate(trace, inclusion_probs)
 
 # TODO: this should actually use the flows M matrix!

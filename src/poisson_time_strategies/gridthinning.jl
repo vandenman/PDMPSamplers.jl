@@ -86,7 +86,8 @@ end
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics,
     grad_and_hess_or_grad_and_hvp::Union{Function,NTuple{2,Function}}, add_rate::Bool=true;
     cached_y0::Float64=NaN, cached_d0::Float64=NaN,
-    early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing)
+    early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing,
+    state_cache::Union{AbstractPDMPState,Nothing}=nothing)
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
@@ -94,7 +95,7 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     y_vals = pcb.y_vals
     d_vals = pcb.d_vals
 
-    state_t = copy(state)
+    state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
     @assert iszero(t_grid[1])
     if isnan(cached_y0)
         y_vals[1], d_vals[1] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
@@ -284,10 +285,12 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         strat.N_min,
         strat.N,
         strat.early_stop_threshold,
+        copy(state),
+        copy(state),
     )
 end
 
-struct GridAdaptiveState <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
@@ -297,6 +300,8 @@ struct GridAdaptiveState <: PoissonTimeStrategy
     N_min::Int
     N_max::Int
     early_stop_threshold::Float64
+    state_cache::S
+    state_cache2::S
 end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
@@ -306,8 +311,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     max_horizon::Float64=Inf, include_refresh::Bool=true)
 
     pcb = alg.pcb
-    state_ = copy(state)
-    state2_ = copy(state)
+    state_ = alg.state_cache
+    state2_ = alg.state_cache2
+    copyto!(state_, state)
+    copyto!(state2_, state)
 
     grad_func = make_grad_U_func(state_, flow, model.grad, cache)
     hvp_func = model.hvp
@@ -319,7 +326,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
     # Build grid once for this event
     construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
-        early_stop_threshold=alg.early_stop_threshold, stats)
+        early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_)
     stats.grid_N_current = alg.N[]
 
     # Draw refresh time once (separate Poisson process)
@@ -390,7 +397,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
             end
 
             construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
-                early_stop_threshold=alg.early_stop_threshold, stats)
+                early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_)
             cumulative_exp = 0.0
             rejection_count = 0
             max_rejections = min(max_rejections * 2, alg.safety_limit)

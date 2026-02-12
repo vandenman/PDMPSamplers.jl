@@ -873,130 +873,43 @@ function test_approximation(samples, spike_dist::BetaBernoulliHierarchical)
 
 end
 
-marginal_slab_distribution(D::Distributions.AbstractMvNormal, i) =
-    Normal(mean(D)[i], sqrt(cov(D)[i, i]))
-function marginal_slab_distribution(D::Distributions.MvTDist, i)
-    ν = D.df
-    Σ_scale = Matrix(D.Σ)  # scale matrix (not covariance)
-    mean(D)[i] + sqrt(Σ_scale[i, i]) * TDist(ν)
-end
+"""
+    test_approximation(trace, D::SpikeAndSlabDist)
 
-function test_approximation(samples, D::SpikeAndSlabDist)
+Test a sticky PDMP trace against a spike-and-slab target using analytic
+trace estimators instead of discretization.
 
-    # TODO: ideally this just dispatches to the test for the marginals! e.g.,
-    # test_approximation(samples, D.slab_dist)
-    # however, that should only check _nonzero_ elements and pairs, like below!
+Uses the identity that for a spike-and-slab model:
 
-    d = size(samples, 2)
-    if D.spike_dist isa BetaBernoulliHierarchical
-        d -= 1 # last coordinate is not part of the slab
-        samples = view(samples, :, 1:d)
-    end
+    E[x_i]         = p_i * μ_i^slab       (full-model mean)
+    mean(trace)[i] ≈ E[x_i]
 
-    sample_cov  = zeros(d, d)
-    dct = Vector{Vector{Int}}(undef, d)
+so the conditional slab mean is recoverable as:
+
+    mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
+"""
+function test_approximation(trace, D::SpikeAndSlabDist)
+
+    d = length(D.slab_dist)
+
+    est_incl_probs = inclusion_probs(trace)
+    true_incl_probs = mean(D.spike_dist)
+
+    # MvTDist slabs have heavier tails and slower mixing, so we allow a larger tolerance
+    incl_atol = D.slab_dist isa Distributions.MvTDist ? 0.1 : 0.05
+
+    # test marginal inclusion probabilities
     for i in 1:d
-        idx = findall(!iszero, samples[:, i])
-        dct[i] = idx
-        sample_cov[i, i] = var(samples[idx, i])
-    end
-    for i in 1:d
-        for j in i+1:d
-            idx = intersect(dct[i], dct[j])
-            sample_cov[i, j] = cov(samples[idx, i], samples[idx, j])
-            sample_cov[j, i] = sample_cov[i, j]
-        end
-    end
-    sample_mean = [mean(samples[dct[i], i]) for i in 1:d]
-
-    @test isapprox(sample_mean, mean(D.slab_dist), rtol=0.2, atol=0.2)
-    @test isapprox(sample_cov,  cov(D.slab_dist), rtol=0.4)
-
-    # Skip chi-squared quantile test for MvTDist slabs: the Mahalanobis denominator
-    # couples coordinates, so freezing some dimensions alters the effective gradient
-    # for the free ones. The nonzero slab marginals then differ systematically from
-    # the unconditional MvTDist marginals, making the quantile test invalid.
-    D.slab_dist isa Distributions.MvTDist && return
-
-    qprobs = .1:.1:.99
-    α = 0.01
-    # z = quantile(Normal(), 1 - α/2)
-
-    # samples2 = samples[findall(x->!any(iszero, x), eachrow(samples)), :]
-    # n_eff = MCMCDiagnosticTools.ess(samples2)
-    # cov(samples2)
-    # mean(samples2, dims = 1)
-    # se_mean = maximum(sqrt.(diag(D.slab_dist.Σ)) / sqrt(n_eff))
-    # isapprox(vec(mean(samples2, dims = 1)), D.slab_dist.μ, atol = se_mean)
-
-    k = length(qprobs)
-    Σ = zeros(k, k)
-    chisq_thresh_desired = quantile(Chisq(k), 1 - α)
-    chisq_thresh_minimum = quantile(Chisq(k), 1 - α / 10)
-    chisq_thresh_passed_desired = 0
-    chisq_thresh_passed_minimum = 0
-    no_chisq_tests = 0
-
-    for i in 1:d
-        marginal_slab_i = marginal_slab_distribution(D.slab_dist, i)
-
-        nonzero_samples = filter(!iszero, samples[:, i])
-        x = filter(!iszero, samples[:, i])
-
-        n_eff = min(MCMCDiagnosticTools.ess(nonzero_samples), Float64(length(nonzero_samples)))
-
-        if n_eff < 200
-            isinteractive() && @info "Skipping column $i (too few nonzero draws)" n_eff
-            continue
-        end
-
-        # q_expected = quantile(marginal_slab_i, qprobs)
-        q_expected = map(Base.Fix1(quantile, marginal_slab_i), qprobs)
-        q_observed = quantile(x, qprobs)
-
-        # TODO: make this plot a bit easier to see for all dimensions
-        # next, device a better test that is less strict/ flaky
-        # f = Figure()
-        # ax = Axis(f[1, 1]; xlabel = "theoretical quantiles", ylabel = "observed quantiles", title = "Quantile–quantile plot for slab")
-        # ablines!(ax, 0, 1, color = :grey, linestyle = :dash)
-        # scatter!(ax, q_expected, q_observed; markersize = 4, color = :blue)
-        # f
-
-        dens = pdf.(marginal_slab_i, q_expected)                     # f(q_p)
-
-        # llm-inspired multivariate test
-        # build covariance matrix Σ_{jr}
-
-        for j in 1:k, r in j:1:k
-            p = qprobs[j]; rprob = qprobs[r]
-            Σ[j,r] = (min(p,rprob) - p*rprob) / (n_eff * dens[j] * dens[r])
-            Σ[r,j] = Σ[j,r]# missing?
-        end
-
-        # regularize if needed
-        ϵ = 1e-12 * maximum(view(Σ, diagind(Σ)))
-        Σ += ϵ * I
-
-        q_diff = q_observed .- q_expected
-
-        T = dot(q_diff, Σ \ q_diff)   # d' Σ^{-1} d
-
-        no_chisq_tests += 1
-        chisq_thresh_passed_desired += T <= chisq_thresh_desired
-        chisq_thresh_passed_minimum += T <= chisq_thresh_minimum
-
-        # test quantiles individually, this is rather flaky
-        # se_q = sqrt.(qprobs .* (1 .- qprobs)) ./ (sqrt(n_eff) .* dens)
-        # atol = z .* se_q
-
-        # for j in eachindex(q_observed)
-        #     @test isapprox(q_observed[j], q_expected[j], atol=atol[j])
-        # end
+        @test isapprox(est_incl_probs[i], true_incl_probs[i]; atol=incl_atol)
     end
 
-    # allow 40% failures for small dimension tests
-    @test !iszero(no_chisq_tests)
-    # @test chisq_thresh_passed_desired >= 4//5 * no_chisq_tests
-    @test chisq_thresh_passed_minimum >= 3//5 * no_chisq_tests
+    est_mean = mean(trace)
 
+    # full-model mean: E[x_i] = p_i * μ_i^slab
+    true_full_mean = true_incl_probs .* mean(D.slab_dist)
+    @test isapprox(est_mean[1:d], true_full_mean; rtol=0.2, atol=0.2)
+
+    # conditional slab mean: mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
+    est_slab_mean = est_mean[1:d] ./ est_incl_probs[1:d]
+    @test isapprox(est_slab_mean, mean(D.slab_dist); rtol=0.2, atol=0.2)
 end

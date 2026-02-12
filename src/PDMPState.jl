@@ -45,6 +45,20 @@ subflow(flow::ContinuousDynamics, ::BitVector) = flow
 Base.copy(state::PDMPState) = PDMPState(Ref(state.t[]), copy(state.ξ))
 Base.copy(state::StickyPDMPState) = StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free), copy(state.old_velocity))
 
+function Base.copyto!(dest::PDMPState, src::PDMPState)
+    dest.t[] = src.t[]
+    copyto!(dest.ξ, src.ξ)
+    return dest
+end
+
+function Base.copyto!(dest::StickyPDMPState, src::StickyPDMPState)
+    dest.t[] = src.t[]
+    copyto!(dest.ξ, src.ξ)
+    copyto!(dest.free, src.free)
+    copyto!(dest.old_velocity, src.old_velocity)
+    return dest
+end
+
 function reflect!(state::AbstractPDMPState, ∇ϕ::AbstractVector, flow::ContinuousDynamics, cache)
     reflect!(state.ξ, ∇ϕ, flow, cache)
 end
