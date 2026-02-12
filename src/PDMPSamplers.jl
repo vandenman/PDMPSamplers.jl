@@ -20,8 +20,7 @@ import ADTypes
 import DifferentiationInterface as DI
 
 
-# for debugging
-import Infiltrator
+
 
 # for plotting
 # using Makie

@@ -33,14 +33,14 @@ function pdmp_sample(
 
     t_warmup < (T - t₀) || throw(ArgumentError("t_warmup ($t_warmup) is larger than T - t₀ ($T - $t₀ = $(T - t₀)), which implies storing nothing at all. This is probably an error."))
 
-    # state, grad_, alg_, cache, stats = initialize_state(flow, model.grad, alg, t₀, ξ₀)
     state, model_, alg_, cache, stats = initialize_state(flow, model, alg, t₀, ξ₀)
 
     validate_state(state, flow, "at initialization")
 
-    trace_manager = TraceManager(state, flow, alg, t_warmup)
+    t_warmup_abs = t₀ + t_warmup
+    trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
-    adapter = default_adapter(flow, model_.grad, t_warmup ÷ 10, t₀, t_warmup ÷ 10)
+    adapter = default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup ÷ 10, t₀)
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
     if progress
@@ -50,20 +50,6 @@ function pdmp_sample(
     end
 
 
-    # if grad_ isa SubsampledGradient
-    #     last_anchor_update_t = t₀
-    #     anchor_update_Δt = (t_warmup - t₀) / grad_.no_anchor_updates
-    #     update_anchor_during_warmup = ispositive(anchor_update_Δt) && isfinite(anchor_update_Δt)
-    #     saved_warmup_trace_first_time = false
-    #     warmup_trace = update_anchor_during_warmup ? TT(state, flow) : nothing
-    # else
-    #     last_anchor_update_t = t₀
-    #     anchor_update_Δt = -1
-    #     update_anchor_during_warmup = false
-    # end
-
-    # consecutive_reject_count = 0
-    # consecutive_reject_limit = 1_000
     while state.t[] < T # !isdone(state, trace, stopping_criterion)
 
         τ, event_type, meta = next_event_time(model_, flow, alg_, state, cache, stats)
@@ -72,111 +58,21 @@ function pdmp_sample(
 
         needs_saving, saving_args = handle_event!(τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
 
-        # @show τ, event_type, state.t[], stats.last_rejected, needs_saving, length(trace_manager.main_trace.events)
         needs_saving && record_event!(trace_manager, state, flow, saving_args)
 
         adapt!(adapter, state, flow, model_.grad, trace_manager)
 
         check_health!(health, stats)
-        # if progress
-        #     update_progress!(prog_meter, state.t[], t_stop)
-        # end
 
         if progress && state.t[] > tstop
             tstop += T / progress_stops
             ProgressMeter.next!(prg)
         end
-
-        # if needs_saving
-
-        #     if state.t[] >= t_warmup
-
-        #         if !saved_first_time
-        #             trace = TT(state, flow)
-        #             saved_first_time = true
-        #         end
-
-        #         if !isnothing(saving_args) && trace isa FactorizedTrace
-        #             @assert flow isa FactorizedDynamics "saving_args provided, but trace is not FactorizedTrace, flow = $(typeof(flow)), trace = $(typeof(trace))!"
-        #             push!(trace, state, saving_args)
-        #         else
-        #             push!(trace, state)
-        #         end
-        #     elseif update_anchor_during_warmup
-        #         if !saved_warmup_trace_first_time
-        #             warmup_trace = TT(state, flow)
-        #             saved_warmup_trace_first_time = true
-        #         end
-        #         if !isnothing(saving_args) && warmup_trace isa FactorizedTrace
-        #             @assert flow isa FactorizedDynamics "saving_args provided, but trace is not FactorizedTrace, flow = $(typeof(flow)), trace = $(typeof(trace))!"
-        #             push!(warmup_trace, state, saving_args)
-        #         else
-        #             push!(warmup_trace, state)
-        #         end
-        #     end
-        # end
-
-        # let's do this only once per event
-        # if grad_ isa SubsampledGradient
-        #     grad_.resample_indices!(grad_.nsub)
-
-        #     if update_anchor_during_warmup && state.t[] <= t_warmup && state.t[] - last_anchor_update_t >= anchor_update_Δt
-        #         last_anchor_update_t = state.t[]
-        #         grad_.update_anchor!(warmup_trace)
-        #     end
-        # end
-
-        # if stats.last_rejected
-        #     consecutive_reject_count += 1
-        # else
-        #     consecutive_reject_count = 0
-        # end
-        # stats.last_rejected = false
-
-        # if consecutive_reject_count > consecutive_reject_limit
-        #     throw(error("The algorithm rejected $(consecutive_reject_limit) consecutive proposals. Check the algorithm and model settings."))
-        # end
-
-        # --- PHASE 4: DIAGNOSTICS ---
-        # check_health!(health, stats.last_rejected)
-        # # if progress
-        # #     update_progress!(prog_meter, state.t[], t_stop)
-        # # end
-
-        # if progress && state.t[] > tstop
-        #     tstop += T / progress_stops
-        #     ProgressMeter.next!(prg)
-        # end
     end
 
-    # this is misleading because the reflections events are more expensive... just count these manually?
-    # if grad_ isa SubsampledGradient && grad_.use_full_gradient_for_reflections
-    #     stats.∇f_calls += stats.reflections_events
-    # end
-
     return get_main_trace(trace_manager), stats
-    # return trace, stats
 
 end
-
-
-# """
-# initialize_state(::ContinuousDynamics, ::GradientStrategy, t₀::Real, ξ₀::SkeletonPoint)
-
-# Initialize all required information for the specific dynamics. Should return the following:
-
-# """
-# function initialize_state(flow::ContinuousDynamics, grad::GradientStrategy, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint)
-#     ξ = copy(ξ₀)
-#     t = t₀
-#     stats = StatisticCounter()
-#     state = alg isa Sticky ? StickyPDMPState(t, ξ) : PDMPState(t, ξ)
-#     cache = add_gradient_to_cache(initialize_cache(flow, grad, alg, t, ξ), ξ)
-#     alg_ = _to_internal(alg, flow, grad, state, cache, stats)
-#     grad_ = with_stats(grad, stats)
-#     grad_ isa SubsampledGradient && grad_.resample_indices!(grad_.nsub)
-#     return state, grad_, alg_, cache, stats
-# end
 
 function initialize_state(flow::ContinuousDynamics, model::PDMPModel, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint)
     ξ = copy(ξ₀)
@@ -191,12 +87,12 @@ function initialize_state(flow::ContinuousDynamics, model::PDMPModel, alg::Poiss
 end
 
 function add_gradient_to_cache(cache::NamedTuple, ξ::SkeletonPoint)
-    ∇ϕx = similar(ξ.x)
     if haskey(cache, :∇ϕx)
         if !(cache.∇ϕx isa typeof(ξ.x) && length(cache.∇ϕx) == length(ξ.x))
             throw(ArgumentError("cache.∇ϕx was given manually, but must be of the same type as ξ.x"))
         end
     else
+        ∇ϕx = similar(ξ.x)
         cache = merge(cache, (; ∇ϕx))
     end
     return cache

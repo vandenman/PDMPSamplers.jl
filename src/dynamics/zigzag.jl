@@ -2,13 +2,12 @@
 # maybe they belong there?
 
 struct ZigZag{T,S,S2,R} <: FactorizedDynamics
-    # TODO: need to document the fields...
-    Γ::T  # Can be used for factorized algorithms
+    Γ::T
     μ::S
-    σ::S2
+    σ::S2       # reserved for partial-refreshment features
     λref::Float64
-    ρ::Float64
-    ρ̄::R
+    ρ::Float64  # reserved for partial-refreshment features
+    ρ̄::R        # reserved for partial-refreshment features
 end
 ZigZag(Γ, μ, σ=(Vector(diag(Γ))).^(-0.5); λref=0.0, ρ=0.0) = ZigZag(Γ, μ, σ, λref, ρ, sqrt(1-ρ^2))
 ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
@@ -19,18 +18,25 @@ refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
 
     θ = ξ.θ
-    # 0. an event occured, but which clock rang?
-    # 1. compute the individual 'ringing' rates of each clock
-    individual_rates = [λ_i(i, ξ, ∇ϕ[i], flow) for i in eachindex(θ)]
-    total_rate = sum(individual_rates)
-    if ispositive(total_rate)
-        # 2a. sample from a coordinate i₀ to flip, weighted by the individual rates
-        i₀ = StatsBase.sample(eachindex(individual_rates), Weights(individual_rates))
-    else
-        # 2b. all rates are zero - sample uniformly as fallback
-        i₀ = rand(eachindex(individual_rates))
+    # Single-pass weighted sampling: compute cumulative sum on-the-fly
+    total_rate = zero(eltype(∇ϕ))
+    for i in eachindex(θ)
+        total_rate += λ_i(i, ξ, ∇ϕ[i], flow)
     end
-    # 3. reflect the chosen coordinate
+    if ispositive(total_rate)
+        u = rand() * total_rate
+        cumsum = zero(total_rate)
+        i₀ = firstindex(θ)
+        for i in eachindex(θ)
+            cumsum += λ_i(i, ξ, ∇ϕ[i], flow)
+            if cumsum >= u
+                i₀ = i
+                break
+            end
+        end
+    else
+        i₀ = rand(eachindex(θ))
+    end
     θ[i₀] = -θ[i₀]
     return i₀
 end
@@ -61,20 +67,8 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::Real, i::Integer, flow::ZigZag)
     return i
 end
 
-"""
-    τ = freezing_time(ξ::SkeletonPoint, flow::ZigZag, i::Integer)
-
-computes the hitting time of the particle to hit 0 given the position `ξ.x[i]` and the velocity `ξ.θ[i]`.
-"""
-function freezing_time(ξ::SkeletonPoint, ::ZigZag, i::Integer)
-    x = ξ.x[i]
-    θ = ξ.θ[i]
-    if θ * x >= 0
-        return Inf
-    else
-        return -x / θ
-    end
-end
+# The canonical freezing_time for ZigZag is defined in
+# src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.
 
 # actually part of thinning
 """

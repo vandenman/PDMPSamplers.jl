@@ -61,34 +61,6 @@ function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integ
     pcb.t_grid .= range(0.0, t_max, N + 1)
 end
 
-# Extract the gradient function for convenience
-# TODO: these are different for Turing models!
-# function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-#     return function(out, x)
-#         compute_gradient!(x, θ, gradient_strategy, flow, cache)
-#     end
-# end
-
-# function make_grad_and_hess_func(θ::AbstractVecOrMat, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache, prep, g, jac, backend)
-#     f = make_grad_U_func(θ, flow, gradient_strategy, cache)
-#     grad_and_hess(x) = DI.value_and_jacobian!(f, g, jac, prep, backend, x)
-#     return grad_and_hess
-# end
-# function make_grad_and_hess_func(θ::AbstractVecOrMat, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, alg::GridAdaptiveState, cache)
-#     make_grad_and_hess_func(θ, flow, gradient_strategy, cache, alg.prep, alg.g, alg.jac, alg.backend)
-# end
-
-# function make_grad_and_hvp_func(θ::AbstractVecOrMat, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache, prep, g::AbstractVector, backend)
-#     f  = make_grad_U_func(θ, flow, gradient_strategy, cache)
-#     f1 = make_hvp_func(flow, gradient_strategy, cache)
-#     hvp(x, v) = DI.gradient!(f1, g, prep, backend, x, DI.Constant(v))
-#     return f, hvp
-# end
-
-# function make_grad_and_hvp_func(θ::AbstractVecOrMat, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, alg::GridAdaptiveState, cache)
-#     make_grad_and_hvp_func(θ, flow, gradient_strategy, cache, alg.prep, alg.g, alg.backend)
-# end
-
 function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
     return function (x)
         compute_gradient!(x, θ, gradient_strategy, flow, cache)

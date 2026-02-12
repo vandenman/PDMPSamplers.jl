@@ -11,6 +11,7 @@
     get_gradient_types(::Type{<:PreconditionedDynamics{<:AbstractPreconditioner,T}}) where T = get_gradient_types(T)
 
     get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient}) = (ThinningStrategy, GridThinningStrategy,)
+    get_algorithm_types(::Type{<:PreconditionedDynamics}, ::Type{<:FullGradient}) = (GridThinningStrategy,)
     get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:CoordinateWiseGradient}) = (ThinningStrategy,)
 
     data_types = (

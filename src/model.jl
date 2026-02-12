@@ -94,7 +94,6 @@ function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADTy
         prep = DI.prepare_gradient(f_scalar, backend, x, DI.Constant(θ))
         (out, x, v) -> begin
             DI.gradient!(f_scalar, out, prep, backend, x, DI.Constant(v))
-            out .= .-out
         end
     else
         nothing

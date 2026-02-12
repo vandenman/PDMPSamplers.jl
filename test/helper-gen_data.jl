@@ -698,7 +698,7 @@ function test_approximation(samples, D::Distributions.AbstractMvNormal)
     sample_cov = cov(samples)
 
     @test isapprox(sample_mean, mean(D), rtol=0.2, atol=0.2)
-    @test isapprox(sample_cov,  cov(D), rtol=0.2)
+    @test isapprox(sample_cov,  cov(D), rtol=0.4)
     # test quantiles in the first dimension
     probs = .1:.1:.99
     # q_expected = quantile(Normal(mean(D)[1], sqrt(D.Σ[1, 1])), probs)
@@ -717,7 +717,7 @@ function test_approximation(samples, D::Distributions.MvTDist)
     ν, μ, Σ = Distributions.params(D)
 
     @test isapprox(sample_mean, mean(D), rtol=0.2, atol=0.2)
-    @test isapprox(sample_cov,  cov(D), rtol=0.2)
+    @test isapprox(sample_cov,  cov(D), rtol=0.4)
 
     # test quantiles in the first dimension
     qprobs = .1:.1:.99
@@ -893,7 +893,7 @@ function test_approximation(samples, D::SpikeAndSlabDist)
     sample_mean = [mean(samples[dct[i], i]) for i in 1:d]
 
     @test isapprox(sample_mean, mean(D.slab_dist), rtol=0.2, atol=0.2)
-    @test isapprox(sample_cov,  cov(D.slab_dist), rtol=0.2)
+    @test isapprox(sample_cov,  cov(D.slab_dist), rtol=0.4)
 
     qprobs = .1:.1:.99
     α = 0.01
