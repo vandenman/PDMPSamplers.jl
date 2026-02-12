@@ -86,8 +86,9 @@ function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADTy
 
         x = zeros(d)
         θ = zeros(d)
+        primal_buf = zeros(d)
         f_scalar = (x, θ) -> begin
-            buf = similar(x)
+            buf = x isa AbstractVector{Float64} ? primal_buf : similar(x)
             grad.f(buf, x)
             dot(buf, θ)
         end

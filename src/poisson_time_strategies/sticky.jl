@@ -36,12 +36,13 @@ end
 Sticky(alg::PoissonTimeStrategy, κ::AbstractVector) = Sticky(alg, κ, .!isinf.(κ))
 Sticky(::PoissonTimeStrategy, ::Function) = throw(ArgumentError("When κ is a function, a can_stick vector must be provided explicitly."))
 
-struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,AbstractVector}} <: PoissonTimeStrategy
+struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,AbstractVector},V<:AbstractVector} <: PoissonTimeStrategy
     # A' could be the internal version of the wrapped algorithm
     inner_alg_state::T # this should perhaps be the more generic, i.e., _to_internal(Sticky.alg, ...)!
     κ::U
     can_stick::BitVector
     sticky_times::Vector{Float64}  # Absolute times of next freeze/unfreeze event
+    empty_∇ϕx::V
 end
 
 # this could use less memory by looking at
@@ -62,7 +63,7 @@ function _to_internal(strat::Sticky, flow::ContinuousDynamics, model::PDMPModel,
     #         end
     #     end
     # end
-    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times)
+    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, similar(state.ξ.x, 0))
     update_all_stick_times!(alg, state, flow)
 
     # do this once
@@ -312,7 +313,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
             # iszero(Δt) && @warn "Sticky event time equals current time t = $t. This may lead to infinite loops."
             return Δt, :sticky, i
         elseif tʳ < t′# && tʳ < tᶠ
-            return τ_refresh, :refresh, (; ∇ϕx=similar(state.ξ.x, 0))
+            return τ_refresh, :refresh, (; ∇ϕx=alg.empty_∇ϕx)
         else
             return τ, event_type, meta
         end

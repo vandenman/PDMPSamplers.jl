@@ -287,10 +287,11 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         strat.early_stop_threshold,
         copy(state),
         copy(state),
+        similar(state.ξ.x, 0),
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
@@ -302,6 +303,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState} <: PoissonTimeStrategy
     early_stop_threshold::Float64
     state_cache::S
     state_cache2::S
+    empty_∇ϕx::V
 end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
@@ -322,7 +324,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
-    default_return = (; ∇ϕx=similar(state.ξ.x, 0))
+    default_return = (; ∇ϕx=alg.empty_∇ϕx)
 
     # Build grid once for this event
     construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
