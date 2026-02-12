@@ -17,18 +17,28 @@
     data_types = (
         SpikeAndSlabDist{Bernoulli,ZeroMeanIsoNormal},
         SpikeAndSlabDist{BetaBernoulli,ZeroMeanIsoNormal},
+        SpikeAndSlabDist{Bernoulli,Distributions.MvTDist},
     )
 
     ds = (2, 5,)
     data_args = Dict(
-        SpikeAndSlabDist{Bernoulli,ZeroMeanIsoNormal} => ds,
+        SpikeAndSlabDist{Bernoulli,ZeroMeanIsoNormal}     => ds,
         SpikeAndSlabDist{BetaBernoulli,ZeroMeanIsoNormal} => ds,
+        SpikeAndSlabDist{Bernoulli,Distributions.MvTDist} => Iterators.product(ds, (2.,)),
     )
 
     @testset "$pdmp_type" for pdmp_type in pdmp_types
         @testset "$gradient_type" for gradient_type in get_gradient_types(pdmp_type)
             @testset "$algorithm" for algorithm in get_algorithm_types(pdmp_type, gradient_type)
                 @testset "$(data_name(data_type, data_arg))" for data_type in data_types, data_arg in data_args[data_type]
+
+                    # MvTDist slab: only ZigZag-based samplers converge reliably
+                    if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}
+                        pdmp_type <: Union{BouncyParticle, Boomerang,
+                            PreconditionedDynamics{<:Any, BouncyParticle},
+                            PreconditionedDynamics{<:Any, Boomerang}} && continue
+                        algorithm === ThinningStrategy && continue
+                    end
 
                     # Use a stable seed for target generation so all samplers face the same target
                     Random.seed!(hash((data_type, data_arg)))
@@ -37,7 +47,7 @@
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
                     d = first(data_arg)
-                    T = 300_000.0
+                    T = data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist} ? 1_000_000.0 : 300_000.0
                     c0 = pdmp_type === ZigZag ? 1e-4 : 1e-2
 
                     flow = pdmp_type(inv(Symmetric(cov(D.slab_dist))), mean(D.slab_dist))

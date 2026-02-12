@@ -17,19 +17,26 @@
     data_types = (
         Distributions.ZeroMeanIsoNormal,
         Distributions.MvNormal,
+        Distributions.MvTDist,
     )
 
     ds = (2, 5,)
     ηs = (1., 2., 5.)
     data_args = Dict(
         Distributions.ZeroMeanIsoNormal => ds,
-        Distributions.MvNormal => Iterators.product(ds, ηs)
+        Distributions.MvNormal => Iterators.product(ds, ηs),
+        Distributions.MvTDist => Iterators.product(ds, (2.,)),
     )
 
     @testset "$pdmp_type" for pdmp_type in pdmp_types
         @testset "$gradient_type" for gradient_type in get_gradient_types(pdmp_type)
             @testset "$algorithm" for algorithm in get_algorithm_types(pdmp_type, gradient_type)
                 @testset "$(data_name(data_type, data_arg))" for data_type in data_types, data_arg in data_args[data_type]
+
+                    # ThinningStrategy requires manual bounds unsuitable for non-Gaussian targets
+                    algorithm === ThinningStrategy && data_type === Distributions.MvTDist && continue
+                    # Boomerang's Gaussian reference dynamics are a poor match for heavy-tailed targets
+                    pdmp_type <: Union{Boomerang, PreconditionedDynamics{<:Any, Boomerang}} && data_type === Distributions.MvTDist && continue
 
                     # Use a stable seed for target generation so all samplers face the same target
                     Random.seed!(hash((data_type, data_arg)))
@@ -38,7 +45,7 @@
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
                     d = first(data_arg)
-                    T = 50_000.0
+                    T = data_type === Distributions.MvTDist ? 200_000.0 : 50_000.0
 
                     alg = if algorithm === ThinningStrategy
                         if gradient_type === CoordinateWiseGradient
