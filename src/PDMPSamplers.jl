@@ -137,6 +137,7 @@ export
     # std,
     # cov,
     # cor,
+    cdf,
     inclusion_probs,
     refresh_rate,
     ess

@@ -182,6 +182,233 @@ function Statistics.cor(trace::AbstractPDMPTrace)
     StatsBase.cov2cor!(C, sqrt.(diag(C)))
 end
 
+
+_underlying_flow(flow::ContinuousDynamics) = flow
+_underlying_flow(flow::PreconditionedDynamics) = flow.dynamics
+
+"""
+    cdf(trace::AbstractPDMPTrace, q::Real; coordinate::Integer)
+
+Compute the empirical CDF of marginal coordinate `coordinate` at threshold `q`
+from the continuous occupation measure of a PDMP trace (no discretization).
+
+Returns the fraction of total trajectory time spent with `x_j(t) ≤ q`.
+"""
+function cdf(trace::AbstractPDMPTrace, q::Real; coordinate::Integer)
+    flow = trace.flow
+    base = _underlying_flow(flow)
+    j = coordinate
+
+    iter = trace
+    next = iterate(iter)
+    isnothing(next) && error("Cannot compute CDF on an empty trace")
+
+    t₀, x_state, θ_state, _ = next[2]
+    x0j = x_state[j]
+    θ0j = θ_state[j]
+    start_time = t₀
+
+    next = iterate(iter, next[2])
+    isnothing(next) && error("Cannot compute CDF on a trace with fewer than 2 events")
+
+    total_below = 0.0
+    while next !== nothing
+        t₁, x_state, θ_state, _ = next[2]
+        τ = t₁ - t₀
+        if base isa Boomerang
+            total_below += _time_below_segment(flow, x0j, θ0j, τ, q, base.μ[j])
+        else
+            total_below += _time_below_segment(flow, x0j, θ0j, τ, q)
+        end
+        t₀ = t₁
+        x0j = x_state[j]
+        θ0j = θ_state[j]
+        next = iterate(iter, next[2])
+    end
+
+    total_time = t₀ - start_time
+    return total_below / total_time
+end
+
+function _trace_coordinate_bounds(trace::AbstractPDMPTrace, j::Integer)
+    lo, hi = Inf, -Inf
+    base = _underlying_flow(trace.flow)
+    is_boom = base isa Boomerang
+
+    for event in trace.events
+        xj = event.position[j]
+        lo = min(lo, xj)
+        hi = max(hi, xj)
+        if is_boom
+            R = hypot(xj - base.μ[j], event.velocity[j])
+            lo = min(lo, base.μ[j] - R)
+            hi = max(hi, base.μ[j] + R)
+        end
+    end
+    return lo, hi
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sweep-line quantile for linear dynamics (ZigZag & BPS)
+# ──────────────────────────────────────────────────────────────────────────────
+
+function _collect_sweep_events(trace::AbstractPDMPTrace, j::Integer)
+    density_changes = Tuple{Float64, Float64}[]
+    point_masses    = Tuple{Float64, Float64}[]
+
+    iter = trace
+    next = iterate(iter)
+    isnothing(next) && error("Cannot compute quantile on an empty trace")
+    t₀, x_state, θ_state, _ = next[2]
+    x0j = Float64(x_state[j])
+    θ0j = Float64(θ_state[j])
+    start_time = t₀
+
+    next = iterate(iter, next[2])
+    isnothing(next) && error("Cannot compute quantile on a trace with fewer than 2 events")
+
+    while next !== nothing
+        t₁, x_state, θ_state, _ = next[2]
+        τ = t₁ - t₀
+        if iszero(θ0j)
+            push!(point_masses, (x0j, τ))
+        else
+            x_end = x0j + θ0j * τ
+            lo = min(x0j, x_end)
+            hi = max(x0j, x_end)
+            d_inv = inv(abs(θ0j))
+            push!(density_changes, (lo,  d_inv))
+            push!(density_changes, (hi, -d_inv))
+        end
+        t₀ = t₁
+        x0j = Float64(x_state[j])
+        θ0j = Float64(θ_state[j])
+        next = iterate(iter, next[2])
+    end
+
+    total_time = t₀ - start_time
+    return total_time, density_changes, point_masses
+end
+
+function _quantile_linear_sweep(
+    total_time::Float64,
+    density_changes::Vector{Tuple{Float64, Float64}},
+    point_masses::Vector{Tuple{Float64, Float64}},
+    sorted_targets::Vector{Float64},
+)
+    n_dc = length(density_changes)
+    n_pm = length(point_masses)
+    n_events = n_dc + n_pm
+    # (x, density_delta, point_mass_weight)
+    events = Vector{Tuple{Float64, Float64, Float64}}(undef, n_events)
+    for i in 1:n_dc
+        events[i] = (density_changes[i][1], density_changes[i][2], 0.0)
+    end
+    for i in 1:n_pm
+        events[n_dc + i] = (point_masses[i][1], 0.0, point_masses[i][2])
+    end
+    sort!(events; by=first)
+
+    n_q = length(sorted_targets)
+    results = Vector{Float64}(undef, n_q)
+    qi = 1  # pointer into sorted_targets
+
+    cumulative = 0.0
+    density = 0.0
+    prev_x = NaN
+    i = 1
+
+    while i ≤ n_events && qi ≤ n_q
+        x_k = events[i][1]
+
+        # linear growth from prev_x to x_k
+        if density > 0 && !isnan(prev_x)
+            growth = density * (x_k - prev_x)
+            while qi ≤ n_q && cumulative + growth ≥ sorted_targets[qi]
+                needed = sorted_targets[qi] - cumulative
+                results[qi] = prev_x + needed / density
+                qi += 1
+            end
+            cumulative += growth
+        end
+
+        # process all events at x_k
+        while i ≤ n_events && events[i][1] == x_k
+            density += events[i][2]
+            pm = events[i][3]
+            if pm > 0
+                cumulative += pm
+                while qi ≤ n_q && cumulative ≥ sorted_targets[qi]
+                    results[qi] = x_k
+                    qi += 1
+                end
+            end
+            i += 1
+        end
+
+        prev_x = x_k
+    end
+
+    qi ≤ n_q && error("Quantile sweep did not resolve all targets (resolved $(qi-1)/$n_q)")
+    return results
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public quantile / median API
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    Statistics.quantile(trace::AbstractPDMPTrace, p; coordinate::Integer)
+
+Compute the `p`-th marginal quantile from the continuous occupation measure of a PDMP trace.
+`p` can be a scalar or a vector of probabilities. When `coordinate` is omitted, returns
+a vector of quantiles for all coordinates (only valid for scalar `p`).
+
+For linear dynamics (Zig-Zag, BPS) this uses an exact O(N log N) sweep-line
+algorithm over the piecewise-linear CDF. For Boomerang dynamics it falls back
+to bisection root-finding on the exact CDF.
+"""
+function Statistics.quantile(trace::AbstractPDMPTrace, p::Real; coordinate::Integer=-1)
+    (0 < p < 1) || throw(DomainError(p, "Quantile probability must be in (0, 1)"))
+    if coordinate == -1
+        d = length(first(trace).position)
+        return [_quantile_scalar(trace, p, j) for j in 1:d]
+    end
+    return _quantile_scalar(trace, p, coordinate)
+end
+
+function Statistics.quantile(trace::AbstractPDMPTrace, p::AbstractVector{<:Real}; coordinate::Integer)
+    all(x -> 0 < x < 1, p) || throw(DomainError(p, "All quantile probabilities must be in (0, 1)"))
+    base = _underlying_flow(trace.flow)
+    if base isa Boomerang
+        return [_quantile_scalar(trace, pi, coordinate) for pi in p]
+    end
+    total_time, dc, pm = _collect_sweep_events(trace, coordinate)
+    order = sortperm(collect(p))
+    sorted_targets = [p[i] * total_time for i in order]
+    sorted_results = _quantile_linear_sweep(total_time, dc, pm, sorted_targets)
+    results = similar(sorted_results)
+    for i in eachindex(order)
+        results[order[i]] = sorted_results[i]
+    end
+    return results
+end
+
+function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer)
+    base = _underlying_flow(trace.flow)
+    if base isa Boomerang
+        lo, hi = _trace_coordinate_bounds(trace, coordinate)
+        f(q) = cdf(trace, q; coordinate) - p
+        return Roots.find_zero(f, (lo, hi), Roots.Bisection())
+    end
+    total_time, dc, pm = _collect_sweep_events(trace, coordinate)
+    return _quantile_linear_sweep(total_time, dc, pm, [p * total_time])[1]
+end
+
+function Statistics.median(trace::AbstractPDMPTrace; coordinate::Integer=-1)
+    return Statistics.quantile(trace, 0.5; coordinate)
+end
+
 """
     ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(trace))))
 
@@ -509,6 +736,69 @@ function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flo
     end
     return buf
 end
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Time-below-threshold for individual segments (used by `cdf` and `quantile`)
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    _time_below_segment(flow, x0j, θ0j, τ, q[, μj])
+
+Return the duration within a segment `[0, τ]` for which coordinate `j` satisfies `x_j(t) ≤ q`.
+Linear dynamics: `x_j(t) = x0j + θ0j * t`.
+Boomerang dynamics: `x_j(t) = μj + (x0j - μj) cos(t) + θ0j sin(t)`.
+"""
+function _time_below_segment(::Union{ZigZag, BouncyParticle}, x0j::Real, θ0j::Real, τ::Real, q::Real)
+    if iszero(θ0j)
+        return x0j ≤ q ? τ : zero(τ)
+    end
+    t_cross = (q - x0j) / θ0j
+    t_clamped = clamp(t_cross, zero(τ), τ)
+    return θ0j > 0 ? t_clamped : τ - t_clamped
+end
+
+function _time_below_segment(flow::Boomerang, x0j::Real, θ0j::Real, τ::Real, q::Real, μj::Real)
+    a = x0j - μj
+    b = θ0j
+    C = q - μj
+    R = hypot(a, b)
+
+    (R ≤ 0 || C ≥ R)  && return τ
+    C ≤ -R             && return zero(τ)
+
+    φ = atan(b, a)
+    α = acos(clamp(C / R, -one(R), one(R)))
+
+    crossings = Float64[]
+    for sign in (1, -1)
+        base = φ + sign * α
+        k_min = ceil(Int, -base / (2π))
+        k_max = floor(Int, (τ - base) / (2π))
+        for k in k_min:k_max
+            t = base + 2π * k
+            if 0 < t < τ
+                push!(crossings, t)
+            end
+        end
+    end
+
+    sort!(crossings)
+    pushfirst!(crossings, 0.0)
+    push!(crossings, Float64(τ))
+
+    time_below = 0.0
+    for i in 1:length(crossings) - 1
+        t_mid = (crossings[i] + crossings[i + 1]) / 2
+        x_mid = μj + a * cos(t_mid) + b * sin(t_mid)
+        if x_mid ≤ q
+            time_below += crossings[i + 1] - crossings[i]
+        end
+    end
+    return time_below
+end
+
+_time_below_segment(pd::PreconditionedDynamics, args...) = _time_below_segment(pd.dynamics, args...)
 
 function _integrate(trace::AbstractPDMPTrace, f, args...)
 

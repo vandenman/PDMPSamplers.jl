@@ -330,12 +330,11 @@ function gen_data(::Type{LogisticRegressionModel}, d, n,
 
         mul!(η, X, β)
         p .= LogExpFunctions.logistic.(η)
-        η .= p .* (1.0 .- p)
+        p .= p .* (1.0 .- p)   # p now holds weights w
 
-        Xv = η # rename for clarity
-        mul!(Xv, X, v)
-        Xv .*= η
-        mul!(buffer, X', Xv)
+        mul!(η, X, v)          # η <- X * v
+        η .*= p                # η <- w .* (X * v)
+        mul!(buffer, X', η)
         out .+= buffer
     end
 
@@ -712,7 +711,12 @@ function _flow_name(trace)
     end
 end
 
-_r3(x) = round(x; digits=3)
+function _f3(x)
+    s = string(round(x; digits=3))
+    i = findfirst('.', s)
+    i === nothing && (s *= "."; i = length(s))
+    return s * "0" ^ max(0, 3 - (length(s) - i))
+end
 
 function _isapprox_closeness(a, b; rtol::Real=0.0, atol::Real=0.0)
     err = norm(a .- b)
@@ -757,7 +761,7 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     if failed || show_test_diagnostics
         d = length(D)
         label = failed ? "FAIL" : "ok  "
-        @info "$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_r3(c_mean)) | c_cov=$(_r3(c_cov)) | c_quant=$(_r3(c_quant))"
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
 end
 
@@ -802,7 +806,7 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     if failed || show_test_diagnostics
         d = length(D)
         label = failed ? "FAIL" : "ok  "
-        @info "$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_r3(c_mean)) | c_cov=$(_r3(c_cov)) | c_quant=$(_r3(c_quant))"
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
 end
 
@@ -996,6 +1000,6 @@ function test_approximation(trace, D::SpikeAndSlabDist)
     if failed || show_test_diagnostics
         label = failed ? "FAIL" : "ok  "
         dname = data_name(typeof(D), d)
-        @info "$label | $(rpad(_flow_name(trace), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_incl=$(_r3(c_incl)) | c_full=$(_r3(c_full))"
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_incl=$(_f3(c_incl)) | c_full=$(_f3(c_full))")
     end
 end

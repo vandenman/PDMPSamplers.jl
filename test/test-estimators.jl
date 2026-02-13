@@ -62,5 +62,62 @@
         ratios_batches = e1 ./ e2
         @test all(r -> 0.3 < r < 3.0, ratios_batches)
 
+        # --- CDF and quantile ---
+        marginal_σ = sqrt.(diag(cov(D)))
+
+        for j in 1:d
+            marginal_dist = Normal(μ[j], marginal_σ[j])
+
+            # CDF at the true mean should be ≈ 0.5 (by symmetry)
+            @test PDMPSamplers.cdf(trace, μ[j]; coordinate=j) ≈ 0.5 atol = 0.1
+
+            # CDF at the true median ± 2σ should bracket the distribution
+            @test PDMPSamplers.cdf(trace, μ[j] - 3marginal_σ[j]; coordinate=j) < 0.05
+            @test PDMPSamplers.cdf(trace, μ[j] + 3marginal_σ[j]; coordinate=j) > 0.95
+
+            # CDF should match discretized empirical CDF
+            disc_cdf_at_mean = mean(samples[:, j] .≤ μ[j])
+            @test PDMPSamplers.cdf(trace, μ[j]; coordinate=j) ≈ disc_cdf_at_mean atol = atol
+
+            # CDF should match the true CDF
+            for q_val in [μ[j] - marginal_σ[j], μ[j], μ[j] + marginal_σ[j]]
+                true_cdf = Distributions.cdf(marginal_dist, q_val)
+                @test PDMPSamplers.cdf(trace, q_val; coordinate=j) ≈ true_cdf atol = 0.1
+            end
+        end
+
+        # Quantile: compare against true quantiles and discretized quantiles
+        ps = [0.1, 0.25, 0.5, 0.75, 0.9]
+        for p in ps
+            q_trace = quantile(trace, p)
+            @test length(q_trace) == d
+
+            for j in 1:d
+                marginal_dist = Normal(μ[j], marginal_σ[j])
+                q_true = quantile(marginal_dist, p)
+                q_disc = quantile(samples[:, j], p)
+                q_j = quantile(trace, p; coordinate=j)
+
+                @test q_j ≈ q_trace[j]
+                @test q_j ≈ q_true atol = max(0.5, 2 * se_factor * marginal_σ[j])
+                @test q_j ≈ q_disc atol = atol * marginal_σ[j]
+            end
+        end
+
+        # Vector-of-quantiles: single sweep should match scalar calls
+        for j in 1:d
+            q_vec = quantile(trace, ps; coordinate=j)
+            @test length(q_vec) == length(ps)
+            for (k, p) in enumerate(ps)
+                @test q_vec[k] ≈ quantile(trace, p; coordinate=j)
+            end
+        end
+
+        # Median should equal the 0.5 quantile
+        @test median(trace) ≈ quantile(trace, 0.5)
+        for j in 1:d
+            @test median(trace; coordinate=j) ≈ quantile(trace, 0.5; coordinate=j)
+        end
+
     end
 end
