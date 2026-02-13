@@ -48,10 +48,8 @@
         # (Boomerang's curved dynamics cause higher autocorrelation in discretized samples)
         if !(pdmp_type === Boomerang)
             e_disc = MCMCDiagnosticTools.ess.(eachcol(samples))
-            for i in 1:d
-                ratio = e[i] / e_disc[i]
-                @test 0.1 < ratio < 10.0
-            end
+            ratios = e ./ e_disc
+            @test all(r -> 0.1 < r < 10.0, ratios)
         end
 
         # different n_batches should give similar results (within factor 3)
@@ -61,9 +59,8 @@
         @test length(e2) == d
         @test all(e1 .> 0)
         @test all(e2 .> 0)
-        for i in 1:d
-            @test 0.3 < e1[i] / e2[i] < 3.0
-        end
+        ratios_batches = e1 ./ e2
+        @test all(r -> 0.3 < r < 3.0, ratios_batches)
 
     end
 end

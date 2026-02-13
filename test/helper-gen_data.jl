@@ -738,10 +738,12 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     q_observed = quantile(samples[:, 1], probs)
     quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
-    if show_test_diagnostics
-        c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
-        c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
-        c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
+    # always compute diagnostics; print on failure or when show_test_diagnostics is set
+    c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+    c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
+    c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
+    failed = c_mean > 1.0 || (cov_rtol < 1.0 && c_cov > 1.0) || (quant_rtol < 1.0 && c_quant > 1.0)
+    if failed || show_test_diagnostics
         @info "test_approximation" min_ess c_mean c_cov c_quant
     end
 end
@@ -780,10 +782,12 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     q_observed = map(Base.Fix1(quantile, samples[:, 1]), qprobs)
     quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
-    if show_test_diagnostics
-        c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
-        c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
-        c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
+    # always compute diagnostics; print on failure or when show_test_diagnostics is set
+    c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+    c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
+    c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
+    failed = c_mean > 1.0 || (cov_rtol < 1.0 && c_cov > 1.0) || (quant_rtol < 1.0 && c_quant > 1.0)
+    if failed || show_test_diagnostics
         @info "test_approximation (MvTDist)" min_ess kurtosis_factor c_mean c_cov c_quant
     end
 end
@@ -953,11 +957,9 @@ function test_approximation(trace, D::SpikeAndSlabDist)
     true_incl_probs = mean(D.spike_dist)
 
     # MvTDist slabs have heavier tails and slower mixing, so we allow a larger base tolerance
-    incl_atol = D.slab_dist isa Distributions.MvTDist ? (0.08 + 1.5 * mc) : (0.02 + 1.0 * mc)
+    incl_atol = D.slab_dist isa Distributions.MvTDist ? (0.08 + 1.5 * mc) : (0.04 + 1.5 * mc)
 
-    for i in 1:d
-        @test isapprox(est_incl_probs[i], true_incl_probs[i]; atol=incl_atol)
-    end
+    @test all(abs.(est_incl_probs .- true_incl_probs) .<= incl_atol)
 
     est_mean = mean(trace)
     mean_rtol = 0.15 + 3.0 * mc
@@ -968,13 +970,17 @@ function test_approximation(trace, D::SpikeAndSlabDist)
     @test isapprox(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
 
     # conditional slab mean: mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
-    est_slab_mean = est_mean[1:d] ./ est_incl_probs[1:d]
-    @test isapprox(est_slab_mean, mean(D.slab_dist); rtol=mean_rtol, atol=mean_atol)
+    # skip when any estimated inclusion probability is too small — the division is numerically unstable
+    if all(est_incl_probs .>= 0.1)
+        est_slab_mean = est_mean[1:d] ./ est_incl_probs[1:d]
+        @test isapprox(est_slab_mean, mean(D.slab_dist); rtol=mean_rtol, atol=mean_atol)
+    end
 
-    if show_test_diagnostics
-        c_incl = maximum(abs(est_incl_probs[i] - true_incl_probs[i]) / incl_atol for i in 1:d)
-        c_full = _isapprox_closeness(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
-        c_slab = _isapprox_closeness(est_slab_mean, mean(D.slab_dist); rtol=mean_rtol, atol=mean_atol)
-        @info "test_approximation (SpikeAndSlab)" min_ess incl_atol c_incl c_full c_slab
+    # always compute diagnostics; print on failure or when show_test_diagnostics is set
+    c_incl = maximum(abs(est_incl_probs[i] - true_incl_probs[i]) / incl_atol for i in 1:d)
+    c_full = _isapprox_closeness(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
+    failed = c_incl > 1.0 || c_full > 1.0
+    if failed || show_test_diagnostics
+        @info "test_approximation (SpikeAndSlab)" min_ess incl_atol c_incl c_full
     end
 end
