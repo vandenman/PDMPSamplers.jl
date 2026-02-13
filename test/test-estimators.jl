@@ -88,6 +88,7 @@
 
         # Quantile: compare against true quantiles and discretized quantiles
         ps = [0.1, 0.25, 0.5, 0.75, 0.9]
+        scalar_q = Dict{Tuple{Float64,Int}, Float64}()
         for p in ps
             q_trace = quantile(trace, p)
             @test length(q_trace) == d
@@ -97,6 +98,7 @@
                 q_true = quantile(marginal_dist, p)
                 q_disc = quantile(samples[:, j], p)
                 q_j = quantile(trace, p; coordinate=j)
+                scalar_q[(p, j)] = q_j
 
                 @test q_j ≈ q_trace[j]
                 @test q_j ≈ q_true atol = max(0.5, 2 * se_factor * marginal_σ[j])
@@ -109,14 +111,15 @@
             q_vec = quantile(trace, ps; coordinate=j)
             @test length(q_vec) == length(ps)
             for (k, p) in enumerate(ps)
-                @test q_vec[k] ≈ quantile(trace, p; coordinate=j)
+                @test q_vec[k] ≈ scalar_q[(p, j)]
             end
         end
 
         # Median should equal the 0.5 quantile
-        @test median(trace) ≈ quantile(trace, 0.5)
+        q_median = median(trace)
+        @test q_median ≈ [scalar_q[(0.5, j)] for j in 1:d]
         for j in 1:d
-            @test median(trace; coordinate=j) ≈ quantile(trace, 0.5; coordinate=j)
+            @test median(trace; coordinate=j) ≈ scalar_q[(0.5, j)]
         end
 
     end

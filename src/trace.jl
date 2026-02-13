@@ -194,39 +194,51 @@ from the continuous occupation measure of a PDMP trace (no discretization).
 
 Returns the fraction of total trajectory time spent with `x_j(t) ≤ q`.
 """
-function cdf(trace::AbstractPDMPTrace, q::Real; coordinate::Integer)
+function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
     flow = trace.flow
     base = _underlying_flow(flow)
     j = coordinate
-
-    iter = trace
-    next = iterate(iter)
-    isnothing(next) && error("Cannot compute CDF on an empty trace")
-
-    t₀, x_state, θ_state, _ = next[2]
-    x0j = x_state[j]
-    θ0j = θ_state[j]
-    start_time = t₀
-
-    next = iterate(iter, next[2])
-    isnothing(next) && error("Cannot compute CDF on a trace with fewer than 2 events")
+    events = trace.events
+    length(events) < 2 && error("Cannot compute CDF on a trace with fewer than 2 events")
 
     total_below = 0.0
-    while next !== nothing
-        t₁, x_state, θ_state, _ = next[2]
-        τ = t₁ - t₀
+    @inbounds for i in 1:length(events)-1
+        x0j = events[i].position[j]
+        θ0j = events[i].velocity[j]
+        τ = events[i+1].time - events[i].time
         if base isa Boomerang
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q, base.μ[j])
         else
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q)
         end
-        t₀ = t₁
-        x0j = x_state[j]
-        θ0j = θ_state[j]
-        next = iterate(iter, next[2])
     end
 
-    total_time = t₀ - start_time
+    total_time = events[end].time - events[1].time
+    return total_below / total_time
+end
+
+function cdf(trace::FactorizedTrace, q::Real; coordinate::Integer)
+    j = coordinate
+    initial = trace.initial_state
+    xj = Float64(initial.position[j])
+    θj = Float64(initial.velocity[j])
+    t_prev = Float64(initial.time)
+
+    total_below = 0.0
+    @inbounds for event in trace.events
+        τ = event.time - t_prev
+        if τ > 0
+            total_below += _time_below_segment(trace.flow, xj, θj, τ, q)
+            xj += θj * τ
+        end
+        if event.index == j
+            xj = Float64(event.position)
+            θj = Float64(event.velocity)
+        end
+        t_prev = event.time
+    end
+
+    total_time = trace.events[end].time - initial.time
     return total_below / total_time
 end
 
@@ -252,24 +264,17 @@ end
 # Sweep-line quantile for linear dynamics (ZigZag & BPS)
 # ──────────────────────────────────────────────────────────────────────────────
 
-function _collect_sweep_events(trace::AbstractPDMPTrace, j::Integer)
+function _collect_sweep_events(trace::PDMPTrace, j::Integer)
+    events = trace.events
+    length(events) < 2 && error("Cannot compute quantile on a trace with fewer than 2 events")
+
     density_changes = Tuple{Float64, Float64}[]
     point_masses    = Tuple{Float64, Float64}[]
 
-    iter = trace
-    next = iterate(iter)
-    isnothing(next) && error("Cannot compute quantile on an empty trace")
-    t₀, x_state, θ_state, _ = next[2]
-    x0j = Float64(x_state[j])
-    θ0j = Float64(θ_state[j])
-    start_time = t₀
-
-    next = iterate(iter, next[2])
-    isnothing(next) && error("Cannot compute quantile on a trace with fewer than 2 events")
-
-    while next !== nothing
-        t₁, x_state, θ_state, _ = next[2]
-        τ = t₁ - t₀
+    @inbounds for i in 1:length(events)-1
+        x0j = Float64(events[i].position[j])
+        θ0j = Float64(events[i].velocity[j])
+        τ = events[i+1].time - events[i].time
         if iszero(θ0j)
             push!(point_masses, (x0j, τ))
         else
@@ -280,13 +285,44 @@ function _collect_sweep_events(trace::AbstractPDMPTrace, j::Integer)
             push!(density_changes, (lo,  d_inv))
             push!(density_changes, (hi, -d_inv))
         end
-        t₀ = t₁
-        x0j = Float64(x_state[j])
-        θ0j = Float64(θ_state[j])
-        next = iterate(iter, next[2])
     end
 
-    total_time = t₀ - start_time
+    total_time = events[end].time - events[1].time
+    return total_time, density_changes, point_masses
+end
+
+function _collect_sweep_events(trace::FactorizedTrace, j::Integer)
+    initial = trace.initial_state
+    xj = Float64(initial.position[j])
+    θj = Float64(initial.velocity[j])
+    t_prev = Float64(initial.time)
+
+    density_changes = Tuple{Float64, Float64}[]
+    point_masses    = Tuple{Float64, Float64}[]
+
+    @inbounds for event in trace.events
+        τ = event.time - t_prev
+        if τ > 0
+            if iszero(θj)
+                push!(point_masses, (xj, τ))
+            else
+                x_end = xj + θj * τ
+                lo = min(xj, x_end)
+                hi = max(xj, x_end)
+                d_inv = inv(abs(θj))
+                push!(density_changes, (lo,  d_inv))
+                push!(density_changes, (hi, -d_inv))
+            end
+            xj += θj * τ
+        end
+        if event.index == j
+            xj = Float64(event.position)
+            θj = Float64(event.velocity)
+        end
+        t_prev = event.time
+    end
+
+    total_time = trace.events[end].time - initial.time
     return total_time, density_changes, point_masses
 end
 

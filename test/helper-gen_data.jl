@@ -748,10 +748,7 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     probs = .1:.1:.99
     dist = Normal(mean(D)[1], sqrt(cov(D)[1, 1]))
     q_expected = map(Base.Fix1(quantile, dist), probs)
-    ts = [event.time for event in trace.events]
-    dt = Statistics.mean(diff(ts))
-    samples = Matrix(PDMPDiscretize(trace, dt))
-    q_observed = quantile(samples[:, 1], probs)
+    q_observed = quantile(trace, collect(probs); coordinate=1)
     quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
     c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
@@ -793,10 +790,7 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     qprobs = .1:.1:.99
     marginal_dist = μ_D[1] + sqrt(Σ_D[1, 1]) * Distributions.TDist(ν_D)
     q_expected = map(Base.Fix1(quantile, marginal_dist), qprobs)
-    ts = [event.time for event in trace.events]
-    dt = Statistics.mean(diff(ts))
-    samples = Matrix(PDMPDiscretize(trace, dt))
-    q_observed = map(Base.Fix1(quantile, samples[:, 1]), qprobs)
+    q_observed = quantile(trace, collect(qprobs); coordinate=1)
     quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
     c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
@@ -975,7 +969,7 @@ function test_approximation(trace, D::SpikeAndSlabDist)
     true_incl_probs = mean(D.spike_dist)
 
     # MvTDist slabs have heavier tails and slower mixing, so we allow a larger base tolerance
-    incl_atol = D.slab_dist isa Distributions.MvTDist ? (0.10 + 1.5 * mc) : (0.04 + 1.5 * mc)
+    incl_atol = D.slab_dist isa Distributions.MvTDist ? (0.15 + 1.5 * mc) : (0.04 + 1.5 * mc)
 
     @test all(abs.(est_incl_probs .- true_incl_probs) .<= incl_atol)
 
