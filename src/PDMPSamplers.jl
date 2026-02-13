@@ -103,6 +103,13 @@ export
     CoordinateWiseGradient,
     compute_gradient!,
 
+    # Event metadata
+    PDMPEventMeta,
+    BoundsMeta,
+    GradientMeta,
+    CoordinateMeta,
+    EmptyMeta,
+
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
@@ -131,7 +138,8 @@ export
     # cov,
     # cor,
     inclusion_probs,
-    refresh_rate
+    refresh_rate,
+    ess
 
 # Helper functions
 # ab,

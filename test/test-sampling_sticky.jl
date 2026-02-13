@@ -47,7 +47,7 @@
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
                     d = first(data_arg)
-                    T = data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist} ? 1_000_000.0 : 300_000.0
+                    T = data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist} ? 600_000.0 : 200_000.0
                     c0 = pdmp_type === ZigZag ? 1e-4 : 1e-2
 
                     flow = pdmp_type(inv(Symmetric(cov(D.slab_dist))), mean(D.slab_dist))

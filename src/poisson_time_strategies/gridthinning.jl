@@ -324,7 +324,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
-    default_return = (; ∇ϕx=alg.empty_∇ϕx)
+    default_return = GradientMeta(alg.empty_∇ϕx)
 
     # Build grid once for this event
     construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
@@ -378,7 +378,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
             tightness = l_reflection / lb_reflection
             _adapt_grid_N!(alg, tightness)
             stats.grid_N_current = alg.N[]
-            return τ_reflection, :reflect, (; ∇ϕx)
+            return τ_reflection, :reflect, GradientMeta(∇ϕx)
         end
 
         # Rejection: cumulative_exp has advanced, next proposal will be at a later time

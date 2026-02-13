@@ -153,7 +153,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
             stats.reflections_accepted += 1
 
             if flow isa ZigZag
-                i = meta
+                i = meta.i
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
             else
                 ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
@@ -165,7 +165,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         else
 
             # Reuse gradient from meta when available (e.g., GridThinningStrategy already computed it)
-            if meta isa NamedTuple && haskey(meta, :∇ϕx) && length(meta.∇ϕx) == length(state.ξ.x)
+            if meta isa GradientMeta && length(meta.∇ϕx) == length(state.ξ.x)
                 ∇ϕx = meta.∇ϕx
             else
                 ∇ϕx = compute_gradient_for_reflection!(state, gradient_strategy, flow, cache)
@@ -207,7 +207,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
     elseif event_type == :sticky
 
         stats.sticky_events += 1
-        i = meta
+        i = meta.i
         stick_or_unstick!(state, flow, alg, i)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true
@@ -239,7 +239,7 @@ function handle_event!(τ::Real, gradient_strategy::CoordinateWiseGradient, flow
     stats.last_rejected = false
     # rename for clarity
     pq = cache.pq
-    i₀ = meta  # winning coordinate
+    i₀ = meta.i  # winning coordinate
     ξ = state.ξ
     t = state.t[]
 
@@ -309,12 +309,10 @@ accept_reflection_event(::GridAdaptiveState, args...) = true
 accept_reflection_event(::RootsPoissonTimeStrategy, args...) = true
 accept_reflection_event(alg::StickyLoopState, args...) = accept_reflection_event(alg.inner_alg_state, args...)
 # the only type for which we need this function!
-function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta)
+function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta::BoundsMeta)
 
-    # rename for clarity
-    abc = meta
     l = λ(ξ, ∇ϕx, flow)
-    l_bound = pos(abc[1] + abc[2] * dt)
+    l_bound = pos(meta.a + meta.b * dt)
 
     # TODO: don't throw when adapting!
     #l > l_bound && !(l <= 1e-6) && error("Tuning parameter `c` too small: l=$l, lb=$l_bound")
@@ -327,7 +325,7 @@ function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::
     if accept
         l > l_bound && !(l <= 1e-6) && error("Tuning parameter `c` too small: l=$l, lb=$l_bound")
     else
-        # @info "rejecting u * l_bound = $(u) * $(l_bound) = $(u * l_bound) <= l = $l where abc=$abc and dt=$dt"
+        # @info "rejecting u * l_bound = $(u) * $(l_bound) = $(u * l_bound) <= l = $l where meta=$meta and dt=$dt"
     end
 
     return accept

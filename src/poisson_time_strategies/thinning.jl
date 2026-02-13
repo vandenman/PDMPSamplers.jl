@@ -89,8 +89,7 @@ function next_event_time(::PDMPModel{<:GlobalGradientStrategy}, flow::Continuous
         event_type = :refresh
     end
 
-    # probably we always want to return abc for type stability?
-    return dt, event_type, abc
+    return dt, event_type, BoundsMeta(abc[1], abc[2])
 
 end
 
@@ -100,5 +99,5 @@ function next_event_time(::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::T
     i₀, t_event = Base.popfirst!(pq)
     τ = t_event - state.t[]
     @assert ispositive(τ) "$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event"
-    return τ, nothing, i₀ # meta = winning coordinate
+    return τ, nothing, CoordinateMeta(i₀)
 end

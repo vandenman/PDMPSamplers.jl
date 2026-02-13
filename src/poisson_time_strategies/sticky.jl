@@ -311,9 +311,9 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         if tᶠ < t′ && tᶠ < tʳ #  sticky event happens first
             Δt = tᶠ - t
             # iszero(Δt) && @warn "Sticky event time equals current time t = $t. This may lead to infinite loops."
-            return Δt, :sticky, i
+            return Δt, :sticky, CoordinateMeta(i)
         elseif tʳ < t′# && tʳ < tᶠ
-            return τ_refresh, :refresh, (; ∇ϕx=alg.empty_∇ϕx)
+            return τ_refresh, :refresh, GradientMeta(alg.empty_∇ϕx)
         else
             return τ, event_type, meta
         end
@@ -328,6 +328,6 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         # end
     else
         Δt = tᶠ - t
-        return Δt, :sticky, i
+        return Δt, :sticky, CoordinateMeta(i)
     end
 end

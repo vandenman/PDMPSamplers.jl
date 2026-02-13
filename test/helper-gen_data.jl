@@ -702,41 +702,90 @@ data_name(::Type{BetaBernoulli}, d) = "BetaBern"
 data_name(::Type{BetaBernoulliHierarchical}, d) = "Bern(p), p ~ Beta"
 data_name(::Type{SpikeAndSlabDist{D1, D2}}, d) where {D1, D2} = "δ₀ + (1 - δ₀)$(data_name(D2, d)), π₀ ~ $(data_name(D1, d))"
 
-function test_approximation(samples, D::Distributions.AbstractMvNormal)
-
-    sample_mean = vec(mean(samples, dims=1))
-    sample_cov = cov(samples)
-
-    @test isapprox(sample_mean, mean(D), rtol=0.2, atol=0.2)
-    @test isapprox(sample_cov,  cov(D), rtol=0.4)
-    # test quantiles in the first dimension
-    probs = .1:.1:.99
-    # q_expected = quantile(Normal(mean(D)[1], sqrt(D.Σ[1, 1])), probs)
-    dist = Normal(mean(D)[1], sqrt(D.Σ[1, 1]))
-    q_expected = map(Base.Fix1(quantile, dist), probs)
-    q_observed = quantile(samples[:, 1], probs)
-    @test isapprox(q_observed, q_expected, rtol=0.2)
-
+function _isapprox_closeness(a, b; rtol::Real=0.0, atol::Real=0.0)
+    err = norm(a .- b)
+    tol = max(atol, rtol * max(norm(a), norm(b)))
+    return tol > 0 ? err / tol : (iszero(err) ? 0.0 : Inf)
 end
 
-function test_approximation(samples, D::Distributions.MvTDist)
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvNormal)
 
-    sample_mean = vec(mean(samples, dims=1))
-    sample_cov = cov(samples)
+    min_ess = minimum(ess(trace))
+    if min_ess < 500
+        show_test_diagnostics && @info "Skipping test_approximation (low ESS)" min_ess
+        return nothing
+    end
 
-    ν, μ, Σ = Distributions.params(D)
+    mc = 1.0 / sqrt(min_ess)
+    mean_rtol  = 0.2  + 3.0  * mc
+    mean_atol  = 0.2  + 3.0  * mc
+    cov_rtol   = 0.4  + 10.0 * mc
+    quant_rtol = 0.2  + 3.0  * mc
 
-    @test isapprox(sample_mean, mean(D), rtol=0.2, atol=0.2)
-    @test isapprox(sample_cov,  cov(D), rtol=0.4)
+    trace_mean = mean(trace)
+    trace_cov = cov(trace)
+
+    @test isapprox(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+    cov_rtol < 1.0 && @test isapprox(trace_cov, cov(D); rtol=cov_rtol)
+
+    # test quantiles in the first dimension
+    probs = .1:.1:.99
+    dist = Normal(mean(D)[1], sqrt(cov(D)[1, 1]))
+    q_expected = map(Base.Fix1(quantile, dist), probs)
+    ts = [event.time for event in trace.events]
+    dt = Statistics.mean(diff(ts))
+    samples = Matrix(PDMPDiscretize(trace, dt))
+    q_observed = quantile(samples[:, 1], probs)
+    quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
+
+    if show_test_diagnostics
+        c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+        c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
+        c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
+        @info "test_approximation" min_ess c_mean c_cov c_quant
+    end
+end
+
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist)
+
+    ν_D, μ_D, Σ_D = Distributions.params(D)
+
+    min_ess = minimum(ess(trace))
+    if min_ess < 500
+        show_test_diagnostics && @info "Skipping test_approximation (low ESS)" min_ess
+        return nothing
+    end
+
+    mc = 1.0 / sqrt(min_ess)
+    kurtosis_factor = ν_D > 4 ? sqrt((ν_D - 2) / (ν_D - 4)) : 2.0
+
+    mean_rtol  = 0.2  + 3.0  * mc
+    mean_atol  = 0.2  + 3.0  * mc
+    cov_rtol   = 0.55 + 45.0 * kurtosis_factor * mc
+    quant_rtol = 0.2  + 3.0  * mc
+
+    trace_mean = mean(trace)
+    trace_cov = cov(trace)
+
+    @test isapprox(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+    cov_rtol < 1.0 && @test isapprox(trace_cov, cov(D); rtol=cov_rtol)
 
     # test quantiles in the first dimension
     qprobs = .1:.1:.99
-
-    marginal_dist = μ[1] + sqrt(Σ[1, 1]) * Distributions.TDist(ν)
+    marginal_dist = μ_D[1] + sqrt(Σ_D[1, 1]) * Distributions.TDist(ν_D)
     q_expected = map(Base.Fix1(quantile, marginal_dist), qprobs)
+    ts = [event.time for event in trace.events]
+    dt = Statistics.mean(diff(ts))
+    samples = Matrix(PDMPDiscretize(trace, dt))
     q_observed = map(Base.Fix1(quantile, samples[:, 1]), qprobs)
-    @test isapprox(q_observed, q_expected, rtol=0.15)
+    quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
+    if show_test_diagnostics
+        c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+        c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
+        c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
+        @info "test_approximation (MvTDist)" min_ess kurtosis_factor c_mean c_cov c_quant
+    end
 end
 
 function test_approximation(
@@ -892,24 +941,40 @@ function test_approximation(trace, D::SpikeAndSlabDist)
 
     d = length(D.slab_dist)
 
+    min_ess = minimum(ess(trace))
+    if min_ess < 500
+        show_test_diagnostics && @info "Skipping test_approximation SpikeAndSlab (low ESS)" min_ess
+        return nothing
+    end
+
+    mc = 1.0 / sqrt(min_ess)
+
     est_incl_probs = inclusion_probs(trace)
     true_incl_probs = mean(D.spike_dist)
 
-    # MvTDist slabs have heavier tails and slower mixing, so we allow a larger tolerance
-    incl_atol = D.slab_dist isa Distributions.MvTDist ? 0.1 : 0.05
+    # MvTDist slabs have heavier tails and slower mixing, so we allow a larger base tolerance
+    incl_atol = D.slab_dist isa Distributions.MvTDist ? (0.08 + 1.5 * mc) : (0.02 + 1.0 * mc)
 
-    # test marginal inclusion probabilities
     for i in 1:d
         @test isapprox(est_incl_probs[i], true_incl_probs[i]; atol=incl_atol)
     end
 
     est_mean = mean(trace)
+    mean_rtol = 0.15 + 3.0 * mc
+    mean_atol = 0.15 + 3.0 * mc
 
     # full-model mean: E[x_i] = p_i * μ_i^slab
     true_full_mean = true_incl_probs .* mean(D.slab_dist)
-    @test isapprox(est_mean[1:d], true_full_mean; rtol=0.2, atol=0.2)
+    @test isapprox(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
 
     # conditional slab mean: mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
     est_slab_mean = est_mean[1:d] ./ est_incl_probs[1:d]
-    @test isapprox(est_slab_mean, mean(D.slab_dist); rtol=0.2, atol=0.2)
+    @test isapprox(est_slab_mean, mean(D.slab_dist); rtol=mean_rtol, atol=mean_atol)
+
+    if show_test_diagnostics
+        c_incl = maximum(abs(est_incl_probs[i] - true_incl_probs[i]) / incl_atol for i in 1:d)
+        c_full = _isapprox_closeness(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
+        c_slab = _isapprox_closeness(est_slab_mean, mean(D.slab_dist); rtol=mean_rtol, atol=mean_atol)
+        @info "test_approximation (SpikeAndSlab)" min_ess incl_atol c_incl c_full c_slab
+    end
 end

@@ -88,10 +88,7 @@
                     end
                     @test length(trace.events) > 100
 
-                    ts = [event.time for event in trace.events]
-                    dt = mean(diff(ts))
-                    samples = Matrix(PDMPDiscretize(trace, dt))
-                    test_approximation(samples, D)
+                    test_approximation(trace, D)
 
                 end
             end

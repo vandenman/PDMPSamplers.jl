@@ -183,6 +183,119 @@ function Statistics.cor(trace::AbstractPDMPTrace)
 end
 
 """
+    ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(trace))))
+
+Estimate the effective sample size (ESS) per coordinate from a PDMP trace
+using the batch-means method, without discretization.
+
+Splits the trace into `n_batches` equal-time batches, computes the
+time-weighted mean of each batch via exact piecewise integration, and
+returns
+
+    ESS_i = n_batches * Var_overall_i / Var(batch_means_i)
+
+The result is a `Vector{Float64}` of length `d` (the dimension of the state).
+"""
+function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(trace))))
+
+    flow = trace.flow
+
+    iter = trace
+    next = iterate(iter)
+    isnothing(next) && error("Cannot compute ESS on an empty trace")
+
+    t₀, x_state, θ_state, _ = next[2]
+    xt = copy(x_state)
+    θt = copy(θ_state)
+
+    next = iterate(iter, next[2])
+    isnothing(next) && error("Cannot compute ESS on a trace with fewer than 2 events")
+
+    d = length(xt)
+    t_start = t₀
+    t_end = trace.events[end].time
+    total_time = t_end - t_start
+
+    batch_duration = total_time / n_batches
+    batch_means = zeros(n_batches, d)
+
+    batch_idx = 1
+    batch_start = t_start
+    batch_end = t_start + batch_duration
+    batch_integral = zeros(d)
+
+    xt_next = similar(xt)
+    θt_next = similar(θt)
+
+    while next !== nothing
+        t₁, x_state, θ_state, _ = next[2]
+        copyto!(xt_next, x_state)
+        copyto!(θt_next, θ_state)
+
+        seg_start = t₀
+        seg_end = t₁
+
+        while seg_start < seg_end && batch_idx <= n_batches
+            chunk_end = min(seg_end, batch_end)
+
+            if chunk_end > seg_start
+                elapsed = seg_start - t₀
+                xt_at_seg = copy(xt)
+                θt_at_seg = copy(θt)
+                if elapsed > 0
+                    move_forward_time!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow)
+                end
+
+                contribution = _integrate_segment(
+                    Statistics.mean, flow,
+                    xt_at_seg, xt_next,
+                    θt_at_seg, θt_next,
+                    seg_start, chunk_end
+                )
+                batch_integral .+= contribution
+            end
+
+            if chunk_end >= batch_end - eps(batch_end)
+                batch_means[batch_idx, :] .= batch_integral ./ batch_duration
+                fill!(batch_integral, 0.0)
+                batch_idx += 1
+                batch_start = batch_end
+                batch_end = t_start + batch_idx * batch_duration
+            end
+
+            seg_start = chunk_end
+        end
+
+        t₀ = t₁
+        copyto!(xt, xt_next)
+        copyto!(θt, θt_next)
+        next = iterate(iter, next[2])
+    end
+
+    if batch_idx == n_batches && any(!iszero, batch_integral)
+        batch_means[batch_idx, :] .= batch_integral ./ batch_duration
+    end
+
+    n_complete = min(batch_idx, n_batches)
+    n_complete < 3 && error("Too few complete batches ($n_complete) for ESS estimation")
+    bm = view(batch_means, 1:n_complete, :)
+
+    overall_var = var(trace)
+    batch_var = vec(var(bm, dims=1))
+
+    result = Vector{Float64}(undef, d)
+    for i in 1:d
+        if batch_var[i] > 0 && overall_var[i] > 0
+            result[i] = n_complete * overall_var[i] / batch_var[i]
+        else
+            result[i] = Float64(n_complete)
+        end
+    end
+
+    return result
+end
+
+"""
     inclusion_probs(trace::AbstractPDMPTrace)
 
 Compute marginal inclusion probabilities from a PDMP trace.

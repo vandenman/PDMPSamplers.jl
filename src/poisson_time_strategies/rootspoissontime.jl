@@ -25,7 +25,7 @@ end
 function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, atol=1e-9)
     ic = IntegralCache(0.0, 0.0, Inf, Inf, Inf, Inf)  # only left at (0,0) initially
     state_s = copy(state)
-    
+
     # Define rate function outside to avoid boxing
     ratefun = let state = state, state_s = state_s, grad = grad, flow = flow, cache = cache, λ = λ
         function (s)
@@ -45,7 +45,7 @@ function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, a
             return result
         end
     end
-    
+
     function f(τ::Real)
         τ <= 0 && return -R
         # Shortcuts if τ already cached (should never happen though?)
@@ -180,9 +180,9 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         end
 
         if τ_event < τ_refresh
-            return τ_event, :reflect, nothing
+            return τ_event, :reflect, EmptyMeta()
         else
-            return τ_refresh, :refresh, nothing
+            return τ_refresh, :refresh, EmptyMeta()
         end
     end
 

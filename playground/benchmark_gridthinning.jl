@@ -80,6 +80,10 @@ function run_pdmp(; d::Int, T::Float64, dynamics::Symbol, sticky::Bool, seed::In
         alg = GridThinningStrategy()
     end
 
+    # @profview pdmp_sample(ξ0, flow, model, alg, 0.0, 10000.; progress = false)
+    # TODO: should really fix this allocation!
+    # @profview_allocs pdmp_sample(ξ0, flow, model, alg, 0.0, 10000.; progress = false)
+
     trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress = false)
     return trace, stats
 end

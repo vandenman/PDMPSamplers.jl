@@ -3,7 +3,8 @@ using PDMPSamplers
 using Random
 using LinearAlgebra
 using BridgeStan
-import JSON3
+using Statistics
+import JSON
 
 @testset "BridgeStan Extension" begin
 
@@ -43,9 +44,7 @@ import JSON3
             "sigma" => collect(eachrow(Σ))
         )
 
-        open(data_file, "w") do io
-            JSON3.write(io, data_dict)
-        end
+        JSON.json(data_file, data_dict)
 
         model = PDMPModel(stan_file, data_file)
 
@@ -68,13 +67,12 @@ import JSON3
         @test stats.reflections_accepted / stats.reflections_events > 0.1
 
         # Check that samples are approximately correct
-        samples = Matrix(PDMPDiscretize(trace, 1.0))
-        sample_mean = vec(mean(samples, dims=1))
-        sample_cov = cov(samples)
+        sample_mean = mean(trace)
+        sample_cov = cov(trace)
 
         # Very loose checks (just that it's working)
-        @test norm(sample_mean - μ) < 1.0  # Within 1.0 of true mean
-        @test norm(sample_cov - Σ) < 2.0   # Within 2.0 of true cov
+        @test norm(sample_mean - μ) < 0.5  # Within 0.5 of true mean
+        @test norm(sample_cov - Σ) < 0.75   # Within 0.75 of true cov
 
         # Note: This test requires a compiled Stan model
         # In practice, you would compile the model beforehand
