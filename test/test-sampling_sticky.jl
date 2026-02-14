@@ -47,7 +47,15 @@
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
                     d = first(data_arg)
-                    T = data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist} ? 600_000.0 : 200_000.0
+                    T = if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}
+                        600_000.0
+                    elseif pdmp_type <: Union{Boomerang, PreconditionedDynamics{<:Any, Boomerang}}
+                        50_000.0
+                    elseif pdmp_type <: Union{PreconditionedDynamics{<:Any, BouncyParticle}}
+                        100_000.0
+                    else
+                        200_000.0
+                    end
                     c0 = pdmp_type === ZigZag ? 1e-4 : 1e-2
 
                     flow = pdmp_type(inv(Symmetric(cov(D.slab_dist))), mean(D.slab_dist))
@@ -59,7 +67,7 @@
                             ThinningStrategy(GlobalBounds(c0, d))
                         end
                     else
-                        GridThinningStrategy(; N=50)
+                        GridThinningStrategy()
                     end
                     alg = if κ isa Function
                         can_stick = trues(d)

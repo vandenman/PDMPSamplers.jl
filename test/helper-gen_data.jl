@@ -535,42 +535,7 @@ function gen_data(::Type{<:SpikeAndSlabDist{<:BetaBernoulli, T}}, d, args...) wh
     D = SpikeAndSlabDist(D1, D2)
 
     mpdfs = marginal_pdfs_at_zero(D2)
-
-    κ = (i, x, γ, args...) -> begin
-
-        # critical! do not look at sum(!iszero, x)
-        # because that doesn't mean a particle is frozen.
-        # instead, use γ which is state.free
-        # note that this is only called whenever we're computing the time to stay frozen, so at that point
-        # we have γ[i] == false, hence the assert below
-        @assert !γ[i] "κ(...) was called but the coordinate to compute the freezing time for (i=$i) is not frozen!?"
-
-        k_free = sum(γ)
-        n_tot  = length(x)
-
-        # should never happen because this should only be called when we're computing the time to stay frozen
-        k_free == n_tot && throw(error("All parameters are free, cannot compute κ!"))
-
-        # inclusion odds conditional on current sticky state
-        prior_incl_odds = (a + k_free) / (b + n_tot - k_free - 1)
-
-        if n_tot - k_free - 1 + b <= 0
-            # or error?
-            # @warn "Inclusion odds are infinite"
-            return Inf
-        end
-
-        return prior_incl_odds * mpdfs[i]
-    end
-
-    # a, b = randexp(), randexp()
-    # n_tot = n = 5
-    # k_free = n # <- fails
-    # for k_free in 0:n-1
-    #     e1 = ((k_free+1) / (n_tot - k_free)) * pdf(BetaBinomial(n_tot, a, b), k_free + 1) / pdf(BetaBinomial(n_tot, a, b), k_free)
-    #     e2 =  (a + k_free) / (n_tot - k_free - 1 + b)
-    #     @assert e1 ≈ e2 "k_free = $k_free"
-    # end
+    κ = BetaBernoulliKappa(a, b, mpdfs)
 
     return D, κ, ∇f!, ∇²f!, ∂fxᵢ
 end

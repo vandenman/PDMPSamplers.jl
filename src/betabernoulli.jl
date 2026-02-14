@@ -69,3 +69,29 @@ function Distributions.var(d::BetaBernoulli)
     # The variance of a single Bernoulli trial is p*(1-p)
     return fill(p * (1 - p), d.n)
 end
+
+"""
+    BetaBernoulliKappa(a, b, mpdfs)
+
+Callable struct for the sticky unfreezing rate κ under a BetaBernoulli
+inclusion prior with parameters `a` and `b`.
+
+`mpdfs[i]` is the marginal slab density at zero for coordinate `i`.
+
+Called as `κ(i, x, γ, θ...)` where `γ` is the free/frozen indicator.
+"""
+struct BetaBernoulliKappa{T<:AbstractVector{Float64}} <: Function
+    a::Float64
+    b::Float64
+    mpdfs::T
+end
+
+function (κ::BetaBernoulliKappa)(i::Integer, x, γ, args...)
+    k_free = sum(γ)
+    n_tot  = length(x)
+    denom  = κ.b + n_tot - k_free - 1
+    if denom <= 0
+        return Inf
+    end
+    return (κ.a + k_free) / denom * κ.mpdfs[i]
+end

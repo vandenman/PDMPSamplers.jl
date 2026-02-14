@@ -78,6 +78,7 @@ export
 
     # Not really a part of this package, but useful
     BetaBernoulli,
+    BetaBernoulliKappa,
 
     # Dynamics
     ContinuousDynamics,

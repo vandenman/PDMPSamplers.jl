@@ -264,7 +264,7 @@ end
 
 
 Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
-    N::Int = 30
+    N::Int = 20
     N_min::Int = 5
     t_max::Float64 = 2.0
     α⁺::Float64 = 1.5
