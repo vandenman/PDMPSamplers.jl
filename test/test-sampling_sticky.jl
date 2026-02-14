@@ -74,20 +74,14 @@
 
                     grad = gradient_type == CoordinateWiseGradient ? CoordinateWiseGradient(∂fxᵢ) : FullGradient(∇f!)
                     model = PDMPModel(d, grad, ∇²f!)
+                    trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
-                    # MvTDist closures capture shared mutable buffers → not thread-safe
-                    threadsafe_grad = !(data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist})
-                    n_test_chains = threadsafe_grad ? 4 : 1
-                    chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T;
-                        n_chains=n_test_chains, threaded=threadsafe_grad, progress=false)
-
-                    _, stats1 = chains[1]
-                    acceptance_prob = stats1.reflections_accepted / stats1.reflections_events
+                    acceptance_prob = stats.reflections_accepted / stats.reflections_events
                     if !(flow isa Boomerang)
                         @test acceptance_prob > 0.55
                     end
 
-                    test_approximation(chains, D)
+                    test_approximation(trace, D)
 
                 end
             end

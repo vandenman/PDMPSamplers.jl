@@ -954,22 +954,10 @@ so the conditional slab mean is recoverable as:
     mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
 """
 function test_approximation(trace, D::SpikeAndSlabDist)
-    _test_approximation_spike_slab(ess(trace), inclusion_probs(trace), mean(trace), trace, D)
-end
-
-function test_approximation(chains::PDMPSamplers.PDMPChains, D::SpikeAndSlabDist)
-    nc = PDMPSamplers.n_chains(chains)
-    total_ess = sum(ess(chains; chain=i) for i in 1:nc)
-    avg_incl  = mean([inclusion_probs(chains; chain=i) for i in 1:nc])
-    avg_mean  = mean([Statistics.mean(chains; chain=i) for i in 1:nc])
-    _test_approximation_spike_slab(total_ess, avg_incl, avg_mean, chains.traces[1], D)
-end
-
-function _test_approximation_spike_slab(ess_vec, est_incl_probs, est_mean, trace_or_first, D::SpikeAndSlabDist)
 
     d = length(D.slab_dist)
 
-    min_ess = minimum(ess_vec)
+    min_ess = minimum(ess(trace))
     if min_ess < 500
         show_test_diagnostics && @info "Skipping test_approximation SpikeAndSlab (low ESS)" min_ess
         return nothing
@@ -977,6 +965,7 @@ function _test_approximation_spike_slab(ess_vec, est_incl_probs, est_mean, trace
 
     mc = 1.0 / sqrt(min_ess)
 
+    est_incl_probs = inclusion_probs(trace)
     true_incl_probs = mean(D.spike_dist)
 
     # Use a norm-based check: the per-coordinate `all(...)` test is too strict for d >= 5 because
@@ -987,15 +976,13 @@ function _test_approximation_spike_slab(ess_vec, est_incl_probs, est_mean, trace
 
     @test isapprox(est_incl_probs, true_incl_probs; atol=incl_atol)
 
+    est_mean = mean(trace)
     mean_rtol = 0.15 + 3.0 * mc
     mean_atol = 0.15 + 3.0 * mc
 
-    # full-model mean: E[x_i] = p_i * μ_i^slab
     true_full_mean = true_incl_probs .* mean(D.slab_dist)
     @test isapprox(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
 
-    # conditional slab mean: mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
-    # skip when any estimated inclusion probability is too small — the division is numerically unstable
     if all(est_incl_probs .>= 0.1)
         est_slab_mean = est_mean[1:d] ./ est_incl_probs[1:d]
         @test isapprox(est_slab_mean, mean(D.slab_dist); rtol=mean_rtol, atol=mean_atol)
@@ -1007,6 +994,6 @@ function _test_approximation_spike_slab(ess_vec, est_incl_probs, est_mean, trace
     if failed || show_test_diagnostics
         label = failed ? "FAIL" : "ok  "
         dname = data_name(typeof(D), d)
-        println("$label | $(rpad(_flow_name(trace_or_first), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_incl=$(_f3(c_incl)) | c_full=$(_f3(c_full))")
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_incl=$(_f3(c_incl)) | c_full=$(_f3(c_full))")
     end
 end
