@@ -6,6 +6,7 @@ on:
     branches:
         - main
         - revision
+    tags: ['*']
   pull_request:
     paths: ['Project.toml', '**.jl', '!docs/**', '.github/workflows/runtests.yml']
 
@@ -26,19 +27,17 @@ jobs:
         os:
           - ubuntu-latest
           - macOS-latest
-        arch:
-          - x64
     steps:
       - uses: actions/checkout@v6
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
-          arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@latest
       - uses: julia-actions/julia-runtest@latest
+      - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v5
         with:
-          file: lcov.info
+          files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
