@@ -60,6 +60,7 @@ include("trace.jl")
 include("adaptation.jl")
 
 include("pdmp_sample.jl")
+include("chains.jl")
 
 export
     # Core types
@@ -69,6 +70,7 @@ export
     # PDMPSampler,
     PDMPEvent,
     PDMPTrace,
+    PDMPChains,
     PDMPDiscretize,
     PDMPModel,
     GlobalGradientModel,
@@ -140,7 +142,8 @@ export
     cdf,
     inclusion_probs,
     refresh_rate,
-    ess
+    ess,
+    n_chains
 
 # Helper functions
 # ab,

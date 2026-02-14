@@ -32,7 +32,7 @@ Construct from a log-density `d`. Uses `ADTypes` backend to generate a `FullGrad
 
 Compatibility constructor. Wraps `f` in `FullGradient`.
 """
-struct PDMPModel{G<:GradientStrategy,H<:Union{Nothing,Function}}
+struct PDMPModel{G<:GradientStrategy,H}
     d::Int
     grad::G
     hvp::H
@@ -140,13 +140,14 @@ function PDMPModel(d::Integer, ldf::LogDensity, backend::ADTypes.AbstractADType=
     return PDMPModel(d, FullGradient(grad_f), hvp_f, false, false)
 end
 
-function with_stats(model::PDMPModel{<:GradientStrategy,<:Function}, stats::StatisticCounter)
-    hvp = (x, θ) -> begin
-        stats.∇²f_calls += 1
-        model.hvp(x, θ)
-    end
-    PDMPModel(model.d, with_stats(model.grad, stats), hvp, false, false)
+function with_stats(model::PDMPModel, stats::StatisticCounter)
+    grad_new = with_stats(model.grad, stats)
+    hvp_new = model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
+    PDMPModel(model.d, grad_new, hvp_new, false, false)
 end
-function with_stats(model::PDMPModel{<:GradientStrategy,<:Nothing}, stats::StatisticCounter)
-    PDMPModel(model.d, with_stats(model.grad, stats), nothing, false, false)
+
+struct WithStatsHVP{F,S} <: Function
+    f::F
+    stats::S
 end
+(ws::WithStatsHVP)(args...) = (ws.stats.∇²f_calls += 1; ws.f(args...))

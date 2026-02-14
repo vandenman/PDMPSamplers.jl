@@ -37,6 +37,8 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@latest
       - uses: julia-actions/julia-runtest@latest
+        env:
+          JULIA_NUM_THREADS: 4
       - uses: codecov/codecov-action@v5
         with:
           file: lcov.info

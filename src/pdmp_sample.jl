@@ -2,13 +2,51 @@ pdmp_sample(d::Integer, args...; kwargs...) = pdmp_sample(randn(d), args...; kwa
 pdmp_sample(x₀::AbstractVector, θ₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; kwargs...)
 pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, initialize_velocity(flow, length(x₀))), flow, args...; kwargs...)
 
-# the inner workhorse that all convenience constructors end up at
 function pdmp_sample(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
     alg::PoissonTimeStrategy,
-    # needs to be a separate type to determine when it's finished!
-    # options: Time and/ or no.events + ess (advanced)
-    t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0; # TODO: better default!
+    t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
+    n_chains::Int=1, threaded::Bool=false,
+    progress::Bool=true
+)
+    n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
+
+    if n_chains == 1
+        trace, stats = _pdmp_sample_single(ξ₀, flow, model, alg, t₀, T, t_warmup; progress)
+        return PDMPChains([trace], [stats])
+    end
+
+    if threaded
+        tasks = map(1:n_chains) do _
+            Threads.@spawn begin
+                model_i = _copy_model(model)
+                _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false)
+            end
+        end
+        results = fetch.(tasks)
+    else
+        results = map(1:n_chains) do _
+            model_i = _copy_model(model)
+            _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false)
+        end
+    end
+
+    traces = [r[1] for r in results]
+    all_stats = [r[2] for r in results]
+    return PDMPChains(traces, all_stats)
+end
+
+function _copy_model(model::PDMPModel)
+    grad_new = copy(model.grad)
+    hvp_new = model.hvp === nothing ? nothing : _copy_callable(model.hvp)
+    return PDMPModel(model.d, grad_new, hvp_new, false, false)
+end
+
+# the inner workhorse that runs a single chain
+function _pdmp_sample_single(
+    ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
+    alg::PoissonTimeStrategy,
+    t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
     progress::Bool=true
 )
 

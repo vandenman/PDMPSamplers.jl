@@ -1,8 +1,15 @@
+# Copy a callable: use copy for structs that define it, identity fallback for closures
+_copy_callable(f) = _has_copy(f) ? copy(f) : f
+_has_copy(f) = applicable(copy, f) && !(f isa Function)
+_copy_callable(f::Base.Fix1) = Base.Fix1(_copy_callable(f.f), copy(f.x))
+_copy_callable(f::Base.Fix2) = Base.Fix2(_copy_callable(f.f), copy(f.x))
+
 # Concrete gradient strategies
 struct FullGradient{F} <: GlobalGradientStrategy
     f::F
 end
 
+Base.copy(g::FullGradient) = FullGradient(_copy_callable(g.f))
 
 struct SubsampledGradient{F1, F2, F3, F4} <: GlobalGradientStrategy
     f::F1
@@ -26,18 +33,22 @@ SubsampledGradient(f::Function, resample_indices!::Function, update_anchor!::Fun
 struct CoordinateWiseGradient{F} <: CoordinateWiseGradientStrategy
     f::F
 end
+
+Base.copy(g::CoordinateWiseGradient) = CoordinateWiseGradient(_copy_callable(g.f))
+
 with_stats(grad::FullGradient,       stats::StatisticCounter) = FullGradient(with_stats(grad.f, stats))
 function with_stats(grad::SubsampledGradient, stats::StatisticCounter)
     SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.full, grad.nsub, grad.no_anchor_updates, grad.use_full_gradient_for_reflections)
 end
 with_stats(grad::CoordinateWiseGradient, stats::StatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))
 
-function with_stats(f::Function, stats::StatisticCounter)
-    return (args...) -> begin
-        stats.∇f_calls += 1
-        f(args...)
-    end
+with_stats(f, stats::StatisticCounter) = WithStats(f, stats)
+
+struct WithStats{F,S} <: Function
+    f::F
+    stats::S
 end
+(ws::WithStats)(args...) = (ws.stats.∇f_calls += 1; ws.f(args...))
 
 
 # struct ControlVariateGradient{F} <: GradientStrategy
