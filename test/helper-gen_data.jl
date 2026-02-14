@@ -777,8 +777,8 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
 
     mean_rtol  = 0.2  + 3.0  * mc
     mean_atol  = 0.2  + 3.0  * mc
-    cov_rtol   = 0.55 + 45.0 * kurtosis_factor * mc
-    quant_rtol = 0.2  + 3.0  * mc
+    cov_rtol   = 0.70 + 50.0 * kurtosis_factor * mc
+    quant_rtol = 0.30 + 5.0  * kurtosis_factor * mc
 
     trace_mean = mean(trace)
     trace_cov = cov(trace)

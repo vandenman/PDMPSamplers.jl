@@ -45,7 +45,7 @@
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
                     d = first(data_arg)
-                    T = data_type === Distributions.MvTDist ? 200_000.0 : 50_000.0
+                    T = data_type === Distributions.MvTDist ? 300_000.0 : 50_000.0
 
                     alg = if algorithm === ThinningStrategy
                         if gradient_type === CoordinateWiseGradient
@@ -71,7 +71,7 @@
                         pdmp_type(inv(Symmetric(cov(D))), mean(D))
                     end
 
-                    x0 = randn(d)
+                    x0 = mean(D) + randn(d)
                     θ0 = PDMPSamplers.initialize_velocity(flow, d)
                     ξ0 = SkeletonPoint(x0, θ0)
 
