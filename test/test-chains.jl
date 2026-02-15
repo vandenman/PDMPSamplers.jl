@@ -46,10 +46,10 @@
 
         trace1, stats1 = chains[1]
         trace2, stats2 = chains[2]
-        @test trace1 isa PDMPTrace
-        @test trace2 isa PDMPTrace
-        @test length(trace1.events) > 10
-        @test length(trace2.events) > 10
+        @test trace1 isa PDMPSamplers.AbstractPDMPTrace
+        @test trace2 isa PDMPSamplers.AbstractPDMPTrace
+        @test length(trace1) > 10
+        @test length(trace2) > 10
         @test stats1.elapsed_time > 0
         @test stats2.elapsed_time > 0
 
@@ -90,7 +90,7 @@
             q = Statistics.quantile(chains, 0.5; coordinate=1)
             @test q isa Real
 
-            c = cdf(chains, 0.0; coordinate=1)
+            c = PDMPSamplers.cdf(chains, 0.0; coordinate=1)
             @test 0.0 <= c <= 1.0
 
             e = ess(chains)
@@ -113,8 +113,8 @@
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; n_chains=2, threaded=true, progress=false)
         @test n_chains(chains) == 2
-        @test length(chains[1][1].events) > 10
-        @test length(chains[2][1].events) > 10
+        @test length(chains[1][1]) > 10
+        @test length(chains[2][1]) > 10
     end
 
     @testset "single chain show" begin
