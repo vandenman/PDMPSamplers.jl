@@ -27,7 +27,8 @@ import ForwardDiff
     @testset "$pdmp_type" for pdmp_type in pdmp_types
 
         d = 5
-        D, ∇f!, ∇²f!, ∂fxᵢ = gen_data(MvNormal, d, 1.0)
+        target = gen_data(MvNormal, d, 1.0)
+        D = target.D
 
         Σ = D.Σ
         μ = D.μ
@@ -75,7 +76,7 @@ import ForwardDiff
             yvals1[i], dvals1[i] = DI.value_and_derivative(f, prep, ad_type, xvals[i])
             local state_ = move_forward_time(state, xvals[i], flow)
             grad_func = PDMPSamplers.make_grad_U_func(state_, flow, grad, cache)
-            yvals2[i], dvals2[i] = PDMPSamplers.get_rate_and_deriv(state_, flow, (grad_func, (x, v)->∇²f!(out, x, v)), false)
+            yvals2[i], dvals2[i] = PDMPSamplers.get_rate_and_deriv(state_, flow, (grad_func, (x, v)->neg_hvp!(target, out, x, v)), false)
         end
         @test yvals1 ≈ yvals2
         @test dvals1 ≈ dvals2

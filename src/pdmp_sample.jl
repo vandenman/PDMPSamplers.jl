@@ -71,6 +71,8 @@ function _pdmp_sample_single(
 
     t_warmup < (T - t₀) || throw(ArgumentError("t_warmup ($t_warmup) is larger than T - t₀ ($T - $t₀ = $(T - t₀)), which implies storing nothing at all. This is probably an error."))
 
+    t_start = time_ns()
+
     state, model_, alg_, cache, stats = initialize_state(flow, model, alg, t₀, ξ₀)
 
     validate_state(state, flow, "at initialization")
@@ -107,6 +109,8 @@ function _pdmp_sample_single(
             ProgressMeter.next!(prg)
         end
     end
+
+    stats.elapsed_time = (time_ns() - t_start) / 1e9
 
     return get_main_trace(trace_manager), stats
 

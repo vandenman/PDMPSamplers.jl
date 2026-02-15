@@ -27,8 +27,9 @@ mutable struct StatisticCounter
     grid_points_evaluated::Int
     grid_points_skipped::Int
     grid_N_current::Int
+    elapsed_time::Float64
 end
-StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0)
+StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0.0)
 
 
 

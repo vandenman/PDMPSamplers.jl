@@ -10,7 +10,8 @@
 
     for pdmp_type in (Boomerang,)
 
-        D, ∇f!, ∇²f!, ∂fxᵢ = gen_data(MvNormal, d, 2.0)
+        target = gen_data(MvNormal, d, 2.0)
+        D = target.D
         flow = pdmp_type(inv(Symmetric(cov(D))), mean(D))
 
         sqrt_inv_Σ = sqrt(flow.Γ)

@@ -3,11 +3,12 @@
 @testset "Trace estimators and ESS" begin
 
     d = 5
-    D, ∇f!, ∇²f!, ∂fxᵢ = gen_data(MvNormal, d, 2.0)
+    target = gen_data(MvNormal, d, 2.0)
+    D = target.D
     Γ = inv(Symmetric(cov(D)))
     μ = mean(D)
-    grad = FullGradient(∇f!)
-    model = PDMPModel(d, grad, ∇²f!)
+    grad = FullGradient(Base.Fix1(neg_gradient!, target))
+    model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
     alg = GridThinningStrategy()
     T = 100_000.0
 

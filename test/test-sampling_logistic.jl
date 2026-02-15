@@ -1,18 +1,18 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-function find_map(∇f!::Function, ∇²f!::Function, d::Int; x0::Vector{Float64}=zeros(d), maxiter::Int=50, tol::Float64=1e-8)
+function find_map(target, d::Int; x0::Vector{Float64}=zeros(d), maxiter::Int=50, tol::Float64=1e-8)
     x = copy(x0)
     g = similar(x)
     Hv = similar(x)
     H = zeros(d, d)
     e_j = zeros(d)
     for _ in 1:maxiter
-        ∇f!(g, x)
+        neg_gradient!(target, g, x)
         norm(g) < tol && break
         for j in 1:d
             fill!(e_j, 0.0)
             e_j[j] = 1.0
-            ∇²f!(Hv, x, e_j)
+            neg_hvp!(target, Hv, x, e_j)
             H[:, j] .= Hv
         end
         x .-= H \ g
@@ -20,7 +20,7 @@ function find_map(∇f!::Function, ∇²f!::Function, d::Int; x0::Vector{Float64
     return x
 end
 
-function test_logistic_approximation(trace, β_map::Vector{Float64}; name::String="LogReg")
+function test_logistic_approximation(trace, β_map::Vector{Float64}; name::String="LogReg", elapsed::Union{Real,Nothing}=nothing)
     d = length(β_map)
     min_ess = minimum(ess(trace))
     if min_ess < 100
@@ -38,7 +38,7 @@ function test_logistic_approximation(trace, β_map::Vector{Float64}; name::Strin
     failed = c_mean > 1.0
     if failed || show_test_diagnostics
         label = failed ? "FAIL" : "ok  "
-        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(name, 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_f3(c_mean))")
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(name, 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean))")
     end
 end
 
@@ -48,10 +48,9 @@ end
     β_gen = [0.5, 1.0, -0.8]
 
     Random.seed!(2024)
-    obj, ∇f!, ∇²f!, ∇f_sub_cv!, ∇²f_sub!, resample_indices!, set_anchor!, anchor_info, β_true =
-        gen_data(LogisticRegressionModel, d, n, β_gen)
+    target = gen_data(LogisticRegressionModel, d, n, β_gen)
 
-    β_map = find_map(∇f!, ∇²f!, d)
+    β_map = find_map(target, d)
 
     pdmp_types = (ZigZag, BouncyParticle, Boomerang, PreconditionedZigZag, PreconditionedBPS)
 
@@ -72,8 +71,8 @@ end
             θ0 = PDMPSamplers.initialize_velocity(flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
-            grad = FullGradient(∇f!)
-            model = PDMPModel(d, grad, ∇²f!)
+            grad = FullGradient(Base.Fix1(neg_gradient!, target))
+            model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
             alg = GridThinningStrategy()
 
             trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
@@ -84,7 +83,7 @@ end
             end
             @test length(trace.events) > 100
 
-            test_logistic_approximation(trace, β_map; name="LogReg($d,$n)")
+            test_logistic_approximation(trace, β_map; name="LogReg($d,$n)", elapsed=stats.elapsed_time)
         end
     end
 
@@ -94,9 +93,9 @@ end
         nsub = n ÷ 10
         T = 20_000.0
 
-        grad = SubsampledGradient(∇f_sub_cv!, resample_indices!, nsub)
+        grad = SubsampledGradient(Base.Fix1(neg_gradient_sub_cv!, target), Base.Fix1(resample_indices!, target), nsub)
         flow = ZigZag(Matrix(1.0I(d)), zeros(d))
-        model = PDMPModel(d, grad, ∇²f_sub!)
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp_sub!, target))
         alg = GridThinningStrategy()
 
         x0 = zeros(d)
@@ -107,7 +106,7 @@ end
 
         @test length(trace.events) > 100
 
-        test_logistic_approximation(trace, β_map; name="LogReg($d,$n) sub")
+        test_logistic_approximation(trace, β_map; name="LogReg($d,$n) sub", elapsed=stats.elapsed_time)
     end
 
     @testset "Sticky ZigZag" begin
@@ -115,14 +114,13 @@ end
         β_gen_s = [0.5, 0.0, 1.0, 0.0, -0.8]
 
         Random.seed!(2024)
-        obj_s, ∇f_s!, ∇²f_s!, _, _, _, _, _, β_true_s =
-            gen_data(LogisticRegressionModel, d_s, n_s, β_gen_s)
+        target_s = gen_data(LogisticRegressionModel, d_s, n_s, β_gen_s)
 
-        β_map_s = find_map(∇f_s!, ∇²f_s!, d_s)
+        β_map_s = find_map(target_s, d_s)
 
         # spike-and-slab sticking rates: κᵢ = p₀/(1-p₀) × N(0; μ₀ᵢ, σ₀ᵢ²)
         p0 = 0.5
-        slab_pdf_zero = [pdf(Normal(obj_s.prior_μ[i], sqrt(obj_s.prior_Σ[i, i])), 0.0) for i in 1:d_s]
+        slab_pdf_zero = [pdf(Normal(target_s.obj.prior_μ[i], sqrt(target_s.obj.prior_Σ[i, i])), 0.0) for i in 1:d_s]
         κ = (p0 / (1 - p0)) .* slab_pdf_zero
         κ[1] = Inf  # intercept never sticks
 
@@ -138,8 +136,8 @@ end
         θ0 = PDMPSamplers.initialize_velocity(flow, d_s)
         ξ0 = SkeletonPoint(x0, θ0)
 
-        grad = FullGradient(∇f_s!)
-        model = PDMPModel(d_s, grad, ∇²f_s!)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target_s))
+        model = PDMPModel(d_s, grad, Base.Fix1(neg_hvp!, target_s))
 
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
@@ -153,7 +151,7 @@ end
         if show_test_diagnostics
             incl_str = join([_f3(incl[i]) for i in 1:d_s], ", ")
             min_ess = minimum(ess(trace))
-            println("ok   | $(rpad(_flow_name(trace), 22)) | $(rpad("LogReg($d_s,$n_s) sticky", 26)) | ESS=$(lpad(round(Int, min_ess), 7)) | incl=[$incl_str]")
+            println("ok   | $(rpad(_flow_name(trace), 22)) | $(rpad("LogReg($d_s,$n_s) sticky", 26)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(stats.elapsed_time)) | incl=[$incl_str]")
         end
     end
 

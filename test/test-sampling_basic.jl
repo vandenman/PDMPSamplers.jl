@@ -40,7 +40,8 @@
 
                     # Use a stable seed for target generation so all samplers face the same target
                     Random.seed!(hash((data_type, data_arg)))
-                    D, ∇f!, ∇²f!, ∂fxᵢ = gen_data(data_type, data_arg...)
+                    target = gen_data(data_type, data_arg...)
+                    D = target.D
                     # Re-seed for the sampler run (initial conditions, etc.)
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
@@ -75,8 +76,12 @@
                     θ0 = PDMPSamplers.initialize_velocity(flow, d)
                     ξ0 = SkeletonPoint(x0, θ0)
 
-                    grad = gradient_type == CoordinateWiseGradient ? CoordinateWiseGradient(∂fxᵢ) : FullGradient(∇f!)
-                    model = PDMPModel(d, grad, ∇²f!)
+                    grad = if gradient_type == CoordinateWiseGradient
+                        CoordinateWiseGradient(Base.Fix1(neg_partial, target))
+                    else
+                        FullGradient(Base.Fix1(neg_gradient!, target))
+                    end
+                    model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
                     trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
                     acceptance_prob = stats.reflections_accepted / stats.reflections_events
@@ -88,7 +93,7 @@
                     end
                     @test length(trace.events) > 100
 
-                    test_approximation(trace, D)
+                    test_approximation(trace, D; elapsed=stats.elapsed_time)
 
                 end
             end

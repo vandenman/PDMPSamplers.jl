@@ -1,109 +1,143 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Target structs: each bundles the reference distribution, precomputed
+# quantities, and work buffers.  Explicit methods `neg_gradient!`,
+# `neg_hvp!`, and `neg_partial` replace the former closures.
+# ──────────────────────────────────────────────────────────────────────────────
 
-function gen_data(::Type{Distributions.MvNormal}, d, η, μ = rand(Normal(0, 5), d), σ = rand(LogNormal(0, 1), d), R = rand(LKJ(d, η)))
-    # μ = rand(Normal(0, 5), d)
-    # σ = rand(LogNormal(0, 1), d)
-    # R = rand(LKJ(d, η))
+# ──────────────────────────────────────────────────────────────────────────────
+# MvNormal target
+# ──────────────────────────────────────────────────────────────────────────────
+
+struct MvNormalTarget{T<:Distributions.AbstractMvNormal}
+    D::T
+    Σ_inv::Matrix{Float64}
+    potential::Vector{Float64}   # Σ_inv * μ
+    buffer::Vector{Float64}
+end
+
+function neg_gradient!(t::MvNormalTarget, out::AbstractVector, x::AbstractVector)
+    mul!(t.buffer, t.Σ_inv, x)
+    t.buffer .-= t.potential
+    out .= t.buffer
+end
+
+function neg_hvp!(t::MvNormalTarget, out::AbstractVector, ::AbstractVector, v::AbstractVector)
+    mul!(out, t.Σ_inv, v)
+end
+
+function neg_partial(t::MvNormalTarget, x::AbstractVector, i::Integer)
+    dot(view(t.Σ_inv, :, i), x) - t.potential[i]
+end
+
+function gen_data(::Type{Distributions.MvNormal}, d, η,
+                  μ = rand(Normal(0, 5), d),
+                  σ = rand(LogNormal(0, 1), d),
+                  R = rand(LKJ(d, η)))
     Σ = Symmetric(Diagonal(σ) * R * Diagonal(σ))
     Σ_inv = inv(Σ) # could do this in a safer way
     potential = Σ_inv * μ
     buffer = similar(potential)
     D = MvNormal(μ, Σ)
-
-    ∇f! = (out, x) -> begin
-        #out .= -gradlogpdf(D, x)
-        mul!(buffer, Σ_inv, x)
-        buffer .-= potential
-        out .= buffer
-    end
-
-    ∇²f! = (out, _, v) -> begin
-        mul!(out, Σ_inv, v)
-    end
-
-    ∂fxᵢ = (x, i) -> dot(view(Σ_inv, :, i), x) - potential[i]
-    return D, ∇f!, ∇²f!, ∂fxᵢ
+    return MvNormalTarget(D, Matrix(Σ_inv), potential, buffer)
 end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ZeroMeanIsoNormal target
+# ──────────────────────────────────────────────────────────────────────────────
+
+struct ZeroMeanIsoNormalTarget{T<:Distributions.AbstractMvNormal}
+    D::T
+end
+
+function neg_gradient!(::ZeroMeanIsoNormalTarget, out::AbstractVector, x::AbstractVector)
+    copyto!(out, x)
+end
+
+function neg_hvp!(::ZeroMeanIsoNormalTarget, out::AbstractVector, ::AbstractVector, v::AbstractVector)
+    copyto!(out, v) # == mul!(out, I, v)
+end
+
+function neg_partial(::ZeroMeanIsoNormalTarget, x::AbstractVector, i::Integer)
+    x[i]
+end
+
 function gen_data(::Type{Distributions.ZeroMeanIsoNormal}, d)
-    Σ = I(d)
-    D = MvNormal(Σ)
-    ∇f! = (out, x) -> copyto!(out, x)
-    ∇²f! = (out, _, v) -> copyto!(out, v) # == mul!(out, I, v)
-    ∂f∂xᵢ = (x, i) -> x[i]
-    return D, ∇f!, ∇²f!, ∂f∂xᵢ
+    D = MvNormal(Diagonal(fill(1.0, d)))
+    return ZeroMeanIsoNormalTarget(D)
 end
 
-function gen_data(::Type{Distributions.MvTDist}, d, η, μ = rand(Normal(0, 5), d), σs = rand(LogNormal(0, 1), d); ν=20.0)
-    # 1. Generate random parameters for the distribution, same as MvNormal
+# ──────────────────────────────────────────────────────────────────────────────
+# MvTDist target
+# ──────────────────────────────────────────────────────────────────────────────
+
+struct MvTDistTarget{T<:Distributions.MvTDist}
+    D::T
+    Σ_inv::Matrix{Float64}
+    μ::Vector{Float64}
+    ν::Float64
+    d::Int
+    scalar_coeff::Float64       # (ν + d) / ν
+    # work buffers
+    x_centered::Vector{Float64}
+    mahal_num::Vector{Float64}
+end
+
+function neg_gradient!(t::MvTDistTarget, out::AbstractVector, x::AbstractVector)
+    t.x_centered .= x .- t.μ
+    mul!(t.mahal_num, t.Σ_inv, t.x_centered)  # mahal_num = Σ⁻¹(x-μ)
+    mahal_sq = dot(t.x_centered, t.mahal_num)  # (x-μ)ᵀΣ⁻¹(x-μ)
+    denominator = 1 + mahal_sq / t.ν
+    out .= (t.scalar_coeff / denominator) .* t.mahal_num
+end
+
+function neg_hvp!(t::MvTDistTarget, out::AbstractVector, x::AbstractVector, v::AbstractVector)
+    t.x_centered .= x .- t.μ
+    mul!(t.mahal_num, t.Σ_inv, t.x_centered)  # mahal_num = Σ⁻¹(x-μ)
+    q = dot(t.x_centered, t.mahal_num)
+    c1 = (t.ν + t.d) / (t.ν + q)
+
+    # First term: c1 * Σ⁻¹ v
+    mul!(out, t.Σ_inv, v, c1, zero(eltype(out)))
+
+    # Second term: -2 c1 / (ν+q) * (uᵀΣ⁻¹v) * Σ⁻¹u, using dot(mahal_num, v) = uᵀΣ⁻¹v
+    scalar = dot(t.mahal_num, v)
+    axpy!(-2 * c1 / (t.ν + q) * scalar, t.mahal_num, out)
+
+    return out
+end
+
+function neg_partial(t::MvTDistTarget, x::AbstractVector, i::Integer)
+    # Note: For the t-distribution, calculating one component requires
+    # almost all the work of calculating the full vector.
+    t.x_centered .= x .- t.μ
+    mul!(t.mahal_num, t.Σ_inv, t.x_centered)
+    mahal_sq = dot(t.x_centered, t.mahal_num)
+    denominator = 1 + mahal_sq / t.ν
+    return (t.scalar_coeff / denominator) * t.mahal_num[i]
+end
+
+function gen_data(::Type{Distributions.MvTDist}, d, η,
+                  μ = rand(Normal(0, 5), d),
+                  σs = rand(LogNormal(0, 1), d);
+                  ν=20.0)
     cholR = rand(LKJCholesky(d, η))
     lmul!(Diagonal(σs), cholR.L)
     Σ = PDMats.PDMat(cholR)
 
-    # Σ = Diagonal(σs) * R * Diagonal(σs)
-    # Σ = Symmetric(Diagonal(σs) * R * Diagonal(σs))
-
-    # Create the distribution object
     D = MvTDist(ν, μ, Σ)
 
-    # 2. Pre-compute quantities for efficiency
     Σ_inv = Matrix(inv(Σ))
     scalar_coeff = (ν + d) / ν
 
-    # Allocate buffers to avoid memory allocation inside the gradient functions
-    # These will be "captured" by the closures below
     x_centered = similar(μ)
     mahal_num = similar(μ)
 
-    # TODO: need some kind of struct for this...
-    # would be very cool to just pass a joint (e.g., from DynamicPPL!) and then derive all of these either
-    # using user-defined functions or from AD, much like LogDensityProblems.
-    # Actually, LogDensityProblems is quite nice but often not enough because it doesn't work when specifying only the gradient.
-
-    # 3. Define the in-place gradient function `ϕ2!`
-    ∇f! = (out, x) -> begin
-        # Compute the numerator and the Mahalanobis distance squared
-        x_centered .= x .- μ
-        mul!(mahal_num, Σ_inv, x_centered)  # mahal_num = Σ⁻¹(x-μ)
-        mahal_sq = dot(x_centered, mahal_num) # mahal_sq = (x-μ)ᵀΣ⁻¹(x-μ)
-
-        # Compute the final gradient
-        denominator = 1 + mahal_sq / ν
-        out .= (scalar_coeff / denominator) .* mahal_num
-    end
-
-    ∇²f! = (out, x, v) -> begin
-        x_centered .= x .- μ
-        mul!(mahal_num, Σ_inv, x_centered)  # mahal_num = Σ⁻¹(x-μ)
-        q = dot(x_centered, mahal_num)
-        c1 = (ν + d) / (ν + q)
-
-        # First term: c1 * Σ⁻¹ v
-        mul!(out, Σ_inv, v, c1, zero(eltype(out)))
-
-        # Second term: -2 c1 / (ν+q) * (uᵀΣ⁻¹v) * Σ⁻¹u, using dot(mahal_num, v) = uᵀΣ⁻¹v
-        scalar = dot(mahal_num, v)
-        axpy!(-2 * c1 / (ν + q) * scalar, mahal_num, out)
-
-        return out
-    end
-
-    # Define the i-th component gradient function `ϕ2i!`
-    # Note: For the t-distribution, calculating one component requires
-    # almost all the work of calculating the full vector.
-    ∂fxᵢ = (x, i) -> begin
-        # We must recalculate the denominator for the given x
-        x_centered .= x .- μ
-        mul!(mahal_num, Σ_inv, x_centered)
-        mahal_sq = dot(x_centered, mahal_num)
-
-        denominator = 1 + mahal_sq / ν
-
-        # Return just the i-th component
-        return (scalar_coeff / denominator) * mahal_num[i]
-    end
-
-
-    return D, ∇f!, ∇²f!, ∂fxᵢ
+    return MvTDistTarget(D, Σ_inv, μ, ν, d, scalar_coeff, x_centered, mahal_num)
 end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GaussianMeanModel target
+# ──────────────────────────────────────────────────────────────────────────────
 
 struct GaussianMeanModel{T<:MvNormal}
     X::Matrix{Float64}    # n × p observations
@@ -119,90 +153,87 @@ end
 
 # Analytic posterior (for comparison)
 function analytic_posterior(obj::GaussianMeanModel)
-
     X = obj.X
     n = size(X, 1)
-
     μ₀ = obj.prior_μ
     Σ₀ = I
     Σ = cov(obj.D)
     x̄ = vec(mean(X, dims = 1))
-
     Σₙ = inv(inv(Σ₀) + n * inv(Σ))
     μₙ = Σₙ * (inv(Σ₀) * μ₀ + n * inv(Σ) * x̄)
-
     return MvNormal(μₙ, Σₙ)
 end
 
-function gen_data(::Type{GaussianMeanModel}, d, n, μ = zeros(d), Σ = I(d))
+struct GaussianMeanTarget{T<:MvNormal}
+    D::T                       # analytic posterior (for comparison)
+    obj::GaussianMeanModel
+    Λ::Matrix{Float64}        # inv(cov(obj.D))
+    Λ0::UniformScaling{Bool}  # inv(I) = I
+    μ0::Vector{Float64}
+    x̄::Vector{Float64}
+    n::Int
+    Σ_tot_inv::Matrix{Float64}
+    # work buffers
+    buffer::Vector{Float64}
+    x̄_sub::Vector{Float64}
+    # subsampling state
+    indices::Vector{Int}
+end
 
+# Full negative gradient: ∇f(x) = Σ0⁻¹(x-μ0) + n * Σ⁻¹(x - x̄)
+function neg_gradient!(t::GaussianMeanTarget, out::AbstractVector, x::AbstractVector)
+    @. t.buffer = x - t.μ0
+    mul!(out, t.Λ0, t.buffer)                 # prior part
+    @. t.buffer = x - t.x̄
+    mul!(out, t.Λ, t.buffer, t.n, 1.0)        # + n * Λ * (x - x̄)
+end
+
+# Subsampled negative gradient: replace x̄ with unbiased subsample mean
+function neg_gradient_sub!(t::GaussianMeanTarget, out::AbstractVector, x::AbstractVector)
+    mean!(t.x̄_sub', view(t.obj.X, t.indices, :))   # subsample mean
+    @. t.buffer = x - t.μ0
+    mul!(out, t.Λ0, t.buffer)                 # prior part
+    @. t.buffer = x - t.x̄_sub
+    mul!(out, t.Λ, t.buffer, t.n, 1.0)        # + n * Λ * (x - x̄_sub)
+end
+
+function neg_hvp!(t::GaussianMeanTarget, out::AbstractVector, ::AbstractVector, v::AbstractVector)
+    mul!(out, t.Σ_tot_inv, v)
+end
+
+# Same Hessian form (no randomness needed), because Hessian doesn't depend on subsample
+neg_hvp_sub!(t::GaussianMeanTarget, out, x, v) = neg_hvp!(t, out, x, v)
+
+function neg_partial(t::GaussianMeanTarget, x::AbstractVector, i::Integer)
+    dot(view(t.Σ_tot_inv, :, i), x) - t.μ0[i]
+end
+
+function resample_indices!(t::GaussianMeanTarget, n::Integer)
+    length(t.indices) != n && resize!(t.indices, n)
+    sample!(eachindex(t.indices), t.indices; replace = false)
+end
+
+function gen_data(::Type{GaussianMeanModel}, d, n, μ = zeros(d), Σ = I(d))
     obj = GaussianMeanModel(n, μ, Σ)
     D = analytic_posterior(obj)
 
     Λ = inv(cov(obj.D)) # could do this in a safer way
-    # Λ ≈ I # true for now
     Λ0 = inv(I)
     μ0 = obj.prior_μ
     x̄ = vec(mean(obj.X, dims=1))
     buffer = similar(x̄)
     x̄_sub  = similar(x̄)
     Σ_tot_inv = Λ0 + n .* Λ
-
     indices = Vector{Int}(undef, 0)
-    function resample_indices!(n)
-        length(indices) != n && resize!(indices, n)
-        sample!(eachindex(indices), indices; replace = false)
-    end
 
-    # Full negative gradient: ∇f(x) = Σ0⁻¹(x-μ0) + n * Σ⁻¹(x - x̄)
-    ∇f! = (out, x) -> begin
-        @. buffer = x - μ0
-        mul!(out, Λ0, buffer)                 # prior part
-        @. buffer = x - x̄
-        mul!(out, Λ, buffer, n, 1.0)              # + n * Λ * (x - x̄)
-    end
-
-    # Subsampled negative gradient: replace x̄ with unbiased subsample mean
-    ∇f_sub! = (out, x) -> begin
-
-        mean!(x̄_sub', view(obj.X, indices, :))   # subsample mean
-        @. buffer = x - μ0
-        mul!(out, Λ0, buffer)                 # prior part
-        @. buffer = x - x̄_sub
-        mul!(out, Λ, buffer, n, 1.0)              # + n * Λ * (x - x̄_sub)
-    end
-    # this is not faster!
-    # function foo(x̄_sub, obj, indices)
-    #     fill!(x̄_sub, 0.0)
-    #     for i in axes(obj.X, 2)
-    #         for j in indices
-    #             x̄_sub[i] += obj.X[j, i]
-    #         end
-    #     end
-    #     x̄_sub ./= length(indices)
-    #     return x̄_sub
-    # end
-    # foo(x̄_sub, obj, indices)
-    # mean!(x̄_sub', view(obj.X, indices, :))
-    # @benchmark mean!($x̄_sub', view($obj.X, $indices, :))
-    # @benchmark foo($x̄_sub, $obj, $indices)
-
-
-    ∇²f! = (out, _, v) -> begin
-        mul!(out, Σ_tot_inv, v)
-    end
-
-    ∇²f_sub! = (out, _, v) -> begin
-        # Same Hessian form (no randomness needed), because Hessian doesn’t depend on subsample
-        mul!(out, Σ_tot_inv, v)
-    end
-
-    ∂fxᵢ = (x, i) -> dot(view(Σ_inv, :, i), x) - potential[i]
-
-    return D, ∇f!, ∇²f!, ∂fxᵢ, ∇f_sub!, ∇²f_sub!, resample_indices!
-
+    return GaussianMeanTarget(D, obj, Matrix(Λ), Λ0, μ0, x̄, n, Matrix(Σ_tot_inv),
+                              buffer, x̄_sub, indices)
 end
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LogisticRegressionModel target
+# ──────────────────────────────────────────────────────────────────────────────
 
 struct LogisticRegressionModel
     X::Matrix{Float64}
@@ -210,6 +241,134 @@ struct LogisticRegressionModel
     prior_μ::Vector{Float64}
     prior_Σ::Matrix{Float64}
     prior_Σ_inv::Matrix{Float64}
+end
+
+mutable struct LogisticRegressionTarget
+    obj::LogisticRegressionModel
+    β_true::Vector{Float64}
+    # precomputed
+    Λ0::Matrix{Float64}
+    nobs::Int
+    # work buffers
+    buffer::Vector{Float64}
+    η::Vector{Float64}          # length nobs
+    p::Vector{Float64}          # length nobs
+    # control variate anchor state
+    β_anchor::Vector{Float64}
+    η_anchor::Vector{Float64}   # η at anchor (length nobs)
+    p_anchor::Vector{Float64}   # p = logistic(η_anchor)
+    G_anchor::Vector{Float64}   # full data gradient data-part at anchor: X'*(p_anchor - y)
+    # subsampling indices
+    indices::Vector{Int}
+end
+
+# --- Full negative log posterior gradient: ∇f(β) = Σ0⁻¹(β-μ0) + X' (σ(Xβ) - y) ---
+function neg_gradient!(t::LogisticRegressionTarget, out::AbstractVector, β::AbstractVector)
+    X, y, μ0, Λ0 = t.obj.X, t.obj.y, t.obj.prior_μ, t.Λ0
+    t.buffer .= β .- μ0
+    mul!(out, Λ0, t.buffer)  # prior part
+    # data part
+    mul!(t.η, X, β)
+    for i in eachindex(t.p)
+        t.p[i] = LogExpFunctions.logistic(t.η[i]) - y[i]
+    end
+    mul!(out, X', t.p, 1.0, 1.0)
+end
+
+# --- Subsampled gradient with control variate ---
+# estimator: prior + G_anchor + (n/m) * ( X_S'*(p_S(β)-y_S) - X_S'*(p_anchor_S - y_S) )
+function neg_gradient_sub_cv!(t::LogisticRegressionTarget, out::AbstractVector, β::AbstractVector)
+    X, y, μ0, Λ0 = t.obj.X, t.obj.y, t.obj.prior_μ, t.Λ0
+
+    # prior
+    t.buffer .= β .- μ0
+    mul!(out, Λ0, t.buffer)
+
+    # add full-data anchor data-part
+    out .+= t.G_anchor
+
+    # minibatch difference
+    m = length(t.indices)
+    iszero(m) && return out
+
+    Xi = @view X[t.indices, :]
+    ηc = view(t.η, eachindex(t.indices))   # temporary storage for η_i
+    pc = view(t.p, eachindex(t.indices))
+    # compute η_i(β) for batch
+    mul!(ηc, Xi, β)                         # η_i = Xi * β
+
+    pc .= LogExpFunctions.logistic.(ηc)     # p_i(β)
+
+    # p_anchor for the batch (cheap indexed access)
+    p0_batch = view(t.p_anchor, t.indices)
+
+    # batch gradients: g_batch = Xi'*(p_i - y_i), g0_batch = Xi'*(p0_batch - y_i)
+    # so diff = Xi'*( (p_i - y_i) - (p0_batch - y_i) ) = Xi'*(p_i - p0_batch)
+    # compute diff = Xi'*(p_i - p0_batch)
+    ηc .= pc .- p0_batch                  # reuse ηi storage for pi - p0
+    mul!(t.buffer, Xi', ηc)               # buffer <- Xi' * (pi - p0_batch)
+
+    scale = (t.nobs / m)
+    out .+= scale .* t.buffer
+end
+
+# --- Full Hessian-vector product: ∇²f(β) v = Σ0⁻¹ v + X' ( w .* (Xv) ), w=p*(1-p) ---
+function neg_hvp!(t::LogisticRegressionTarget, out::AbstractVector, β::AbstractVector, v::AbstractVector)
+    X, Λ0 = t.obj.X, t.Λ0
+    mul!(out, Λ0, v)   # prior part
+
+    mul!(t.η, X, β)
+    t.p .= LogExpFunctions.logistic.(t.η)
+    t.p .= t.p .* (1.0 .- t.p)   # p now holds weights w
+
+    mul!(t.η, X, v)          # η <- X * v
+    t.η .*= t.p              # η <- w .* (X * v)
+    mul!(t.buffer, X', t.η)
+    out .+= t.buffer
+end
+
+# --- Subsampled Hessian-vector product (no CV here) ---
+function neg_hvp_sub!(t::LogisticRegressionTarget, out::AbstractVector, β::AbstractVector, v::AbstractVector)
+    X, Λ0 = t.obj.X, t.Λ0
+    mul!(out, Λ0, v)
+
+    m = length(t.indices)
+    iszero(m) && return out
+
+    Xi = @view X[t.indices, :]
+    ηc = view(t.η, eachindex(t.indices))
+    pc = view(t.p, eachindex(t.indices))
+
+    mul!(ηc, Xi, β)
+    pc .= LogExpFunctions.logistic.(ηc)
+    pc .= pc .* (1.0 .- pc)    # now pi holds w_i
+    Xv = ηc # rename for clarity
+    mul!(Xv, Xi, v)                # X_i * v for batch
+    Xv .*= pc
+    mul!(t.buffer, Xi', Xv)        # buffer <- X_S' * ( w_S .* (X_S v) )
+    scale = (t.nobs / m)
+    out .+= scale .* t.buffer
+end
+
+function resample_indices!(t::LogisticRegressionTarget, m::Integer)
+    length(t.indices) != m && resize!(t.indices, m)
+    sample!(1:t.nobs, t.indices; replace = false)
+end
+
+# setter to (re)compute anchor; call whenever you want to update the anchor
+function set_anchor!(t::LogisticRegressionTarget, β0::AbstractVector)
+    X, y = t.obj.X, t.obj.y
+    t.β_anchor .= β0
+    mul!(t.η_anchor, X, t.β_anchor)
+    @. t.p_anchor = LogExpFunctions.logistic(t.η_anchor)
+    mul!(t.G_anchor, X', t.p_anchor .- y)
+    return nothing
+end
+
+function anchor_info(t::LogisticRegressionTarget)
+    return (β_anchor = copy(t.β_anchor),
+            p_anchor = copy(t.p_anchor),
+            G_anchor = copy(t.G_anchor))
 end
 
 function gen_data(::Type{LogisticRegressionModel}, d, n,
@@ -222,254 +381,41 @@ function gen_data(::Type{LogisticRegressionModel}, d, n,
     X .-= mean(X, dims=1) # center predictors
     X = hcat(ones(n), X)  # first column is the intercept
     η = X * β_true
-    # p = LogExpFunctions.logistic.(η)
-    # y = rand.(Bernoulli.(p))
     y = rand.(BernoulliLogit.(η))
 
     # prior precision
     Λ0 = inv(Σ0)
 
-    obj = LogisticRegressionModel(X, y, μ0, Σ0, Λ0)
+    obj = LogisticRegressionModel(X, y, μ0, Matrix{Float64}(Σ0), Matrix{Float64}(Λ0))
 
     nobs, d = size(X)
     buffer = zeros(d)
     p = similar(η)
 
-    # resample_indices!(nsub)
+    # --- control variate anchor state ---
+    β_anchor = copy(μ0)
+    η_anchor = similar(y, Float64)
+    p_anchor = similar(y, Float64)
+    G_anchor = zeros(d)
 
-        # --- control variate anchor state (closed-over) ---
-    β_anchor = copy(μ0)                     # initial anchor (you can change it)
-    η_anchor = similar(y, Float64)         # η at anchor (length n)
-    p_anchor = similar(y, Float64)         # p = logistic(η_anchor)
-    G_anchor = zeros(d)                    # full data gradient data-part at anchor: X'*(p_anchor - y)
+    indices = Vector{Int}(undef, 0)
+
+    target = LogisticRegressionTarget(
+        obj, β_true, Matrix{Float64}(Λ0), nobs,
+        buffer, similar(η), p,
+        β_anchor, η_anchor, p_anchor, G_anchor,
+        indices)
 
     # initialize anchor
-    mul!(η_anchor, X, β_anchor)
-    @. p_anchor = LogExpFunctions.logistic(η_anchor)
-    mul!(G_anchor, X', p_anchor .- y)      # data part only, no prior
+    set_anchor!(target, μ0)
 
-    # indices + resample helper
-    indices = Vector{Int}(undef, 0)
-    resample_indices! = m -> begin
-        length(indices) != m && resize!(indices, m)
-        sample!(1:nobs, indices; replace = false)
-    end
-
-    # setter to (re)compute anchor; call whenever you want to update the anchor
-    set_anchor! = β0 -> begin
-        β_anchor .= β0
-        mul!(η_anchor, X, β_anchor)
-        @. p_anchor = LogExpFunctions.logistic(η_anchor)
-        mul!(G_anchor, X', p_anchor .- y)
-        return nothing
-    end
-
-    anchor_info = () -> (β_anchor = copy(β_anchor),
-                        p_anchor = copy(p_anchor),
-                        G_anchor = copy(G_anchor))
-
-    # --- Full negative log posterior gradient: ∇f(β) = Σ0⁻¹(β-μ0) + X' (σ(Xβ) - y) ---
-    ∇f! = (out, β) -> begin
-        buffer .= β .- μ0
-        mul!(out, Λ0, buffer)  # prior part
-        # data part
-        mul!(η, X, β)
-        for i in eachindex(p)
-            p[i] = LogExpFunctions.logistic(η[i]) - y[i]
-            # p[i] = 1 / (1 + exp(-η[i])) - y[i]
-        end
-        mul!(out, X', p, 1.0, 1.0)
-    end
-
-    # --- Subsampled gradient with control variate ---
-    # estimator: prior + G_anchor + (n/m) * ( X_S'*(p_S(β)-y_S) - X_S'*(p_anchor_S - y_S) )
-    ∇f_sub_cv! = (out, β) -> begin
-        # prior
-        buffer .= β .- μ0
-        mul!(out, Λ0, buffer)
-
-        # add full-data anchor data-part
-        out .+= G_anchor
-
-        # minibatch difference
-        m = length(indices)
-        iszero(m) && return out   # nothing else to do
-
-        Xi = @view X[indices, :]
-        yi = @view y[indices]
-        ηc = view(η, eachindex(indices))   # temporary storage for η_i
-        pc = view(p, eachindex(indices))
-        # compute η_i(β) for batch
-        mul!(ηc, Xi, β)                         # η_i = Xi * β
-
-        pc .= LogExpFunctions.logistic.(ηc)     # p_i(β)
-
-        # p_anchor for the batch (cheap indexed access)
-        p0_batch = view(p_anchor, indices)
-
-        # batch gradients: g_batch = Xi'*(p_i - y_i), g0_batch = Xi'*(p0_batch - y_i)
-        # so diff = Xi'*( (p_i - y_i) - (p0_batch - y_i) ) = Xi'*(p_i - p0_batch)
-        # compute diff = Xi'*(p_i - p0_batch)
-        ηc .= pc .- p0_batch                  # reuse ηi storage for pi - p0
-        mul!(buffer, Xi', ηc)                  # buffer <- Xi' * (pi - p0_batch)
-
-        # Let's work out the full derivation
-        # η_i = Xi * β
-        # p_i = σ(η_i) = σ(Xi * β)
-        # w_i = p_i .- p0_batch_i = σ(Xi * β) - p0_batch_i
-        # buffer_i = Xi' * (w_i) = Xi' * (σ(Xi * β) - p0_batch_i)
-        # out_i = scale * buffer_i
-
-        scale = (nobs / m)
-        out .+= scale .* buffer
-    end
-
-    # --- Full Hessian-vector product: ∇²f(β) v = Σ0⁻¹ v + X' ( w .* (Xv) ), w=p*(1-p) ---
-    ∇²f! = (out, β, v) -> begin
-        mul!(out, Λ0, v)   # prior part
-
-        mul!(η, X, β)
-        p .= LogExpFunctions.logistic.(η)
-        p .= p .* (1.0 .- p)   # p now holds weights w
-
-        mul!(η, X, v)          # η <- X * v
-        η .*= p                # η <- w .* (X * v)
-        mul!(buffer, X', η)
-        out .+= buffer
-    end
-
-    # --- Subsampled Hessian-vector product (no CV here) ---
-    ∇²f_sub! = (out, β, v) -> begin
-        mul!(out, Λ0, v)
-
-        m = length(indices)
-        iszero(m) && return out
-
-        Xi = @view X[indices, :]
-        ηc = view(η, eachindex(indices))
-        pc = view(p, eachindex(indices))
-
-        mul!(ηc, Xi, β)
-        pc .= LogExpFunctions.logistic.(ηc)
-        pc .= pc .* (1.0 .- pc)    # now pi holds w_i
-        Xv = ηc # rename for clarity
-        mul!(Xv, Xi, v)                # X_i * v for batch
-        Xv .*= pc
-        mul!(buffer, Xi', Xv)         # buffer <- X_S' * ( w_S .* (X_S v) )
-        scale = (nobs / m)
-        out .+= scale .* buffer
-    end
-
-    # out = similar(β_true)
-    # ∇f!(out, β_true)
-    # set_anchor!(zero(β_true))   # set anchor at truth for testing
-    # resample_indices!(n)
-    # ∇f_sub_cv!(out, β_true)
-    # resample_indices!(nsub)
-    # ∇f_sub_cv!(out, β_true)
-    # ∇f_sub_cv_samples = stack(_ -> begin
-    #         resample_indices!(nsub)
-    #         ∇f_sub_cv!(out, β_true)
-    #         copy(out)
-    # end, 1:100_000, dims = 1
-    # )
-    # @btime ∇f!($out, $β_true)
-    # @btime ∇f_sub_cv!($out, $β_true)
-    # @profview_allocs foreach(_->∇f!(out, β_true), 1:10000)
-
-    # ∇f_sub_cv_exp = mean.(eachcol(∇f_sub_cv_samples))
-    # ∇f_sub_cv_var = var.(eachcol(∇f_sub_cv_samples))
-    # ∇f_sub_cv_exp .- ∇f!(out, β_true)
-
-    # v = randn(d)
-    # ∇²f!(out, β_true, v)
-    # resample_indices!(n)
-    # ∇²f_sub!(out, β_true, v)
-    # resample_indices!(nsub)
-    # ∇²f_sub!(out, β_true, v)
-    # ∇²f_sub_samples = stack(_ -> begin
-    #         resample_indices!(nsub)
-    #         ∇²f_sub!(out, β_true, v)
-    #         copy(out)
-    # end, 1:100_000, dims = 1
-    # )
-    # @btime ∇²f!($out, $β_true, $v)
-    # @btime ∇²f_sub!($out, $β_true, $v)
-
-    # ∇f_sub_cv_exp = mean.(eachcol(∇²f_sub_samples))
-    # ∇f_sub_cv_var = var.(eachcol(∇²f_sub_samples))
-    # ∇f_sub_cv_exp .- ∇²f!(out, β_true, v)
-
-    return obj, ∇f!, ∇²f!, ∇f_sub_cv!, ∇²f_sub!, resample_indices!, set_anchor!, anchor_info, β_true
-
-#= minibatch approach, variance is too high
-    # Negative log posterior gradient: ∇f(β) = Σ0⁻¹(β-μ0) + X' (σ(Xβ) - y)
-    ∇f! = (out, β) -> begin
-        @. buffer = β - μ0
-        mul!(out, Λ0, buffer)  # prior part
-        # data part
-        mul!(ηc, X, β)
-        pc .= LogExpFunctions.logistic.(ηc)
-        ηc .= pc .- y
-        mul!(out, X', ηc, 1.0, 1.0)
-    end
-
-    # Subsampled version: scale contributions
-    ∇f_sub! = (out, β) -> begin
-        @. buffer = β - μ0
-        mul!(out, Λ0, buffer)  # prior part
-
-        Xi = @view X[indices, :]
-        yi = @view y[indices]
-        ηci = view(ηc, 1:length(indices))
-        pci = view(pc, 1:length(indices))
-        mul!(ηci, Xi, β)
-        pci .= LogExpFunctions.logistic.(ηci)
-        ηci .= pci .- yi
-        mul!(out, Xi', ηci, 1.0, (nobs / length(indices)))
-    end
-    out = similar(β_true)
-    ∇f!(out, β_true)
-    resample_indices!(n)
-    ∇f!(out, β_true)
-    resample_indices!(nsub)
-    ∇f_sub!(out, β_true)
-    mean(begin
-            resample_indices!(nsub)
-            ∇f_sub!(out, β_true)
-        end
-        for _ in 1:100_000
-    )
-
-    # Hessian: ∇²f(β) v = Σ0⁻¹ v + X' W (Xv)  with W=diag(p*(1-p))
-    ∇²f! = (out, β, v) -> begin
-        mul!(out, Λ0, v)
-        mul!(ηc, X, β)
-        pc .= LogExpFunctions.logistic.(ηc)
-        w = pc .* (1 .- pc)
-        mul!(ηc, X, v)         # Xv stored in ηc
-        ηc .*= w               # elementwise multiply by w
-        mul!(out, X', ηc, 1., 1.)
-    end
-
-    # Subsampled Hessian-vector product (unbiased by scaling, no allocations)
-    ∇²f_sub! = (out, β, v) -> begin
-        mul!(out, Λ0, v)
-        Xi = @view X[indices, :]
-        ηci = view(ηc, 1:length(indices))
-        pci = view(pc, 1:length(indices))
-        mul!(ηci, Xi, β)
-        pci .= LogExpFunctions.logistic.(ηci)
-        w = pci .* (1 .- pci)
-        mul!(ηci, Xi, v)
-        ηci .*= w
-        mul!(out, Xi', ηci, (nobs / length(indices)), 1.0)
-    end
-
-    return obj, ∇f!, ∇²f!, ∇f_sub!, ∇²f_sub!, resample_indices!
-=#
+    return target
 end
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Spike-and-slab distribution (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 
 struct SpikeAndSlabDist{D1, D2}
     spike_dist::D1
@@ -488,56 +434,48 @@ function marginal_pdfs_at_zero(D::Distributions.MvTDist)
     [pdf(μ[i] + sqrt(Σ[i, i]) * TDist(ν), 0.0) for i in 1:length(D)]
 end
 
-function gen_data(::Type{<:SpikeAndSlabDist{<:Bernoulli, <:Distributions.MvTDist}}, d, η)
+# The gen_data functions for spike-and-slab return (D, κ, slab_target).
+# The slab_target provides the gradient/hvp for the continuous slab part;
+# the test files combine it with the spike structure.
 
+function gen_data(::Type{<:SpikeAndSlabDist{<:Bernoulli, <:Distributions.MvTDist}}, d, η)
     prob = rand(d)
     D1 = product_distribution([Bernoulli(prob[i]) for i in 1:d])
     # Zero mean and unit scales: ensures fast sticky mixing while
     # still exercising the position-dependent MvTDist gradient code.
     μ = zeros(d)
     σs = ones(d)
-    D2, ∇f!, ∇²f!, ∂fxᵢ = gen_data(Distributions.MvTDist, d, η, μ, σs)
-    D = SpikeAndSlabDist(D1, D2)
-
-    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(D2)
-
-    return D, κ, ∇f!, ∇²f!, ∂fxᵢ
+    slab_target = gen_data(Distributions.MvTDist, d, η, μ, σs)
+    D = SpikeAndSlabDist(D1, slab_target.D)
+    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(slab_target.D)
+    return D, κ, slab_target
 end
 
 function gen_data(::Type{<:SpikeAndSlabDist{<:Bernoulli, T}}, d, args...) where T
-
     prob = rand(d)
     D1 = product_distribution([Bernoulli(prob[i]) for i in 1:d])
-    D2, ∇f!, ∇²f!, ∂fxᵢ = gen_data(T, d, args...)
-    D = SpikeAndSlabDist(D1, D2)
-
-    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(D2)
-
-    return D, κ, ∇f!, ∇²f!, ∂fxᵢ
+    slab_target = gen_data(T, d, args...)
+    D = SpikeAndSlabDist(D1, slab_target.D)
+    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(slab_target.D)
+    return D, κ, slab_target
 end
 
 function gen_data2(::Type{<:SpikeAndSlabDist{<:Bernoulli, T}}, d, prob, args...) where T
-
     D1 = product_distribution([Bernoulli(prob[i]) for i in 1:d])
-    D2, ∇f!, ∇²f!, ∂fxᵢ = gen_data(T, d, args...)
-    D = SpikeAndSlabDist(D1, D2)
-
-    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(D2)
-
-    return D, κ, ∇f!, ∇²f!, ∂fxᵢ
+    slab_target = gen_data(T, d, args...)
+    D = SpikeAndSlabDist(D1, slab_target.D)
+    κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(slab_target.D)
+    return D, κ, slab_target
 end
 
 function gen_data(::Type{<:SpikeAndSlabDist{<:BetaBernoulli, T}}, d, args...) where T
-
     a, b = 2. + randexp(), 2 .+ randexp()
     D1 = BetaBernoulli(d, a, b)
-    D2, ∇f!, ∇²f!, ∂fxᵢ = gen_data(T, d, args...)
-    D = SpikeAndSlabDist(D1, D2)
-
-    mpdfs = marginal_pdfs_at_zero(D2)
+    slab_target = gen_data(T, d, args...)
+    D = SpikeAndSlabDist(D1, slab_target.D)
+    mpdfs = marginal_pdfs_at_zero(slab_target.D)
     κ = BetaBernoulliKappa(a, b, mpdfs)
-
-    return D, κ, ∇f!, ∇²f!, ∂fxᵢ
+    return D, κ, slab_target
 end
 
 
@@ -590,70 +528,86 @@ Distributions._rand!(rng::Random.AbstractRNG, d::BetaBernoulliHierarchical, x::A
 Distributions._logpdf(d::BetaBernoulliHierarchical, x::AbstractVector{<:Integer}) = Distributions._logpdf(d.d, x)
 Statistics.mean(d::BetaBernoulliHierarchical) = mean(d.d)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# BetaBernoulliHierarchical spike-and-slab target
+#
+# Extends the slab target with an extra logit-θ coordinate.
+# Wraps a slab_target for the first d-1 coordinates, and adds the
+# Beta(a,b) hyperprior gradient for the last (logit-θ) coordinate.
+# ──────────────────────────────────────────────────────────────────────────────
 
+struct BetaBernoulliHierarchicalTarget{ST}
+    slab_target::ST
+    a::Float64
+    b::Float64
+    mpdfs::Vector{Float64}      # marginal slab densities at zero
+    d::Int                       # full dimension (d_slab + 1)
+end
+
+function neg_gradient!(t::BetaBernoulliHierarchicalTarget, out::AbstractVector, x::AbstractVector)
+    d = t.d
+    neg_gradient!(t.slab_target, view(out, 1:d-1), view(x, 1:d-1))
+    z = x[d]
+    θ = LogExpFunctions.logistic(z)
+    out[d] = -t.a + (t.a + t.b) * θ
+    return out
+end
+
+function neg_hvp!(t::BetaBernoulliHierarchicalTarget, out::AbstractVector, x::AbstractVector, v::AbstractVector)
+    d = t.d
+    neg_hvp!(t.slab_target, view(out, 1:d-1), view(x, 1:d-1), view(v, 1:d-1))
+    z = x[d]
+    θ = LogExpFunctions.logistic(z)
+    out[d] = (t.a + t.b) * θ * (1 - θ) * v[d]
+    return out
+end
+
+function neg_partial(t::BetaBernoulliHierarchicalTarget, x::AbstractVector, i::Integer)
+    d = t.d
+    if i <= d-1
+        return neg_partial(t.slab_target, view(x, 1:d-1), i)
+    elseif i == d
+        z = x[d]
+        θ = LogExpFunctions.logistic(z)
+        return -t.a + (t.a + t.b) * θ
+    else
+        throw(ArgumentError("i out of bounds"))
+    end
+end
 
 function gen_data(::Type{<:SpikeAndSlabDist{<:BetaBernoulliHierarchical, T}}, d, args...) where T
 
-# hyperprior for θ
+    # hyperprior for θ
     a, b = 2. + randexp(), 2. + randexp()
 
     # prior over indicators with explicit θ
     D1 = BetaBernoulliHierarchical(BetaBernoulli(d - 1, a, b))   # marker only
 
     # continuous slab part: first d-1 coordinates
-    D2, ∇f_base!, ∇²f_base!, ∂fxᵢ_base = gen_data(T, d - 1, args...)
-    D = SpikeAndSlabDist(D1, D2)
+    slab_target = gen_data(T, d - 1, args...)
+    D = SpikeAndSlabDist(D1, slab_target.D)
 
     # precompute slab density at zero
-    mpdfs = marginal_pdfs_at_zero(D2)
+    mpdfs = marginal_pdfs_at_zero(slab_target.D)
 
     # κ: conditional inclusion odds × slab density at 0
     κ = (i, x, γ, θ) -> begin
         @assert 1 <= i <= d-1 "κ only defined for slab coordinates"
-        # z = x[end]
-        # θ = LogExpFunctions.logistic(z)
-        # prior_incl_odds = θ / (1 - θ)
-        # return prior_incl_odds * marginal_pdfs_at_zero[i]
         z0 = x[end]
         vz = θ[end]
         c  = mpdfs[i]
         return StickyTime(c, z0, vz)
     end
 
-    # gradient of potential
-    ∇f! = function (out, x)
-        ∇f_base!(view(out, 1:d-1), view(x, 1:d-1))
-        z = x[d]
-        θ = LogExpFunctions.logistic(z)
-        out[d] = -a + (a + b) * θ
-        return out
-    end
+    target = BetaBernoulliHierarchicalTarget(slab_target, a, b, mpdfs, d)
 
-    # Hessian–vector product
-    ∇²f! = function (out, x, v)
-        ∇²f_base!(view(out, 1:d-1), view(x, 1:d-1), view(v, 1:d-1))
-        z = x[d]
-        θ = LogExpFunctions.logistic(z)
-        out[d] = (a + b) * θ * (1 - θ) * v[d]
-        return out
-    end
-
-    # single partial derivative
-    ∂fxᵢ = function (x, i)
-        if i <= d-1
-            return ∂fxᵢ_base(view(x, 1:d-1), i)
-        elseif i == d
-            z = x[d]
-            θ = LogExpFunctions.logistic(z)
-            return -a + (a + b) * θ
-        else
-            throw(ArgumentError("i out of bounds"))
-        end
-    end
-
-    return D, κ, ∇f!, ∇²f!, ∂fxᵢ
+    return D, κ, target
 end
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# data_name: display names for test labels
+# ──────────────────────────────────────────────────────────────────────────────
 
 data_name(::Type{Distributions.ZeroMeanIsoNormal}, d) = "N(0, I($d))"
 data_name(::Type{Distributions.MvNormal}, d) = "N(μ, Σ$d)"
@@ -683,13 +637,28 @@ function _f3(x)
     return s * "0" ^ max(0, 3 - (length(s) - i))
 end
 
+function _format_elapsed(t::Real)
+    if t < 1.0
+        return @sprintf("%5.0fms", t * 1000)
+    elseif t < 60.0
+        return @sprintf("%5.1fs ", t)
+    else
+        return @sprintf("%4.1fmin", t / 60)
+    end
+end
+_format_elapsed(::Nothing) = "      ?"
+
 function _isapprox_closeness(a, b; rtol::Real=0.0, atol::Real=0.0)
     err = norm(a .- b)
     tol = max(atol, rtol * max(norm(a), norm(b)))
     return tol > 0 ? err / tol : (iszero(err) ? 0.0 : Inf)
 end
 
-function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvNormal)
+# ──────────────────────────────────────────────────────────────────────────────
+# test_approximation: compare trace estimators against known distribution
+# ──────────────────────────────────────────────────────────────────────────────
+
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvNormal; elapsed::Union{Real,Nothing}=nothing)
 
     min_ess = minimum(ess(trace))
     if min_ess < 500
@@ -723,11 +692,11 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     if failed || show_test_diagnostics
         d = length(D)
         label = failed ? "FAIL" : "ok  "
-        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
 end
 
-function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist)
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist; elapsed::Union{Real,Nothing}=nothing)
 
     ν_D, μ_D, Σ_D = Distributions.params(D)
 
@@ -765,7 +734,7 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     if failed || show_test_diagnostics
         d = length(D)
         label = failed ? "FAIL" : "ok  "
-        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
 end
 
@@ -822,8 +791,6 @@ function test_approximation(
             theoretical_probs[k] = pdf(spike_dist, k)
         end
     end
-    # should we test/ assert this?
-    # keys(theoretical_probs) == keys(obs_model_probs)
     probs_observed = collect(values(obs_model_probs))
     probs_expected = [theoretical_probs[k] for k in keys(obs_model_probs)]
 
@@ -840,9 +807,6 @@ function test_approximation(
     @test maximum(abs(probs_expected[i] - probs_observed[i]) for i in eachindex(probs_expected)) < 1e-2
     # check if the distribution is close enough
     @test isapprox(probs_expected, probs_observed, atol = 1e-2)
-    # fig, ax, _ = scatter(probs_expected, probs_observed)
-    # ablines!(ax, 0, 1, color = :grey, linestyle = :dash)
-    # fig
 
 end
 
@@ -918,7 +882,7 @@ so the conditional slab mean is recoverable as:
 
     mean(trace) ./ inclusion_probs(trace) ≈ μ_slab
 """
-function test_approximation(trace, D::SpikeAndSlabDist)
+function test_approximation(trace, D::SpikeAndSlabDist; elapsed::Union{Real,Nothing}=nothing)
 
     d = length(D.slab_dist)
 
@@ -959,6 +923,6 @@ function test_approximation(trace, D::SpikeAndSlabDist)
     if failed || show_test_diagnostics
         label = failed ? "FAIL" : "ok  "
         dname = data_name(typeof(D), d)
-        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | c_incl=$(_f3(c_incl)) | c_full=$(_f3(c_full))")
+        println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_incl=$(_f3(c_incl)) | c_full=$(_f3(c_full))")
     end
 end

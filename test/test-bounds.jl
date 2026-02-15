@@ -154,7 +154,8 @@
     @testset "Flow: $flow_type, d=$d" for (flow_type, dynamics_type) in flows_and_types, d in ds
 
         # Generate test problem
-        D, ∇f!, ∇²f!, ∂fxᵢ = gen_data(MvNormal, d, 2.0)
+        target = gen_data(MvNormal, d, 2.0)
+        D = target.D
 
         # Create flow
         flow = flow_type(inv(cov(D)), mean(D))
@@ -169,11 +170,11 @@
             c_vec = fill(1e-6 / d, d)
 
             # Test global bounds
-            test_rate_bounds(flow, ξ0, ∇f!, c_vec)
+            test_rate_bounds(flow, ξ0, Base.Fix1(neg_gradient!, target), c_vec)
 
             # Test coordinate bounds for factorized flows
             if dynamics_type == FactorizedDynamics
-                @test test_coordinate_bounds(flow, ξ0, ∂fxᵢ, c_vec)
+                @test test_coordinate_bounds(flow, ξ0, Base.Fix1(neg_partial, target), c_vec)
                 @test test_bound_consistency(flow, ξ0, c_vec)
             end
         end

@@ -11,6 +11,7 @@ import PDMats
 import MCMCDiagnosticTools
 import StatsBase
 import LogExpFunctions
+using Printf
 
 const TEST_DIR = @__DIR__
 const show_progress = isinteractive() && get(ENV, "CI", "") != "true"
