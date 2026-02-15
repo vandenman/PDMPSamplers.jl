@@ -108,4 +108,73 @@ import ForwardDiff
             @test abs(empirical_probs[i] - expected_probs[i]) < 0.02
         end
     end
+
+    @testset "Sticky constructor error for bare Function κ" begin
+        @test_throws ArgumentError Sticky(GridThinningStrategy(), (i, x, γ, θ) -> 1.0)
+    end
+
+    @testset "PreconditionedDynamics with warmup adaptation" begin
+        d = 3
+        target = gen_data(Distributions.MvNormal, d, 1.0)
+
+        flow = PreconditionedZigZag(d)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = GridThinningStrategy()
+
+        Random.seed!(123)
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        t_warmup = 2_000.0
+        T_run = 10_000.0
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run, t_warmup; progress=false)
+        @test length(trace.events) > 100
+
+        # scales should have been updated from the initial ones(d)
+        @test flow.metric.scale != ones(d)
+    end
+
+    @testset "Sticky with partial can_stick" begin
+        d = 4
+        Random.seed!(789)
+
+        D_ss, κ_full, slab_target = gen_data(SpikeAndSlabDist{Bernoulli,ZeroMeanIsoNormal}, d)
+        # only allow variables 1 and 3 to stick
+        κ_partial = copy(κ_full)
+        κ_partial[2] = Inf
+        κ_partial[4] = Inf
+
+        flow = ZigZag(d)
+        grad = FullGradient(Base.Fix1(neg_gradient!, slab_target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, slab_target))
+        alg = Sticky(GridThinningStrategy(), κ_partial)
+
+        @test alg.can_stick == BitVector([true, false, true, false])
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=false)
+        @test stats.sticky_events > 0
+        @test length(trace.events) > 100
+
+        # variables 2 and 4 should never be exactly zero (they can't stick)
+        ip = inclusion_probs(trace)
+        @test ip[2] ≈ 1.0 atol=1e-10
+        @test ip[4] ≈ 1.0 atol=1e-10
+    end
+
+    @testset "Sticky with BPS (all-frozen branch)" begin
+        d = 2
+        Random.seed!(321)
+        D_ss, κ, slab_target = gen_data(SpikeAndSlabDist{Bernoulli,ZeroMeanIsoNormal}, d)
+
+        # use high κ to make freezing very likely → all-frozen branch
+        κ_high = κ .* 100.0
+        flow = BouncyParticle(d, 0.0) # no refresh to not interfere
+        grad = FullGradient(Base.Fix1(neg_gradient!, slab_target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, slab_target))
+        alg = Sticky(GridThinningStrategy(), κ_high)
+
+        ξ0 = SkeletonPoint(0.01 .* randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=false)
+        @test stats.sticky_events > 0
+    end
 end

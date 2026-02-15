@@ -1,8 +1,9 @@
 # Copy a callable: use copy for structs that define it, identity fallback for closures
 _copy_callable(f) = _has_copy(f) ? copy(f) : f
 _has_copy(f) = applicable(copy, f) && !(f isa Function)
-_copy_callable(f::Base.Fix1) = Base.Fix1(_copy_callable(f.f), copy(f.x))
-_copy_callable(f::Base.Fix2) = Base.Fix2(_copy_callable(f.f), copy(f.x))
+_try_copy(x) = applicable(copy, x) ? copy(x) : x
+_copy_callable(f::Base.Fix1) = Base.Fix1(_copy_callable(f.f), _try_copy(f.x))
+_copy_callable(f::Base.Fix2) = Base.Fix2(_copy_callable(f.f), _try_copy(f.x))
 
 # Concrete gradient strategies
 struct FullGradient{F} <: GlobalGradientStrategy
