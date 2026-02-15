@@ -45,7 +45,7 @@
                     Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
 
                     d = first(data_arg)
-                    T = data_type === Distributions.MvTDist ? 300_000.0 : 50_000.0
+                    T = data_type === Distributions.MvTDist ? 400_000.0 : 50_000.0
 
                     alg = if algorithm === ThinningStrategy
                         if gradient_type === CoordinateWiseGradient
