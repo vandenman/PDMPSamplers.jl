@@ -98,7 +98,7 @@
             @test all(e .> 0)
 
             disc = PDMPDiscretize(chains, 1.0)
-            @test disc isa AbstractMatrix
+            @test disc isa PDMPDiscretize
 
             # show
             buf = IOBuffer()
