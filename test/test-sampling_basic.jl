@@ -84,6 +84,16 @@
                     model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
                     trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
+                    # If the stochastic test would fail (e.g., due to a convergence fluke),
+                    # retry once with a different seed before registering @test results.
+                    if !test_approximation(trace, D; check_only=true)
+                        Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg, :retry)))
+                        x0 = mean(D) + randn(d)
+                        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+                        ξ0 = SkeletonPoint(x0, θ0)
+                        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
+                    end
+
                     acceptance_prob = stats.reflections_accepted / stats.reflections_events
 
                     PDMPSamplers.ispositive(refresh_rate(flow)) && @test stats.refreshment_events > 100

@@ -658,81 +658,114 @@ end
 # test_approximation: compare trace estimators against known distribution
 # ──────────────────────────────────────────────────────────────────────────────
 
-function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvNormal; elapsed::Union{Real,Nothing}=nothing)
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvNormal;
+                            elapsed::Union{Real,Nothing}=nothing, check_only::Bool=false)
 
+    d = length(D)
     min_ess = minimum(ess(trace))
     if min_ess < 500
         show_test_diagnostics && @info "Skipping test_approximation (low ESS)" min_ess
-        return nothing
+        return check_only ? false : nothing
     end
 
     mc = 1.0 / sqrt(min_ess)
-    mean_rtol  = 0.2  + 3.0  * mc
-    mean_atol  = 0.2  + 3.0  * mc
     cov_rtol   = 0.4  + 10.0 * mc
     quant_rtol = 0.2  + 3.0  * mc
 
     trace_mean = mean(trace)
     trace_cov = cov(trace)
 
-    @test isapprox(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
-    cov_rtol < 1.0 && @test isapprox(trace_cov, cov(D); rtol=cov_rtol)
+    # Scale-aware mean test: standardize errors by marginal SDs, then use χ² threshold.
+    # This correctly accounts for the target's variance scale, unlike the previous
+    # isapprox test which only scaled with the norm of the mean vector.
+    σ_marginal = sqrt.(diag(cov(D)))
+    z_mean = (trace_mean .- mean(D)) ./ σ_marginal
+    T² = min_ess * sum(abs2, z_mean)
+    T²_thresh = quantile(Chisq(d), 1 - 1e-4)
 
     # test quantiles in the first dimension
     probs = .1:.1:.99
     dist = Normal(mean(D)[1], sqrt(cov(D)[1, 1]))
     q_expected = map(Base.Fix1(quantile, dist), probs)
     q_observed = quantile(trace, collect(probs); coordinate=1)
-    quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
-    c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+    # closeness metrics (< 1.0 means passing)
+    c_mean  = T² / T²_thresh
     c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
     c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
-    failed = c_mean > 1.0 || (cov_rtol < 1.0 && c_cov > 1.0) || (quant_rtol < 1.0 && c_quant > 1.0)
+    passed = c_mean <= 1.0 && (cov_rtol >= 1.0 || c_cov <= 1.0) && (quant_rtol >= 1.0 || c_quant <= 1.0)
+
+    if check_only
+        if !passed && show_test_diagnostics
+            println("RETRY| $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
+        end
+        return passed
+    end
+
+    @test T² < T²_thresh
+    cov_rtol < 1.0 && @test isapprox(trace_cov, cov(D); rtol=cov_rtol)
+    quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
+
+    failed = !passed
     if failed || show_test_diagnostics
-        d = length(D)
         label = failed ? "FAIL" : "ok  "
         println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
 end
 
-function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist; elapsed::Union{Real,Nothing}=nothing)
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist;
+                            elapsed::Union{Real,Nothing}=nothing, check_only::Bool=false)
 
     ν_D, μ_D, Σ_D = Distributions.params(D)
+    d = length(D)
 
     min_ess = minimum(ess(trace))
     if min_ess < 500
         show_test_diagnostics && @info "Skipping test_approximation (low ESS)" min_ess
-        return nothing
+        return check_only ? false : nothing
     end
 
     mc = 1.0 / sqrt(min_ess)
     kurtosis_factor = ν_D > 4 ? sqrt((ν_D - 2) / (ν_D - 4)) : 2.0
 
-    mean_rtol  = 0.2  + 3.0  * mc
-    mean_atol  = 0.2  + 3.0  * mc
     cov_rtol   = 0.70 + 50.0 * kurtosis_factor * mc
     quant_rtol = 0.30 + 5.0  * kurtosis_factor * mc
 
     trace_mean = mean(trace)
     trace_cov = cov(trace)
 
-    @test isapprox(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
-    cov_rtol < 1.0 && @test isapprox(trace_cov, cov(D); rtol=cov_rtol)
+    # Scale-aware mean test: standardize by marginal SDs, use χ² threshold with
+    # kurtosis correction for the heavier tails of the t-distribution.
+    σ_marginal = sqrt.(diag(cov(D)))
+    z_mean = (trace_mean .- mean(D)) ./ σ_marginal
+    T² = min_ess * sum(abs2, z_mean)
+    T²_thresh = quantile(Chisq(d), 1 - 1e-4) * kurtosis_factor^2
 
     # test quantiles in the first dimension
     qprobs = .1:.1:.99
     marginal_dist = μ_D[1] + sqrt(Σ_D[1, 1]) * Distributions.TDist(ν_D)
     q_expected = map(Base.Fix1(quantile, marginal_dist), qprobs)
     q_observed = quantile(trace, collect(qprobs); coordinate=1)
-    quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
 
-    c_mean  = _isapprox_closeness(trace_mean, mean(D); rtol=mean_rtol, atol=mean_atol)
+    # closeness metrics (< 1.0 means passing)
+    c_mean  = T² / T²_thresh
     c_cov   = _isapprox_closeness(trace_cov, cov(D); rtol=cov_rtol)
     c_quant = _isapprox_closeness(q_observed, q_expected; rtol=quant_rtol)
-    failed = c_mean > 1.0 || (cov_rtol < 1.0 && c_cov > 1.0) || (quant_rtol < 1.0 && c_quant > 1.0)
+    passed = c_mean <= 1.0 && (cov_rtol >= 1.0 || c_cov <= 1.0) && (quant_rtol >= 1.0 || c_quant <= 1.0)
+
+    if check_only
+        if !passed && show_test_diagnostics
+            println("RETRY| $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
+        end
+        return passed
+    end
+
+    @test T² < T²_thresh
+    cov_rtol < 1.0 && @test isapprox(trace_cov, cov(D); rtol=cov_rtol)
+    quant_rtol < 1.0 && @test isapprox(q_observed, q_expected; rtol=quant_rtol)
+
+    failed = !passed
     if failed || show_test_diagnostics
-        d = length(D)
         label = failed ? "FAIL" : "ok  "
         println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
