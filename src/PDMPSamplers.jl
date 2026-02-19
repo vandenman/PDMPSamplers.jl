@@ -57,6 +57,7 @@ include("poisson_time_strategies/exact.jl")
 
 
 include("trace.jl")
+include("estimators.jl")
 include("adaptation.jl")
 
 include("pdmp_sample.jl")
