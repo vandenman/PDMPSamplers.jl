@@ -57,7 +57,9 @@ include("poisson_time_strategies/exact.jl")
 
 
 include("trace.jl")
+include("transforms.jl")
 include("estimators.jl")
+include("transformed_estimators.jl")
 include("adaptation.jl")
 
 include("pdmp_sample.jl")
@@ -145,7 +147,16 @@ export
     inclusion_probs,
     refresh_rate,
     ess,
-    n_chains
+    n_chains,
+
+    # Parameter transforms
+    ParameterTransform,
+    IdentityTransform,
+    LowerBoundTransform,
+    UpperBoundTransform,
+    DoubleBoundTransform,
+    inv_transform,
+    is_increasing
 
 # Helper functions
 # ab,
