@@ -19,6 +19,8 @@ import Roots
 import ADTypes
 import DifferentiationInterface as DI
 
+import ElasticArrays: ElasticArray, ElasticMatrix
+
 
 
 

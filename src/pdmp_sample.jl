@@ -112,7 +112,7 @@ function _pdmp_sample_single(
 
     stats.elapsed_time = (time_ns() - t_start) / 1e9
 
-    return get_main_trace(trace_manager), stats
+    return compact(get_main_trace(trace_manager)), stats
 
 end
 

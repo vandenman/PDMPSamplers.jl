@@ -101,7 +101,7 @@
                     if !(flow isa Boomerang)
                         @test acceptance_prob > 0.4
                     end
-                    @test length(trace.events) > 100
+                    @test length(trace) > 100
 
                     test_approximation(trace, D; elapsed=stats.elapsed_time)
 

@@ -81,7 +81,7 @@ end
             if !(flow isa Boomerang)
                 @test acceptance_prob > 0.4
             end
-            @test length(trace.events) > 100
+            @test length(trace) > 100
 
             test_logistic_approximation(trace, β_map; name="LogReg($d,$n)", elapsed=stats.elapsed_time)
         end
@@ -104,7 +104,7 @@ end
 
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
-        @test length(trace.events) > 100
+        @test length(trace) > 100
 
         test_logistic_approximation(trace, β_map; name="LogReg($d,$n) sub", elapsed=stats.elapsed_time)
     end
@@ -141,7 +141,7 @@ end
 
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
-        @test length(trace.events) > 100
+        @test length(trace) > 100
 
         # non-zero coefficients should have higher inclusion probability than zero ones
         incl = inclusion_probs(trace)

@@ -19,7 +19,7 @@
         trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
         # --- Discretized vs analytic estimators ---
-        dt = mean(diff([event.time for event in trace.events]))
+        dt = mean(diff(PDMPSamplers.event_times(trace)))
 
         samples0 = collect(PDMPDiscretize(trace, dt))
         @test all(isassigned(samples0, i) for i in eachindex(samples0))

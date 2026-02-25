@@ -23,14 +23,14 @@ function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
     flow = trace.flow
     base = _underlying_flow(flow)
     j = coordinate
-    events = trace.events
-    length(events) < 2 && error("Cannot compute CDF on a trace with fewer than 2 events")
+    n = length(trace)
+    n < 2 && error("Cannot compute CDF on a trace with fewer than 2 events")
 
     total_below = 0.0
-    @inbounds for i in 1:length(events)-1
-        x0j = events[i].position[j]
-        θ0j = events[i].velocity[j]
-        τ = events[i+1].time - events[i].time
+    @inbounds for i in 1:n-1
+        x0j = trace.positions[j, i]
+        θ0j = trace.velocities[j, i]
+        τ = trace.times[i+1] - trace.times[i]
         if base isa Boomerang
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q, base.μ[j])
         else
@@ -38,7 +38,7 @@ function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
         end
     end
 
-    total_time = events[end].time - events[1].time
+    total_time = trace.times[end] - trace.times[1]
     return total_below / total_time
 end
 
@@ -67,7 +67,25 @@ function cdf(trace::FactorizedTrace, q::Real; coordinate::Integer)
     return total_below / total_time
 end
 
-function _trace_coordinate_bounds(trace::AbstractPDMPTrace, j::Integer)
+function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
+    lo, hi = Inf, -Inf
+    base = _underlying_flow(trace.flow)
+    is_boom = base isa Boomerang
+
+    @inbounds for k in 1:length(trace)
+        xj = trace.positions[j, k]
+        lo = min(lo, xj)
+        hi = max(hi, xj)
+        if is_boom
+            R = hypot(xj - base.μ[j], trace.velocities[j, k])
+            lo = min(lo, base.μ[j] - R)
+            hi = max(hi, base.μ[j] + R)
+        end
+    end
+    return lo, hi
+end
+
+function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
     lo, hi = Inf, -Inf
     base = _underlying_flow(trace.flow)
     is_boom = base isa Boomerang
@@ -90,16 +108,16 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 
 function _collect_sweep_events(trace::PDMPTrace, j::Integer)
-    events = trace.events
-    length(events) < 2 && error("Cannot compute quantile on a trace with fewer than 2 events")
+    n = length(trace)
+    n < 2 && error("Cannot compute quantile on a trace with fewer than 2 events")
 
     density_changes = Tuple{Float64, Float64}[]
     point_masses    = Tuple{Float64, Float64}[]
 
-    @inbounds for i in 1:length(events)-1
-        x0j = Float64(events[i].position[j])
-        θ0j = Float64(events[i].velocity[j])
-        τ = events[i+1].time - events[i].time
+    @inbounds for i in 1:n-1
+        x0j = Float64(trace.positions[j, i])
+        θ0j = Float64(trace.velocities[j, i])
+        τ = trace.times[i+1] - trace.times[i]
         if iszero(θ0j)
             push!(point_masses, (x0j, τ))
         else
@@ -112,7 +130,7 @@ function _collect_sweep_events(trace::PDMPTrace, j::Integer)
         end
     end
 
-    total_time = events[end].time - events[1].time
+    total_time = trace.times[end] - trace.times[1]
     return total_time, density_changes, point_masses
 end
 
@@ -301,7 +319,7 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
 
     d = length(xt)
     t_start = t₀
-    t_end = trace.events[end].time
+    t_end = _last_event_time(trace)
     total_time = t_end - t_start
 
     batch_duration = total_time / n_batches

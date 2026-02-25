@@ -23,7 +23,8 @@ import ForwardDiff
 
     @testset "_integrate on small traces" begin
         flow = ZigZag(3)
-        trace_empty = PDMPTrace(Vector{PDMPEvent{Float64, Vector{Float64}, Vector{Float64}}}(), flow)
+        d = 3
+        trace_empty = PDMPTrace(Float64[], PDMPSamplers.ElasticMatrix{Float64}(undef, d, 0), PDMPSamplers.ElasticMatrix{Float64}(undef, d, 0), flow)
         @test_throws ErrorException("Cannot compute statistics on an empty trace") mean(trace_empty)
 
         x0 = [1.0, 2.0, 3.0]
@@ -127,7 +128,7 @@ import ForwardDiff
         t_warmup = 2_000.0
         T_run = 10_000.0
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run, t_warmup; progress=false)
-        @test length(trace.events) > 100
+        @test length(trace) > 100
 
         # scales should have been updated from the initial ones(d)
         @test flow.metric.scale != ones(d)
@@ -153,7 +154,7 @@ import ForwardDiff
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=false)
         @test stats.sticky_events > 0
-        @test length(trace.events) > 100
+        @test length(trace) > 100
 
         # variables 2 and 4 should never be exactly zero (they can't stick)
         ip = inclusion_probs(trace)
