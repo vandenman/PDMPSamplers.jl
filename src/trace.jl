@@ -74,16 +74,15 @@ mutable struct FactorizedTrace{T<:FactorizedEvent, U<:ContinuousDynamics, V<:PDM
     const flow::U
     initial_state::V
 end
+
 function FactorizedTrace(state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(state)
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
-    # FactorizedTrace(events, flow isa PreconditionedDynamics ? flow.dynamics : flow, initial_state)
     FactorizedTrace(events, flow, initial_state)
 end
 function make_empty_trace(::Type{<:FactorizedTrace}, state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(-one(state.t[]), state.ξ.x, state.ξ.θ)
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
-    # FactorizedTrace(events, flow isa PreconditionedDynamics ? flow.dynamics : flow, initial_state)
     FactorizedTrace(events, flow, initial_state)
 end
 

@@ -679,6 +679,118 @@ end
 
 _time_below_segment(pd::PreconditionedDynamics, args...) = _time_below_segment(pd.dynamics, args...)
 
+# Per-coordinate integration for FactorizedTrace.
+# Each event only changes one coordinate, so we track per-coordinate state and
+# close segments independently. This is O(n + d) instead of O(n*d) and avoids
+# all per-event vector allocations from the iterate protocol.
+
+function _integrate(trace::FactorizedTrace, ::typeof(Statistics.mean))
+    events = trace.events
+    isempty(events) && error("Cannot compute statistics on an empty trace")
+
+    e0 = trace.initial_state
+    d = length(e0.position)
+    start_time = e0.time
+    end_time = events[end].time
+    total_time = end_time - start_time
+
+    integral = zeros(d)
+    last_x = copy(e0.position)
+    last_θ = copy(e0.velocity)
+    last_t = fill(start_time, d)
+
+    @inbounds for event in events
+        j = event.index
+        Δt = event.time - last_t[j]
+        integral[j] += last_x[j] * Δt + last_θ[j] * Δt^2 / 2
+        last_x[j] = event.position
+        last_θ[j] = event.velocity
+        last_t[j] = event.time
+    end
+
+    @inbounds for j in 1:d
+        Δt = end_time - last_t[j]
+        if Δt > 0
+            integral[j] += last_x[j] * Δt + last_θ[j] * Δt^2 / 2
+        end
+    end
+
+    return integral / total_time
+end
+
+function _integrate(trace::FactorizedTrace, ::typeof(Statistics.var), μ::AbstractVector)
+    events = trace.events
+    isempty(events) && error("Cannot compute statistics on an empty trace")
+
+    e0 = trace.initial_state
+    d = length(e0.position)
+    start_time = e0.time
+    end_time = events[end].time
+    total_time = end_time - start_time
+
+    integral = zeros(d)
+    last_x = copy(e0.position)
+    last_θ = copy(e0.velocity)
+    last_t = fill(start_time, d)
+
+    @inbounds for event in events
+        j = event.index
+        Δt = event.time - last_t[j]
+        yj = last_x[j] - μ[j]
+        θj = last_θ[j]
+        integral[j] += Δt * (yj^2 + yj * θj * Δt + θj^2 * Δt^2 / 3)
+        last_x[j] = event.position
+        last_θ[j] = event.velocity
+        last_t[j] = event.time
+    end
+
+    @inbounds for j in 1:d
+        Δt = end_time - last_t[j]
+        if Δt > 0
+            yj = last_x[j] - μ[j]
+            θj = last_θ[j]
+            integral[j] += Δt * (yj^2 + yj * θj * Δt + θj^2 * Δt^2 / 3)
+        end
+    end
+
+    return integral / total_time
+end
+
+function _integrate(trace::FactorizedTrace, ::typeof(inclusion_probs))
+    events = trace.events
+    isempty(events) && error("Cannot compute statistics on an empty trace")
+
+    e0 = trace.initial_state
+    d = length(e0.position)
+    start_time = e0.time
+    end_time = events[end].time
+    total_time = end_time - start_time
+
+    integral = zeros(d)
+    last_x = copy(e0.position)
+    last_θ = copy(e0.velocity)
+    last_t = fill(start_time, d)
+
+    @inbounds for event in events
+        j = event.index
+        if !(iszero(last_x[j]) && iszero(last_θ[j]))
+            integral[j] += event.time - last_t[j]
+        end
+        last_x[j] = event.position
+        last_θ[j] = event.velocity
+        last_t[j] = event.time
+    end
+
+    @inbounds for j in 1:d
+        Δt = end_time - last_t[j]
+        if Δt > 0 && !(iszero(last_x[j]) && iszero(last_θ[j]))
+            integral[j] += Δt
+        end
+    end
+
+    return integral / total_time
+end
+
 function _integrate(trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
