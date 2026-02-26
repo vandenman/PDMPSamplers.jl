@@ -9,4 +9,9 @@ LiveServer = "16fef848-5104-11e9-1b77-fb7a48bbb589"
 PDMPSamplers = "7723e753-2147-4be3-a245-de95febc9fd4"
 
 [compat]
+ADTypes = "1.21.0"
+Distributions = "0.25.123"
+Documenter = "1.17.0"
 DocumenterVitepress = ">= 0.3"
+ForwardDiff = "1.3.2"
+LiveServer = "1.5.0"
