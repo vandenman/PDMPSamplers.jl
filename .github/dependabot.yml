@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # Main package
+  - package-ecosystem: "julia"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      main-deps:
+        patterns: ["*"]
+
+  # Test dependencies
+  - package-ecosystem: "julia"
+    directory: "/test"
+    schedule:
+      interval: "weekly"
+    groups:
+      test-deps:
+        patterns: ["*"]
+
+  # Docs dependencies
+  - package-ecosystem: "julia"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+    groups:
+      docs-deps:
+        patterns: ["*"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]

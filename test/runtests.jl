@@ -21,3 +21,5 @@ const tests = joinpath.(TEST_DIR,
         end
     end
 end
+
+print_test_summary()

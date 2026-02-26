@@ -36,3 +36,5 @@ end
         end
     end
 end
+
+print_test_summary()

@@ -40,6 +40,9 @@ function test_logistic_approximation(trace, β_map::Vector{Float64}; name::Strin
         label = failed ? "FAIL" : "ok  "
         println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(name, 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean))")
     end
+
+    _record_test!(; flow=_flow_name(trace), target=name, d=length(β_map),
+                   min_ess, elapsed, passed=!failed)
 end
 
 @testset "Logistic Regression PDMP Tests" begin

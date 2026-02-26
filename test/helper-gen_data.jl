@@ -655,6 +655,41 @@ function _isapprox_closeness(a, b; rtol::Real=0.0, atol::Real=0.0)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Test performance records (local diagnostics only, not used for CI)
+# ──────────────────────────────────────────────────────────────────────────────
+
+const _test_records = NamedTuple{
+    (:flow, :target, :d, :min_ess, :elapsed, :ess_per_sec, :passed),
+    Tuple{String, String, Int, Float64, Union{Float64,Nothing}, Union{Float64,Nothing}, Bool}
+}[]
+
+function _record_test!(; flow::String, target::String, d::Int, min_ess::Float64,
+                        elapsed::Union{Real,Nothing}, passed::Bool)
+    ess_s = (elapsed !== nothing && elapsed > 0) ? min_ess / elapsed : nothing
+    push!(_test_records, (; flow, target, d, min_ess, elapsed=elapsed isa Real ? Float64(elapsed) : nothing,
+                            ess_per_sec=ess_s, passed))
+    return nothing
+end
+
+function print_test_summary()
+    show_test_diagnostics || return
+    isempty(_test_records) && return
+
+    println()
+    println("=" ^ 105)
+    println("TEST PERFORMANCE SUMMARY  ($(length(_test_records)) runs)")
+    println("=" ^ 105)
+    println("$(rpad("Flow", 24)) | $(rpad("Target", 22)) |  d | $(lpad("ESS", 7)) | $(lpad("ESS/s", 9)) | elapsed | pass")
+    println("-" ^ 105)
+    for r in sort(_test_records; by=x -> something(x.ess_per_sec, 0.0))
+        ess_s_str = r.ess_per_sec !== nothing ? lpad(@sprintf("%.0f", r.ess_per_sec), 9) : lpad("?", 9)
+        label = r.passed ? " yes" : "FAIL"
+        println("$(rpad(r.flow, 24)) | $(rpad(r.target, 22)) | $(lpad(r.d, 2)) | $(lpad(round(Int, r.min_ess), 7)) | $ess_s_str | $(_format_elapsed(r.elapsed)) | $label")
+    end
+    println("=" ^ 105)
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
 # test_approximation: compare trace estimators against known distribution
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -711,6 +746,9 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
         label = failed ? "FAIL" : "ok  "
         println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
+
+    _record_test!(; flow=_flow_name(trace), target=data_name(typeof(D), d),
+                   d, min_ess, elapsed, passed)
 end
 
 function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist;
@@ -769,6 +807,9 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
         label = failed ? "FAIL" : "ok  "
         println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(data_name(typeof(D), d), 16)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_mean=$(_f3(c_mean)) | c_cov=$(_f3(c_cov)) | c_quant=$(_f3(c_quant))")
     end
+
+    _record_test!(; flow=_flow_name(trace), target=data_name(typeof(D), d),
+                   d, min_ess, elapsed, passed)
 end
 
 function test_approximation(
@@ -958,4 +999,8 @@ function test_approximation(trace, D::SpikeAndSlabDist; elapsed::Union{Real,Noth
         dname = data_name(typeof(D), d)
         println("$label | $(rpad(_flow_name(trace), 22)) | $(rpad(dname, 40)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(elapsed)) | c_incl=$(_f3(c_incl)) | c_full=$(_f3(c_full))")
     end
+
+    passed = !failed
+    _record_test!(; flow=_flow_name(trace), target=data_name(typeof(D), d),
+                   d, min_ess, elapsed, passed)
 end
