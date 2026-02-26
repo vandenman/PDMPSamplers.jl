@@ -202,7 +202,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
         f_prime_t = dot(vt, Hxt_vt)
     end
 
-    if flow isa Boomerang
+    if flow isa AnyBoomerang
 
         # 1. Subtract the reference Hessian part from f_prime_t
         # H_Φ*v = Γ*v for the reference potential

@@ -150,7 +150,7 @@ end
 function initialize_cache(::BouncyParticle, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
     return (; z=similar(ξ.x))
 end
-function initialize_cache(::Boomerang, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
+function initialize_cache(::AnyBoomerang, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
     return (; z=similar(ξ.x))
 end
 

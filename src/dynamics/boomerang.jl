@@ -20,13 +20,68 @@ end
 Boomerang(d::Integer) = Boomerang(I(d), zeros(d), 0.1)
 Boomerang(d::Integer, λref::Real) = Boomerang(I(d), zeros(d), λref)
 
-initialize_velocity(flow::Boomerang, d::Integer) = refresh_velocity!(Vector{Float64}(undef, d), flow)
+"""
+    MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+
+Mutable version of `Boomerang` for adaptation during warmup.
+Same fields as `Boomerang` plus `eigen_cache` for dense/low-rank Γ (Phase 2+).
+Created via the `AdaptiveBoomerang` convenience constructors.
+"""
+mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+    Γ::U
+    μ::T
+    const λref::S
+    const ρ::S
+    L::LT
+    ΣL::LT
+    eigen_cache::ET  # nothing for diagonal Γ; reserved for Phase 2+
+end
+
+"""
+    AnyBoomerang
+
+Union type matching both `Boomerang` and `MutableBoomerang`.
+All Boomerang dynamics methods dispatch on this type.
+"""
+const AnyBoomerang = Union{Boomerang, MutableBoomerang}
+
+function MutableBoomerang(Γ, μ, λ = 0.1; ρ=0.0)
+    if Γ isa Diagonal
+        return MutableBoomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L, nothing)
+    else
+        Γs = Symmetric(Γ)
+        return MutableBoomerang(Γs, μ, λ, ρ, cholesky(Γs).L, cholesky(inv(Γs)).L, nothing)
+    end
+end
+
+"""
+    AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0)
+
+Convenience constructor for an adaptive Boomerang sampler with dimension `d`.
+Starts from identity precision and zero mean; learns μ and diag(Γ) during warmup.
+Returns a `MutableBoomerang`.
+"""
+function AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0)
+    MutableBoomerang(Diagonal(ones(d)), zeros(d), λref; ρ=ρ)
+end
+
+"""
+    AdaptiveBoomerang(Γ, μ; λref=0.1, ρ=0.0)
+
+Convenience constructor for an adaptive Boomerang sampler with initial guess `(Γ, μ)`.
+Returns a `MutableBoomerang`.
+"""
+function AdaptiveBoomerang(Γ, μ; λref=0.1, ρ=0.0)
+    MutableBoomerang(Γ, μ, λref; ρ=ρ)
+end
+
+initialize_velocity(flow::AnyBoomerang, d::Integer) = refresh_velocity!(Vector{Float64}(undef, d), flow)
 
 # Boomerang-specific velocity refreshment (complete refresh from Gaussian)
-refresh_rate(flow::Boomerang) = flow.λref
-refresh_velocity!(ξ::SkeletonPoint, flow::Boomerang) = refresh_velocity!(ξ.θ, flow)
-refresh_velocity!(θ::AbstractVector, flow::Boomerang) = ldiv!(flow.L', randn!(θ))
-function refresh_velocity!(state::StickyPDMPState, flow::Boomerang)
+refresh_rate(flow::AnyBoomerang) = flow.λref
+refresh_velocity!(ξ::SkeletonPoint, flow::AnyBoomerang) = refresh_velocity!(ξ.θ, flow)
+refresh_velocity!(θ::AbstractVector, flow::AnyBoomerang) = ldiv!(flow.L', randn!(θ))
+function refresh_velocity!(state::StickyPDMPState, flow::AnyBoomerang)
     ΣL = flow.ΣL
     # ΣL = cholesky(Symmetric(L*L')).L  # could cache this if many stickies
     ΣLs = view(ΣL, state.free, :)
@@ -46,7 +101,7 @@ function refresh_velocity!(state::StickyPDMPState, flow::Boomerang)
     return θ
 end
 
-function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::Boomerang, cache)
+function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
     θ = ξ.θ
     z = cache.z
     copyto!(z, ∇ϕ)
@@ -57,19 +112,19 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::Boomerang, cac
     return nothing
 end
 
-function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::Boomerang, cache)
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
     # this does not work in general! we'd need some kind of sub-cache here as well...
     reflect!(substate(state), view(∇ϕ, state.free), flow, cache)
 end
 
 
-function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::Boomerang)
+function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::AnyBoomerang)
     state.t[] += τ
     move_forward_time!(state.ξ, τ, flow)
     state
 end
 
-function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::Boomerang)
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang)
     x, θ = ξ.x, ξ.θ
     μ = flow.μ
     s, c = sincos(τ)
@@ -80,9 +135,9 @@ function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::Boomerang)
     end
 end
 
-λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::Boomerang) = pos(dot(∇ϕ, ξ.θ))
+λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang) = pos(dot(∇ϕ, ξ.θ))
 
-function freezing_time(ξ::SkeletonPoint, flow::Boomerang, i::Integer)
+function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
     μ = flow.μ[i]
@@ -109,7 +164,7 @@ function freezing_time(ξ::SkeletonPoint, flow::Boomerang, i::Integer)
     end
 end
 
-function ab(ξ::SkeletonPoint, c::AbstractVector, flow::Boomerang, cache)
+function ab(ξ::SkeletonPoint, c::AbstractVector, flow::AnyBoomerang, cache)
     # Boomerang sampler with reference Gaussian N(μ, Γ⁻¹).
     #
     # The CORRECTED gradient is: ∇ϕ_corrected = ∇ϕ_target - Γ(x - μ)
@@ -138,7 +193,7 @@ function ab(ξ::SkeletonPoint, c::AbstractVector, flow::Boomerang, cache)
     return (a, b, nothing)
 end
 
-function correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, flow::Boomerang, cache)
+function correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, flow::AnyBoomerang, cache)
     # For Boomerang dynamics, the corrected gradient is: ∇U(x) - Γ(x - μ)
     # This ensures sampling from the correct distribution with precision Γ
     z = cache.z
