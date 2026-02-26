@@ -152,7 +152,7 @@ import QuadGK
             ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(flow, d))
             trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false)
 
-            dt_disc = mean(diff([event.time for event in trace.events]))
+            dt_disc = mean(diff(PDMPSamplers.event_times(trace)))
             samples = Matrix(PDMPDiscretize(trace, dt_disc))
 
             min_ess = minimum(MCMCDiagnosticTools.ess.(eachcol(samples)))
@@ -208,7 +208,7 @@ import QuadGK
             ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(flow, d))
             trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false)
 
-            dt_disc = mean(diff([event.time for event in trace.events]))
+            dt_disc = mean(diff(PDMPSamplers.event_times(trace)))
             samples = Matrix(PDMPDiscretize(trace, dt_disc))
 
             c_mean = mean(trace, transforms_db)

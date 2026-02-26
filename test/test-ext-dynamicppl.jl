@@ -54,7 +54,7 @@ import ForwardDiff
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
 
         # Basic checks
-        @test length(trace.events) > 10
+        @test length(trace) > 10
         @test stats.∇f_calls > 0
         @test stats.reflections_accepted > 0
         @test stats.reflections_accepted / stats.reflections_events > 0.1
