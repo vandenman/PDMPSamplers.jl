@@ -1,0 +1,1 @@
+import{_ as a,o as t,c as r,aA as n}from"./chunks/framework.Bh5K0Sd-.js";const m=JSON.parse('{"title":"R package","description":"","frontmatter":{},"headers":[],"relativePath":"r.md","filePath":"r.md","lastUpdated":null}'),l={name:"r.md"};function p(s,e,i,o,c,_){return t(),r("div",null,[...e[0]||(e[0]=[n("",4)])])}const f=a(l,[["render",p]]);export{m as __pageData,f as default};
