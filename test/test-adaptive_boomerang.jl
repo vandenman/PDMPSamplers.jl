@@ -202,14 +202,14 @@
 
         D, κ, slab_target = gen_data(SpikeAndSlabDist{BetaBernoulli, ZeroMeanIsoNormal}, d)
 
-        flow = AdaptiveBoomerang(d)
+        flow = AdaptiveBoomerang(d; λref=1.0)
         x0 = randn(d) .* 0.1
         θ0 = PDMPSamplers.initialize_velocity(flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, slab_target))
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, slab_target))
-        alg = Sticky(GridThinningStrategy(), κ)
+        alg = Sticky(GridThinningStrategy(), κ, trues(d))
 
         T = 100_000.0
         t_warmup = 10_000.0
@@ -253,7 +253,7 @@
     @testset "BoomerangWarmupStats" begin
         d = 2
         stats = PDMPSamplers.BoomerangWarmupStats(d)
-        @test stats.total_time == 0.0
+        @test stats.coord_time == zeros(d)
         @test stats.sum_x == zeros(d)
         @test stats.sum_x2 == zeros(d)
         @test stats.cursor == 0

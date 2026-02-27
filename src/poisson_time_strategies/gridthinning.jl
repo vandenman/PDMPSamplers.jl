@@ -213,8 +213,15 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
         # dv/dt = -∇Φ = Γ(μ - xt)
         vdot = flow.Γ * (flow.μ - xt)
 
+        # For StickyPDMPState, frozen coordinates have no velocity drift:
+        # their x and θ are held at zero, so vdot must also be zero.
+        if state isa StickyPDMPState
+            for i in eachindex(vdot)
+                state.free[i] || (vdot[i] = zero(eltype(vdot)))
+            end
+        end
+
         # We use `∇U_xt` directly because it IS the corrected gradient.
-        # @show f_prime_t, vdot, dot(vdot, ∇U_xt)
         f_prime_t += dot(vdot, ∇U_xt)
 
     elseif !(flow isa ZigZag || flow isa BouncyParticle || flow isa PreconditionedDynamics{<:Any,<:Union{BouncyParticle,ZigZag}})
@@ -308,6 +315,12 @@ end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
 
+function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
+    alg.t_max[] = t_max
+    alg.N[] = clamp(alg.N[], alg.N_min, alg.N_max)
+    recompute_time_grid!(alg)
+end
+
 
 function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64=Inf, include_refresh::Bool=true)
@@ -341,6 +354,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     rejection_count = 0
     max_rejections = 100
 
+    # For periodic dynamics (Boomerang), cap t_max at a few periods to prevent
+    # unbounded growth when the corrected rate is near zero.
+    max_t_max = flow isa AnyBoomerang ? 8π : 1e10
+
     safety_limit = alg.safety_limit
     while safety_limit > 0
 
@@ -355,7 +372,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
             t_max = alg.t_max[]
             new_t_max = alg.t_max[] * alg.α⁺
-            alg.t_max[] = min(new_t_max, 1e10)
+            alg.t_max[] = min(new_t_max, max_t_max)
             recompute_time_grid!(alg)
             stats.grid_grows += 1
 

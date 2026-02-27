@@ -113,8 +113,13 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, 
 end
 
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
-    # this does not work in general! we'd need some kind of sub-cache here as well...
-    reflect!(substate(state), view(∇ϕ, state.free), flow, cache)
+    reflect!(state.ξ, ∇ϕ, flow, cache)
+    # Reflection may set non-zero velocity for frozen coordinates; restore invariant
+    for i in eachindex(state.free)
+        if !state.free[i]
+            state.ξ.θ[i] = 0.0
+        end
+    end
 end
 
 
@@ -122,6 +127,24 @@ function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::AnyBoomera
     state.t[] += τ
     move_forward_time!(state.ξ, τ, flow)
     state
+end
+
+function move_forward_time!(state::StickyPDMPState, τ::Real, flow::AnyBoomerang)
+    state.t[] += τ
+    move_forward_time!(state.ξ, τ, flow, state.free)
+    state
+end
+
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::BitVector)
+    x, θ = ξ.x, ξ.θ
+    μ = flow.μ
+    s, c = sincos(τ)
+    for i in eachindex(x)
+        free[i] || continue
+        Δ = x[i] - μ[i]
+        x[i] =  Δ*c + θ[i]*s + μ[i]
+        θ[i] = -Δ*s + θ[i]*c
+    end
 end
 
 function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang)

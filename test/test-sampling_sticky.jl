@@ -2,7 +2,7 @@
 
 @testset "Sticky PDMP Sampler Tests" begin
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang, PreconditionedZigZag, PreconditionedBPS)
+    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS)
     factorized_gradient_types = (FullGradient,)
     nonfactorized_gradient_types = (FullGradient,)
 
@@ -34,7 +34,7 @@
 
                     # MvTDist slab: only ZigZag-based samplers converge reliably
                     if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}
-                        pdmp_type <: Union{BouncyParticle, Boomerang,
+                        pdmp_type <: Union{BouncyParticle, AnyBoomerang,
                             PreconditionedDynamics{<:Any, BouncyParticle},
                             PreconditionedDynamics{<:Any, Boomerang}} && continue
                         algorithm === ThinningStrategy && continue
@@ -49,7 +49,7 @@
                     d = first(data_arg)
                     T = if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}
                         600_000.0
-                    elseif pdmp_type <: Union{Boomerang, PreconditionedDynamics{<:Any, Boomerang}}
+                    elseif pdmp_type <: Union{AnyBoomerang, PreconditionedDynamics{<:Any, Boomerang}}
                         50_000.0
                     elseif pdmp_type <: Union{PreconditionedDynamics{<:Any, BouncyParticle}}
                         100_000.0
@@ -85,7 +85,7 @@
                     trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
                     acceptance_prob = stats.reflections_accepted / stats.reflections_events
-                    if !(flow isa Boomerang)
+                    if !(flow isa AnyBoomerang)
                         @test acceptance_prob > 0.55
                     end
 

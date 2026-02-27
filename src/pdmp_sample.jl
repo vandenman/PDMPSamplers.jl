@@ -101,7 +101,16 @@ function _pdmp_sample_single(
         needs_saving && record_event!(trace_manager, state, flow, saving_args)
 
         adapt!(adapter, state, flow, model_.grad, trace_manager)
-
+        if did_dynamics_adapt(adapter)
+            # After the dynamics (μ, Γ) change, the rate landscape shifts and
+            # the grid thinning's t_max (which may have grown during the old
+            # rate regime) can be vastly too large.  Reset it so the grid
+            # re-adapts to the new rate scale.
+            _reset_inner_grid!(alg_)
+            if alg_ isa StickyLoopState
+                update_all_stick_times!(alg_, state, flow)
+            end
+        end
         check_health!(health, stats)
 
         if progress && state.t[] > tstop
@@ -372,3 +381,7 @@ function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::
 
     return accept
 end
+
+_reset_inner_grid!(::PoissonTimeStrategy) = nothing
+_reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
+_reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)

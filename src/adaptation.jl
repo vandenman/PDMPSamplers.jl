@@ -104,14 +104,14 @@ second moment per coordinate using the Boomerang's analytic segment
 integrals.
 """
 mutable struct BoomerangWarmupStats
-    total_time::Float64       # total integrated time
-    sum_x::Vector{Float64}    # ∑ ∫ x_i(t) dt per coordinate
-    sum_x2::Vector{Float64}   # ∑ ∫ x_i²(t) dt per coordinate
-    cursor::Int               # index of last processed event in warmup trace
+    coord_time::Vector{Float64}   # per-coordinate integrated free time
+    sum_x::Vector{Float64}        # ∑ ∫ x_i(t) dt per coordinate (free only)
+    sum_x2::Vector{Float64}       # ∑ ∫ x_i²(t) dt per coordinate (free only)
+    cursor::Int                   # index of last processed event in warmup trace
 end
 
 function BoomerangWarmupStats(d::Integer)
-    BoomerangWarmupStats(0.0, zeros(d), zeros(d), 0)
+    BoomerangWarmupStats(zeros(d), zeros(d), zeros(d), 0)
 end
 
 """
@@ -120,7 +120,12 @@ end
 Return the time-averaged mean from online stats.
 """
 function stats_mean(stats::BoomerangWarmupStats)
-    stats.total_time > 0 ? stats.sum_x / stats.total_time : zeros(length(stats.sum_x))
+    d = length(stats.sum_x)
+    μ = zeros(d)
+    for i in 1:d
+        μ[i] = stats.coord_time[i] > 0 ? stats.sum_x[i] / stats.coord_time[i] : 0.0
+    end
+    return μ
 end
 
 """
@@ -129,12 +134,15 @@ end
 Return the time-averaged variance from online stats (using E[X²] - E[X]²).
 """
 function stats_var(stats::BoomerangWarmupStats)
-    if stats.total_time <= 0
-        return ones(length(stats.sum_x))
+    d = length(stats.sum_x)
+    v = ones(d)
+    for i in 1:d
+        if stats.coord_time[i] > 0
+            μi = stats.sum_x[i] / stats.coord_time[i]
+            v[i] = max(stats.sum_x2[i] / stats.coord_time[i] - μi^2, 0.0)
+        end
     end
-    μ = stats.sum_x / stats.total_time
-    ex2 = stats.sum_x2 / stats.total_time
-    return max.(ex2 - μ .^ 2, 0.0)  # clamp to avoid negative from numerical noise
+    return v
 end
 
 """
@@ -167,17 +175,19 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
         stats.cursor = 1
     end
 
-    # Process new segments: segment k uses position at event k, held for dt_k
+    # Process new segments: segment k uses position at event k, held for dt_k.
+    # Skip coordinates where x == 0 (frozen in a spike-and-slab context)
+    # to learn the slab's precision rather than the mixture's.
     @inbounds for k in stats.cursor:(n - 1)
         t0 = trace.times[k]
         t1 = trace.times[k + 1]
         dt = t1 - t0
         dt <= 0 && continue
 
-        stats.total_time += dt
-
         for i in axes(trace.positions, 1)
             x = trace.positions[i, k]
+            iszero(x) && continue
+            stats.coord_time[i] += dt
             stats.sum_x[i] += x * dt
             stats.sum_x2[i] += x^2 * dt
         end
@@ -210,15 +220,17 @@ mutable struct BoomerangAdapter <: AbstractAdapter
     no_updates_done::Int
     const scheme::Symbol
     stats::BoomerangWarmupStats
+    did_update::Bool
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
-    BoomerangAdapter(base_dt, t0, 0, scheme, BoomerangWarmupStats(d))
+    BoomerangAdapter(base_dt, t0, 0, scheme, BoomerangWarmupStats(d), false)
 end
 
 function adapt!(ad::BoomerangAdapter, state, flow::MutableBoomerang, grad, trace_mgr)
     # Always accumulate online stats from newly completed segments
     update_stats!(ad.stats, trace_mgr)
+    ad.did_update = false
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= dt_now)
@@ -226,11 +238,17 @@ function adapt!(ad::BoomerangAdapter, state, flow::MutableBoomerang, grad, trace
         refresh_velocity!(state, flow)
         ad.last_update = state.t[]
         ad.no_updates_done += 1
+        ad.did_update = true
     end
 end
 
 # Fallback: if the flow is not MutableBoomerang, do nothing
 adapt!(::BoomerangAdapter, state, flow, grad, trace_mgr) = nothing
+
+# --- Query whether dynamics adaptation occurred (for sticky time invalidation) ---
+did_dynamics_adapt(::AbstractAdapter) = false
+did_dynamics_adapt(ad::BoomerangAdapter) = ad.did_update
+did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 
 
 # --- 6. update_boomerang! implementations ---
@@ -244,7 +262,7 @@ Update `flow.μ` and diagonal `flow.Γ` from online sufficient statistics.
 Recomputes Cholesky factors `L` and `ΣL` without explicit matrix inverse.
 """
 function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:diagonal})
-    stats.total_time <= 0 && return flow
+    all(iszero, stats.coord_time) && return flow
 
     μ_est = stats_mean(stats)
     σ2_est = stats_var(stats)
