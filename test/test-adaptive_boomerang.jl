@@ -74,7 +74,7 @@
     # ──────────────────────────────────────────────────────────────────────
     # Test 1a: MvNormal with diagonal covariance
     # ──────────────────────────────────────────────────────────────────────
-    @testset "MvNormal diagonal" begin
+    @testset "N(μ, diag Σ)" begin
         Random.seed!(12345)
         d = 5
         μ_true = randn(d) .* 3
@@ -128,7 +128,7 @@
     # ──────────────────────────────────────────────────────────────────────
     # Test 1b: MvNormal with correlated covariance (diagonal adapter is suboptimal)
     # ──────────────────────────────────────────────────────────────────────
-    @testset "MvNormal correlated" begin
+    @testset "N(μ, Σ)" begin
         Random.seed!(54321)
         d = 3
         η = 2.0  # moderate correlation via LKJ
@@ -337,7 +337,7 @@ end
     # ──────────────────────────────────────────────────────────────────────
     # Test 2a: MvNormal with correlated covariance (fullrank adapter)
     # ──────────────────────────────────────────────────────────────────────
-    @testset "MvNormal correlated (fullrank)" begin
+    @testset "N(μ, Σ) fullrank" begin
         Random.seed!(22222)
         d = 3
         η = 2.0
@@ -388,7 +388,7 @@ end
     # ──────────────────────────────────────────────────────────────────────
     # Test 2b: MvNormal with strong correlations (fullrank vs diagonal)
     # ──────────────────────────────────────────────────────────────────────
-    @testset "MvNormal strong correlation (fullrank)" begin
+    @testset "N(μ, Σ) strong corr, fullrank" begin
         Random.seed!(33333)
         d = 3
         η = 1.0  # strong correlations via LKJ(1)

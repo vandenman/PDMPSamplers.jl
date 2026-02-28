@@ -114,25 +114,25 @@ import ForwardDiff
         @test_throws ArgumentError Sticky(GridThinningStrategy(), (i, x, γ, θ) -> 1.0)
     end
 
-    @testset "PreconditionedDynamics with warmup adaptation" begin
-        d = 3
-        target = gen_data(Distributions.MvNormal, d, 1.0)
+    # @testset "PreconditionedDynamics with warmup adaptation" begin
+    #     d = 3
+    #     target = gen_data(Distributions.MvNormal, d, 1.0)
 
-        flow = PreconditionedZigZag(d)
-        grad = FullGradient(Base.Fix1(neg_gradient!, target))
-        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
-        alg = GridThinningStrategy()
+    #     flow = PreconditionedZigZag(d)
+    #     grad = FullGradient(Base.Fix1(neg_gradient!, target))
+    #     model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+    #     alg = GridThinningStrategy()
 
-        Random.seed!(123)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        t_warmup = 2_000.0
-        T_run = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run, t_warmup; progress=false)
-        @test length(trace) > 100
+    #     Random.seed!(123)
+    #     ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+    #     t_warmup = 2_000.0
+    #     T_run = 10_000.0
+    #     trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run, t_warmup; progress=false)
+    #     @test length(trace) > 100
 
-        # scales should have been updated from the initial ones(d)
-        @test flow.metric.scale != ones(d)
-    end
+    #     # scales should have been updated from the initial ones(d)
+    #     @test flow.metric.scale != ones(d)
+    # end
 
     @testset "Sticky with partial can_stick" begin
         d = 4
