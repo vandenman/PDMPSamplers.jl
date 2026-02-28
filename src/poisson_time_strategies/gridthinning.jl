@@ -204,14 +204,14 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
     if flow isa AnyBoomerang
 
-        # 1. Subtract the reference Hessian part from f_prime_t
-        # H_Φ*v = Γ*v for the reference potential
-        # @show f_prime_t, dot(vt, flow.Γ, vt)
+        # 1. Subtract the reference Hessian part from f_prime_t.
+        # The HVP above used the full potential U; the corrected potential is
+        # ϕ = U - Φ where Φ(x) = ½(x-μ)ᵀΓ(x-μ), so H_ϕ = H_U - Γ.
         f_prime_t -= dot(vt, flow.Γ, vt)
 
-        # 2. Add the velocity drift part
-        # dv/dt = -∇Φ = Γ(μ - xt)
-        vdot = flow.Γ * (flow.μ - xt)
+        # 2. Add the velocity drift part: dθ/dt = -(x - μ) for unit-frequency
+        # Boomerang dynamics (NOT -Γ(x-μ)).
+        vdot = flow.μ .- xt
 
         # For StickyPDMPState, frozen coordinates have no velocity drift:
         # their x and θ are held at zero, so vdot must also be zero.
@@ -282,6 +282,10 @@ end
 
 function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     T = typeof(strat.t_max)
+    # For Boomerang dynamics, the rate oscillates with period 2π.
+    # Prevent the grid from coarsening below the initial N to ensure the
+    # sinusoidal rate peaks are always captured.
+    N_min = flow isa AnyBoomerang ? max(strat.N_min, strat.N) : strat.N_min
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, strat.N + 1)), zeros(T, strat.N)),
         Base.RefValue{Int}(strat.N),
@@ -289,7 +293,7 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         strat.α⁺,
         strat.α⁻,
         strat.safety_limit,
-        strat.N_min,
+        N_min,
         strat.N,
         strat.early_stop_threshold,
         copy(state),
@@ -354,9 +358,9 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     rejection_count = 0
     max_rejections = 100
 
-    # For periodic dynamics (Boomerang), cap t_max at a few periods to prevent
-    # unbounded growth when the corrected rate is near zero.
-    max_t_max = flow isa AnyBoomerang ? 8π : 1e10
+    # For periodic dynamics (Boomerang), cap t_max to keep grid resolution adequate.
+    # With N grid cells and period 2π, we need t_max/N << 2π for reliable bounds.
+    max_t_max = flow isa AnyBoomerang ? 4π : 1e10
 
     safety_limit = alg.safety_limit
     while safety_limit > 0

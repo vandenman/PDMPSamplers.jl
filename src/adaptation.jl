@@ -107,11 +107,12 @@ mutable struct BoomerangWarmupStats
     coord_time::Vector{Float64}   # per-coordinate integrated free time
     sum_x::Vector{Float64}        # ∑ ∫ x_i(t) dt per coordinate (free only)
     sum_x2::Vector{Float64}       # ∑ ∫ x_i²(t) dt per coordinate (free only)
+    sum_xy::Union{Nothing, Matrix{Float64}}  # ∑ ∫ x_i x_j dt (fullrank only)
     cursor::Int                   # index of last processed event in warmup trace
 end
 
-function BoomerangWarmupStats(d::Integer)
-    BoomerangWarmupStats(zeros(d), zeros(d), zeros(d), 0)
+function BoomerangWarmupStats(d::Integer; fullrank::Bool=false)
+    BoomerangWarmupStats(zeros(d), zeros(d), zeros(d), fullrank ? zeros(d, d) : nothing, 0)
 end
 
 """
@@ -153,6 +154,32 @@ Return the time-averaged standard deviation from online stats.
 stats_std(stats::BoomerangWarmupStats) = sqrt.(stats_var(stats))
 
 """
+    stats_cov(stats::BoomerangWarmupStats)
+
+Return the time-averaged covariance matrix from online stats.
+Requires `sum_xy` (fullrank mode).
+"""
+function stats_cov(stats::BoomerangWarmupStats)
+    d = length(stats.sum_x)
+    stats.sum_xy === nothing && error("BoomerangWarmupStats was not initialized for fullrank (no sum_xy)")
+
+    μ = stats_mean(stats)
+    C = zeros(d, d)
+
+    for j in 1:d, i in j:d
+        t_pair = min(stats.coord_time[i], stats.coord_time[j])
+        if t_pair > 0
+            C[i, j] = stats.sum_xy[i, j] / t_pair - μ[i] * μ[j]
+        else
+            C[i, j] = i == j ? 1.0 : 0.0
+        end
+        C[j, i] = C[i, j]
+    end
+
+    return C
+end
+
+"""
     update_stats!(stats::BoomerangWarmupStats, trace_mgr)
 
 Incrementally accumulate mean and second-moment estimates from new
@@ -175,6 +202,8 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
         stats.cursor = 1
     end
 
+    has_xy = stats.sum_xy !== nothing
+
     # Process new segments: segment k uses position at event k, held for dt_k.
     # Skip coordinates where x == 0 (frozen in a spike-and-slab context)
     # to learn the slab's precision rather than the mixture's.
@@ -184,12 +213,27 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
         dt = t1 - t0
         dt <= 0 && continue
 
-        for i in axes(trace.positions, 1)
+        d = size(trace.positions, 1)
+        for i in 1:d
             x = trace.positions[i, k]
             iszero(x) && continue
             stats.coord_time[i] += dt
             stats.sum_x[i] += x * dt
             stats.sum_x2[i] += x^2 * dt
+        end
+
+        if has_xy
+            for j in 1:d
+                xj = trace.positions[j, k]
+                iszero(xj) && continue
+                for i in j:d
+                    xi = trace.positions[i, k]
+                    iszero(xi) && continue
+                    val = xi * xj * dt
+                    stats.sum_xy[i, j] += val
+                    i != j && (stats.sum_xy[j, i] += val)
+                end
+            end
         end
     end
 
@@ -212,7 +256,7 @@ end
     BoomerangAdapter <: AbstractAdapter
 
 Adapter for `MutableBoomerang` that learns μ and Γ during warmup.
-Phase 1 supports `:diagonal` scheme only.
+Supports `:diagonal` (Phase 1) and `:fullrank` (Phase 2) schemes.
 """
 mutable struct BoomerangAdapter <: AbstractAdapter
     const base_dt::Float64
@@ -224,7 +268,8 @@ mutable struct BoomerangAdapter <: AbstractAdapter
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
-    BoomerangAdapter(base_dt, t0, 0, scheme, BoomerangWarmupStats(d), false)
+    stats = BoomerangWarmupStats(d; fullrank=(scheme == :fullrank))
+    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false)
 end
 
 function adapt!(ad::BoomerangAdapter, state, flow::MutableBoomerang, grad, trace_mgr)
@@ -278,14 +323,104 @@ function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, 
         flow.Γ[i, i] = 1.0 / σ2
     end
 
-    # Recompute Cholesky factors
-    flow.L = cholesky(Symmetric(flow.Γ)).L
-    # ΣL satisfies: ΣL * ΣL' = Γ⁻¹  (for sampling N(0, Γ⁻¹))
-    # Use factorization-based solve: Γ⁻¹ = Symmetric(Γ) \ I
-    flow.ΣL = cholesky(Symmetric(flow.Γ) \ I).L
+    # Recompute factors directly from diagonal entries (O(d), no dense allocation)
+    γ = flow.Γ.diag
+    flow.L = Diagonal(sqrt.(γ))
+    flow.ΣL = Diagonal(1.0 ./ sqrt.(γ))
     flow.eigen_cache = nothing
 
     return flow
+end
+
+
+# --- Fullrank adaptation (Phase 2) ---
+
+const BOOM_COND_MAX = 1e6
+const BOOM_SHRINKAGE_BASE = 0.5
+
+"""
+    update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
+
+Update `flow.μ` and dense `flow.Γ` from online sufficient statistics.
+Estimates full covariance, applies shrinkage regularization, and recomputes
+Cholesky factors `L` and `ΣL`. Falls back to diagonal update on factorization failure.
+"""
+function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
+    all(iszero, stats.coord_time) && return flow
+
+    d = length(flow.μ)
+    μ_est = stats_mean(stats)
+    Σ_est = stats_cov(stats)
+
+    # Diagonal fallback target (also used as shrinkage anchor)
+    σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
+    Σ0 = Diagonal(σ2_diag)
+
+    # Shrinkage toward diagonal: strong initially, decays with observation time
+    total_time = maximum(stats.coord_time)
+    α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
+
+    Σ_reg = (1.0 - α) .* Σ_est .+ α .* Matrix(Σ0)
+
+    # Enforce symmetry and diagonal floor
+    Σ_sym = Symmetric((Σ_reg + Σ_reg') / 2)
+    for i in 1:d
+        Σ_sym.data[i, i] = max(Σ_sym[i, i], BOOM_DIAG_FLOOR^2)
+    end
+
+    # Attempt Cholesky factorization of Σ
+    Σ_chol = try
+        cholesky(Σ_sym)
+    catch e
+        e isa PosDefException || rethrow()
+        _fullrank_diagonal_fallback!(flow, μ_est, σ2_diag)
+        return flow
+    end
+
+    # Condition check via Cholesky diagonal
+    L_diag = diag(Σ_chol.L)
+    κ_approx = (maximum(L_diag) / max(minimum(L_diag), BOOM_DIAG_FLOOR))^2
+    if κ_approx > BOOM_COND_MAX
+        # Increase shrinkage and retry
+        Σ_sym = Symmetric(0.5 .* Σ_sym .+ 0.5 .* Matrix(Σ0))
+        Σ_chol = try
+            cholesky(Σ_sym)
+        catch e
+            e isa PosDefException || rethrow()
+            _fullrank_diagonal_fallback!(flow, μ_est, σ2_diag)
+            return flow
+        end
+    end
+
+    # Compute Γ = Σ⁻¹ and its Cholesky
+    Γ_new = inv(Σ_chol)
+    Γ_sym = Symmetric(Γ_new)
+    Γ_chol = cholesky(Γ_sym)
+
+    # Update flow in-place
+    copyto!(flow.μ, μ_est)
+    flow.Γ.data .= Γ_sym
+    flow.L.data .= Γ_chol.L
+    flow.ΣL.data .= Σ_chol.L
+    return flow
+end
+
+function _fullrank_diagonal_fallback!(flow::MutableBoomerang, μ_est, σ2_diag)
+    copyto!(flow.μ, μ_est)
+    d = length(μ_est)
+
+    fill!(flow.Γ.data, 0.0)
+    fill!(flow.L.data, 0.0)
+    fill!(flow.ΣL.data, 0.0)
+
+    for i in 1:d
+        γ_i = 1.0 / max(σ2_diag[i], BOOM_DIAG_FLOOR^2)
+        flow.Γ.data[i, i] = γ_i
+        flow.L.data[i, i] = sqrt(γ_i)
+        flow.ΣL.data[i, i] = 1.0 / sqrt(γ_i)
+    end
+
+    return nothing
 end
 
 
@@ -293,5 +428,6 @@ end
 
 function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0)
     d = length(flow.μ)
-    return BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=:diagonal)
+    scheme = flow.Γ isa Diagonal ? :diagonal : :fullrank
+    return BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=scheme)
 end

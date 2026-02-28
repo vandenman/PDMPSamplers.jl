@@ -55,14 +55,28 @@ function MutableBoomerang(Γ, μ, λ = 0.1; ρ=0.0)
 end
 
 """
-    AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0)
+    AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0, scheme=:diagonal)
 
 Convenience constructor for an adaptive Boomerang sampler with dimension `d`.
-Starts from identity precision and zero mean; learns μ and diag(Γ) during warmup.
+Starts from identity precision and zero mean; learns μ and Γ during warmup.
+
+- `scheme=:diagonal`: adapts only diag(Γ) and μ. O(d) per update and per step.
+- `scheme=:fullrank`: adapts full Γ and μ. O(d³) per update, O(d) per step.
+
 Returns a `MutableBoomerang`.
 """
-function AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0)
-    MutableBoomerang(Diagonal(ones(d)), zeros(d), λref; ρ=ρ)
+function AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0, scheme=:diagonal)
+    if scheme == :diagonal
+        MutableBoomerang(Diagonal(ones(d)), zeros(d), λref; ρ=ρ)
+    elseif scheme == :fullrank
+        Γ = Symmetric(Matrix{Float64}(I, d, d))
+        μ = zeros(d)
+        L = LowerTriangular(Matrix{Float64}(I, d, d))
+        ΣL = LowerTriangular(Matrix{Float64}(I, d, d))
+        MutableBoomerang(Γ, μ, Float64(λref), Float64(ρ), L, ΣL, nothing)
+    else
+        error("Unknown adaptation scheme: $scheme. Use :diagonal or :fullrank.")
+    end
 end
 
 """
