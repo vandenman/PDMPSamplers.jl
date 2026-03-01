@@ -212,6 +212,23 @@ function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::Ab
     return f_prime_t
 end
 
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::AbstractVector, flow::LowRankMutableBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = dot(vt, Hxt_vt)
+    f_prime_t -= lowrank_quadform(flow.Γ, vt)
+    if state isa StickyPDMPState
+        for i in eachindex(xt)
+            state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
+        end
+    else
+        for i in eachindex(xt)
+            f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
+        end
+    end
+    return f_prime_t
+end
+
 function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::AbstractVector, pd::PreconditionedDynamics)
     return ∂λ∂t(state, ∇U_xt, Hxt_vt, pd.dynamics)
 end
@@ -219,7 +236,7 @@ end
 # --- Grid parameter caps, dispatched on flow type ---
 
 min_grid_cells(::ContinuousDynamics, N_min::Int, ::Int) = N_min
-min_grid_cells(::AnyBoomerang, N_min::Int, N::Int) = max(N_min, N)
+min_grid_cells(::AnyBoomerang, N_min::Int, ::Int) = max(N_min, 10)
 min_grid_cells(pd::PreconditionedDynamics, N_min::Int, N::Int) = min_grid_cells(pd.dynamics, N_min, N)
 
 max_grid_horizon(::ContinuousDynamics) = 1e10
@@ -291,9 +308,13 @@ Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     early_stop_threshold::Float64 = Inf
 end
 
+_default_early_stop(::ContinuousDynamics, est::Float64) = est
+_default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_stop(pd.dynamics, est)
+
 function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     T = typeof(strat.t_max)
     N_min = min_grid_cells(flow, strat.N_min, strat.N)
+    est = _default_early_stop(flow, strat.early_stop_threshold)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, strat.N + 1)), zeros(T, strat.N)),
         Base.RefValue{Int}(strat.N),
@@ -303,7 +324,7 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         strat.safety_limit,
         N_min,
         strat.N,
-        strat.early_stop_threshold,
+        est,
         copy(state),
         copy(state),
         similar(state.ξ.x, 0),
@@ -329,7 +350,7 @@ recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg
 
 function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     alg.t_max[] = t_max
-    alg.N[] = clamp(alg.N[], alg.N_min, alg.N_max)
+    alg.N[] = alg.N_max
     recompute_time_grid!(alg)
 end
 

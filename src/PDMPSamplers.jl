@@ -94,6 +94,8 @@ export
     Boomerang,
     MutableBoomerang,
     AnyBoomerang,
+    LowRankMutableBoomerang,
+    LowRankPrecision,
     AdaptiveBoomerang,
     PreconditionedDynamics,
     AbstractPreconditioner,

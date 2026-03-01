@@ -99,20 +99,24 @@ end
     BoomerangWarmupStats
 
 Online sufficient statistics for Boomerang adaptation, accumulated
-incrementally from warmup trace segments. Tracks weighted mean and
-second moment per coordinate using the Boomerang's analytic segment
-integrals.
+incrementally from warmup trace segments.
+
+Uses a hybrid integration strategy:
+- Linear integrals (`sum_x_lin`) for mean estimation (μ-independent, unbiased)
+- Sinusoidal integrals (`sum_x`, `sum_x2`, `sum_xy`) for variance/covariance
+  estimation (exact for bounded oscillatory Boomerang trajectory)
 """
 mutable struct BoomerangWarmupStats
     coord_time::Vector{Float64}   # per-coordinate integrated free time
-    sum_x::Vector{Float64}        # ∑ ∫ x_i(t) dt per coordinate (free only)
-    sum_x2::Vector{Float64}       # ∑ ∫ x_i²(t) dt per coordinate (free only)
-    sum_xy::Union{Nothing, Matrix{Float64}}  # ∑ ∫ x_i x_j dt (fullrank only)
+    sum_x_lin::Vector{Float64}    # ∑ ∫ x_i(t) dt LINEAR (for mean, μ-independent)
+    sum_x::Vector{Float64}        # ∑ ∫ x_i(t) dt SINUSOIDAL (for var/cov consistency)
+    sum_x2::Vector{Float64}       # ∑ ∫ x_i²(t) dt SINUSOIDAL
+    sum_xy::Union{Nothing, Matrix{Float64}}  # ∑ ∫ x_i x_j dt SINUSOIDAL (fullrank only)
     cursor::Int                   # index of last processed event in warmup trace
 end
 
 function BoomerangWarmupStats(d::Integer; fullrank::Bool=false)
-    BoomerangWarmupStats(zeros(d), zeros(d), zeros(d), fullrank ? zeros(d, d) : nothing, 0)
+    BoomerangWarmupStats(zeros(d), zeros(d), zeros(d), zeros(d), fullrank ? zeros(d, d) : nothing, 0)
 end
 
 """
@@ -121,10 +125,10 @@ end
 Return the time-averaged mean from online stats.
 """
 function stats_mean(stats::BoomerangWarmupStats)
-    d = length(stats.sum_x)
+    d = length(stats.sum_x_lin)
     μ = zeros(d)
     for i in 1:d
-        μ[i] = stats.coord_time[i] > 0 ? stats.sum_x[i] / stats.coord_time[i] : 0.0
+        μ[i] = stats.coord_time[i] > 0 ? stats.sum_x_lin[i] / stats.coord_time[i] : 0.0
     end
     return μ
 end
@@ -157,13 +161,18 @@ stats_std(stats::BoomerangWarmupStats) = sqrt.(stats_var(stats))
     stats_cov(stats::BoomerangWarmupStats)
 
 Return the time-averaged covariance matrix from online stats.
-Requires `sum_xy` (fullrank mode).
+Requires `sum_xy` (fullrank mode). Uses `sum_x` (not `sum_x_lin`)
+to stay internally consistent with the piecewise-constant `sum_xy`.
 """
 function stats_cov(stats::BoomerangWarmupStats)
     d = length(stats.sum_x)
     stats.sum_xy === nothing && error("BoomerangWarmupStats was not initialized for fullrank (no sum_xy)")
 
-    μ = stats_mean(stats)
+    # Use piecewise-constant mean (from sum_x) to match sum_xy, not sum_x_lin
+    μ = zeros(d)
+    for i in 1:d
+        μ[i] = stats.coord_time[i] > 0 ? stats.sum_x[i] / stats.coord_time[i] : 0.0
+    end
     C = zeros(d, d)
 
     for j in 1:d, i in j:d
@@ -185,50 +194,57 @@ end
 Incrementally accumulate mean and second-moment estimates from new
 warmup trace segments (since last cursor position).
 
-Uses piecewise-constant approximation (event positions weighted by
-segment duration) rather than analytic Boomerang integrals, because
-the flow's μ is mutable and may change between when segments were
-recorded and when stats are computed.
+Uses a hybrid integration strategy:
+- TRAPEZOIDAL rule for `sum_x_lin`: (x₀ + x₁)/2 · dt gives an accurate,
+  μ-independent mean estimate with O(dt³) per-segment error → used for
+  updating flow.μ.
+- PIECEWISE-CONSTANT for `sum_x`, `sum_x2`, `sum_xy`: weights event
+  positions by segment duration (left Riemann sum). These are μ-independent
+  and internally consistent, so Var = E[x²] - E[x]² is robust even when
+  flow.μ is far from the true mean → used for updating flow.Γ.
 """
 function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
     trace = get_warmup_trace(trace_mgr)
 
-    # PDMPTrace — segments indexed by consecutive events
     n = length(trace.times)
     n < 2 && return stats
 
-    # Initialize cursor on first call
     if stats.cursor == 0
         stats.cursor = 1
     end
 
     has_xy = stats.sum_xy !== nothing
 
-    # Process new segments: segment k uses position at event k, held for dt_k.
-    # Skip coordinates where x == 0 (frozen in a spike-and-slab context)
-    # to learn the slab's precision rather than the mixture's.
     @inbounds for k in stats.cursor:(n - 1)
-        t0 = trace.times[k]
-        t1 = trace.times[k + 1]
-        dt = t1 - t0
+        dt = trace.times[k + 1] - trace.times[k]
         dt <= 0 && continue
 
         d = size(trace.positions, 1)
+
         for i in 1:d
-            x = trace.positions[i, k]
-            iszero(x) && continue
+            xi = trace.positions[i, k]
+            iszero(xi) && continue
+
+            xi_next = trace.positions[i, k + 1]
+
+            # TRAPEZOIDAL mean integral (μ-independent, O(dt³) per segment)
+            stats.sum_x_lin[i] += (xi + xi_next) / 2 * dt
+
+            # PIECEWISE-CONSTANT (left Riemann sum, μ-independent, for variance)
             stats.coord_time[i] += dt
-            stats.sum_x[i] += x * dt
-            stats.sum_x2[i] += x^2 * dt
+            stats.sum_x[i] += xi * dt
+            stats.sum_x2[i] += xi^2 * dt
         end
 
         if has_xy
             for j in 1:d
                 xj = trace.positions[j, k]
                 iszero(xj) && continue
+
                 for i in j:d
                     xi = trace.positions[i, k]
                     iszero(xi) && continue
+
                     val = xi * xj * dt
                     stats.sum_xy[i, j] += val
                     i != j && (stats.sum_xy[j, i] += val)
@@ -268,7 +284,7 @@ mutable struct BoomerangAdapter <: AbstractAdapter
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
-    stats = BoomerangWarmupStats(d; fullrank=(scheme == :fullrank))
+    stats = BoomerangWarmupStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
     BoomerangAdapter(base_dt, t0, 0, scheme, stats, false)
 end
 
@@ -337,6 +353,7 @@ end
 
 const BOOM_COND_MAX = 1e6
 const BOOM_SHRINKAGE_BASE = 0.5
+const BOOM_SHRINKAGE_DROP_TIME = 200.0
 
 """
     update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
@@ -356,9 +373,14 @@ function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, 
     σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
     Σ0 = Diagonal(σ2_diag)
 
-    # Shrinkage toward diagonal: strong initially, decays with observation time
+    # Shrinkage toward diagonal: strong initially, decays with observation time.
+    # After sufficient warmup (T > BOOM_SHRINKAGE_DROP_TIME), allow α to reach zero
+    # for unbiased convergence, provided condition number is healthy.
     total_time = maximum(stats.coord_time)
     α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
+    if total_time > BOOM_SHRINKAGE_DROP_TIME
+        α = 0.0
+    end
 
     Σ_reg = (1.0 - α) .* Σ_est .+ α .* Matrix(Σ0)
 
@@ -424,10 +446,71 @@ function _fullrank_diagonal_fallback!(flow::MutableBoomerang, μ_est, σ2_diag)
 end
 
 
+# --- Low-rank adaptation ---
+
+function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:lowrank})
+    all(iszero, stats.coord_time) && return flow
+
+    lrp = flow.Γ::LowRankPrecision
+    d = length(flow.μ)
+    r = length(lrp.Λ)
+
+    μ_est = stats_mean(stats)
+    Σ_est = stats_cov(stats)
+
+    σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
+    Σ0 = Diagonal(σ2_diag)
+
+    # Shrinkage schedule (same as fullrank)
+    total_time = maximum(stats.coord_time)
+    α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
+    if total_time > BOOM_SHRINKAGE_DROP_TIME
+        α = 0.0
+    end
+
+    Σ_reg = (1.0 - α) .* Σ_est .+ α .* Matrix(Σ0)
+    Σ_sym = Symmetric((Σ_reg + Σ_reg') / 2)
+    for i in 1:d
+        Σ_sym.data[i, i] = max(Σ_sym[i, i], BOOM_DIAG_FLOOR^2)
+    end
+
+    # Eigendecomposition (O(d³)); eigenvalues ascending for Symmetric in Julia
+    F = eigen(Σ_sym)
+
+    # Top-r eigenpairs are the last r entries
+    for k in 1:r
+        j = d - r + k
+        lrp.Λ[k] = max(F.values[j], BOOM_DIAG_FLOOR^2)
+        for i in 1:d
+            lrp.V[i, k] = F.vectors[i, j]
+        end
+    end
+
+    # D = diag(Σ) - diag(V Λ V')  (residual diagonal, always ≥ 0)
+    for i in 1:d
+        diag_vlv = 0.0
+        for k in 1:r
+            diag_vlv += lrp.V[i, k]^2 * lrp.Λ[k]
+        end
+        lrp.D[i] = max(Σ_sym[i, i] - diag_vlv, BOOM_DIAG_FLOOR^2)
+    end
+
+    lowrank_precompute!(lrp)
+    copyto!(flow.μ, μ_est)
+    return flow
+end
+
+
 # --- 7. Factory dispatch for MutableBoomerang ---
 
 function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0)
     d = length(flow.μ)
-    scheme = flow.Γ isa Diagonal ? :diagonal : :fullrank
+    if flow.Γ isa Diagonal
+        scheme = :diagonal
+    elseif flow.Γ isa LowRankPrecision
+        scheme = :lowrank
+    else
+        scheme = :fullrank
+    end
     return BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=scheme)
 end

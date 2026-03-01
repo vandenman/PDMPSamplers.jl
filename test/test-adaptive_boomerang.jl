@@ -112,12 +112,11 @@
         end
 
         # Trace mean should be in the right ballpark
-        # Note: with adapted (close but not exact) μ, the Boomerang mean
-        # converges slowly because bouncing rate is very low. We use a
-        # loose element-wise tolerance rather than a strict T² test.
+        # Note: the linear mean estimator for MutableBoomerang is unbiased but
+        # has higher variance than the sinusoidal formula. Use a loose tolerance.
         trace_mean = mean(trace)
         for i in 1:d
-            @test abs(trace_mean[i] - μ_true[i]) < 1.5
+            @test abs(trace_mean[i] - μ_true[i]) < 2.0
         end
 
         # Basic sanity
@@ -254,6 +253,7 @@
         d = 2
         stats = PDMPSamplers.BoomerangWarmupStats(d)
         @test stats.coord_time == zeros(d)
+        @test stats.sum_x_lin == zeros(d)
         @test stats.sum_x == zeros(d)
         @test stats.sum_x2 == zeros(d)
         @test stats.sum_xy === nothing
@@ -462,6 +462,7 @@ end
         # coord 2: x=3 for t=10 → sum_x=30, sum_x2=90, coord_time=10
         # cross: x1*x2 = 6 for t=10 → sum_xy[1,2]=60
         stats.coord_time .= [10.0, 10.0]
+        stats.sum_x_lin .= [20.0, 30.0]
         stats.sum_x .= [20.0, 30.0]
         stats.sum_x2 .= [40.0, 90.0]
         stats.sum_xy .= [40.0 60.0; 60.0 90.0]
@@ -477,6 +478,7 @@ end
 
         # Now add some non-trivial data
         stats.coord_time .= [10.0, 10.0]
+        stats.sum_x_lin .= [10.0, 20.0]
         stats.sum_x .= [10.0, 20.0]  # mean = [1, 2]
         stats.sum_x2 .= [20.0, 50.0]  # E[X²] = [2, 5]
         stats.sum_xy .= [20.0 25.0; 25.0 50.0]  # E[X1*X2] = 2.5

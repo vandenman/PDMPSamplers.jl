@@ -508,13 +508,25 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), ::Un
 end
 
 # --- Boomerang integration methods ---
-# Boomerang trajectory: x_i(s) = Δ_i cos(s) + θ_i sin(s) + μ_i, where Δ_i = x0_i - μ_i
+# For the immutable Boomerang (calibrated, μ_ref = μ_true), use the exact sinusoidal
+# integral which is precise and converges correctly when μ_ref = μ_true.
+# Trajectory: x_i(s) = Δ_i cos(s) + θ_i sin(s) + μ_i, where Δ_i = x0_i - μ_i
 # ∫₀^Δt x_i(s) ds = Δ_i sin(Δt) + θ_i (1 - cos(Δt)) + μ_i Δt
-function _integrate_segment(::typeof(Statistics.mean), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
+function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
     s, c = sincos(dt)
     μ = flow.μ
     return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
+end
+
+# For the MutableBoomerang (adaptive), use the trapezoidal rule (x₀ + x₁)/2 · dt.
+# The sinusoidal formula converges to μ_ref (not μ_true) when μ_ref ≠ μ_true,
+# because the trajectory oscillates around μ_ref and the ∫sin(dt)/dt correction
+# vanishes. The trapezoidal rule is μ-independent, unbiased, and has O(dt³)
+# per-segment error (vs O(dt²) for piecewise-constant).
+function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
+    dt = t1 - t0
+    return @. (x0 + x1) / 2 * dt
 end
 
 function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
