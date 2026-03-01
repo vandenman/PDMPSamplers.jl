@@ -491,3 +491,236 @@ end
     end
 
 end
+
+@testset "Adaptive Boomerang (Phase 3: lowrank)" begin
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Test 3.0: Lowrank types and constructors
+    # ──────────────────────────────────────────────────────────────────────
+    @testset "Lowrank types and constructors" begin
+        d = 5
+        flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
+        @test flow isa MutableBoomerang
+        @test flow.Γ isa PDMPSamplers.LowRankPrecision
+        @test flow.μ == zeros(d)
+        @test flow.L === nothing
+        @test flow.ΣL === nothing
+        @test length(flow.Γ.D) == d
+        @test length(flow.Γ.Λ) == 2
+        @test size(flow.Γ.V) == (d, 2)
+
+        # Default rank = min(d-1, 5)
+        flow2 = AdaptiveBoomerang(10; scheme=:lowrank)
+        @test length(flow2.Γ.Λ) == 5
+
+        flow3 = AdaptiveBoomerang(3; scheme=:lowrank)
+        @test length(flow3.Γ.Λ) == 2  # min(3-1, 5)
+    end
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Test 3.1: LowRankPrecision operations correctness
+    # ──────────────────────────────────────────────────────────────────────
+    @testset "LowRankPrecision operations" begin
+        Random.seed!(12345)
+        d = 5
+        r = 2
+
+        # Build a known Σ = D + V Λ V' and verify operations match dense
+        D_diag = rand(d) .+ 0.5
+        V = randn(d, r)
+        V = Matrix(qr(V).Q)[:, 1:r]  # orthonormalize
+        Λ_vals = [3.0, 1.5]
+
+        Σ_dense = Diagonal(D_diag) + V * Diagonal(Λ_vals) * V'
+        Γ_dense = inv(Σ_dense)
+
+        lrp = PDMPSamplers.LowRankPrecision(d, r)
+        lrp.D .= D_diag
+        lrp.V .= V
+        lrp.Λ .= Λ_vals
+        PDMPSamplers.lowrank_precompute!(lrp)
+
+        # lowrank_mul!: Γ*x should match dense
+        x = randn(d)
+        y_lr = zeros(d)
+        PDMPSamplers.lowrank_mul!(y_lr, lrp, x, 1.0, 0.0)
+        y_dense = Γ_dense * x
+        @test y_lr ≈ y_dense atol=1e-10
+
+        # lowrank_mul! with α, β
+        y_lr2 = ones(d)
+        PDMPSamplers.lowrank_mul!(y_lr2, lrp, x, 2.0, 0.5)
+        @test y_lr2 ≈ 2.0 .* y_dense .+ 0.5 .* ones(d) atol=1e-10
+
+        # lowrank_solve!: Σ*x should match dense
+        z = copy(x)
+        PDMPSamplers.lowrank_solve!(z, lrp)
+        @test z ≈ Σ_dense * x atol=1e-10
+
+        # lowrank_quadform: v' Γ v should match dense
+        v = randn(d)
+        qf = PDMPSamplers.lowrank_quadform(lrp, v)
+        @test qf ≈ dot(v, Γ_dense * v) atol=1e-10
+
+        # lowrank_sample!: samples from N(0, Σ) should have correct covariance
+        Random.seed!(42)
+        n_samples = 50_000
+        samples = zeros(d, n_samples)
+        for j in 1:n_samples
+            PDMPSamplers.lowrank_sample!(view(samples, :, j), lrp)
+        end
+        emp_cov = cov(samples')
+        for j in 1:d, i in j:d
+            @test isapprox(emp_cov[i, j], Σ_dense[i, j]; atol=0.1)
+        end
+    end
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Test 3.2: Lowrank dynamics methods
+    # ──────────────────────────────────────────────────────────────────────
+    @testset "Lowrank dynamics methods" begin
+        d = 4
+        flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
+
+        # initialize_velocity
+        θ = PDMPSamplers.initialize_velocity(flow, d)
+        @test length(θ) == d
+        @test all(isfinite, θ)
+
+        # refresh_velocity!
+        ξ = SkeletonPoint(randn(d), randn(d))
+        PDMPSamplers.refresh_velocity!(ξ, flow)
+        @test all(isfinite, ξ.θ)
+
+        # move_forward_time!
+        state = PDMPSamplers.PDMPState(0.0, SkeletonPoint(randn(d), randn(d)))
+        PDMPSamplers.move_forward_time!(state, 0.5, flow)
+        @test state.t[] ≈ 0.5
+        @test all(isfinite, state.ξ.x)
+
+        # reflect!
+        ξ2 = SkeletonPoint(randn(d), randn(d))
+        ∇ϕ = randn(d)
+        cache = (; z=similar(ξ2.x))
+        PDMPSamplers.reflect!(ξ2, ∇ϕ, flow, cache)
+        @test all(isfinite, ξ2.θ)
+
+        # correct_gradient!
+        ∇ = randn(d)
+        x = randn(d)
+        θ_dummy = randn(d)
+        PDMPSamplers.correct_gradient!(∇, x, θ_dummy, flow, cache)
+        @test all(isfinite, ∇)
+    end
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Test 3.3: Lowrank velocity refresh distribution
+    # ──────────────────────────────────────────────────────────────────────
+    @testset "Lowrank velocity refresh distribution" begin
+        Random.seed!(42)
+        d = 4
+        r = 2
+        flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=r)
+
+        # Set up a non-trivial LowRankPrecision
+        lrp = flow.Γ::PDMPSamplers.LowRankPrecision
+        lrp.D .= [0.5, 1.0, 0.8, 0.3]
+        V = randn(d, r)
+        V = Matrix(qr(V).Q)[:, 1:r]
+        lrp.V .= V
+        lrp.Λ .= [2.0, 1.0]
+        PDMPSamplers.lowrank_precompute!(lrp)
+
+        Σ_true = Diagonal(lrp.D) + lrp.V * Diagonal(lrp.Λ) * lrp.V'
+
+        n_samples = 20_000
+        samples = zeros(d, n_samples)
+        for j in 1:n_samples
+            θ = randn(d)
+            PDMPSamplers.refresh_velocity!(θ, flow)
+            samples[:, j] = θ
+        end
+
+        # Velocity distribution should be N(0, Σ) = N(0, Γ⁻¹)
+        emp_cov = cov(samples')
+        for j in 1:d, i in j:d
+            @test isapprox(emp_cov[i, j], Σ_true[i, j]; atol=0.15)
+        end
+    end
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Test 3a: MvNormal correlated (lowrank)
+    # ──────────────────────────────────────────────────────────────────────
+    @testset "N(μ, Σ) lowrank" begin
+        Random.seed!(55555)
+        d = 4
+        η = 2.0
+
+        target = gen_data(Distributions.MvNormal, d, η)
+        D = target.D
+
+        flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
+        x0 = mean(D) + randn(d)
+        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        ξ0 = SkeletonPoint(x0, θ0)
+
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = GridThinningStrategy()
+
+        T = 100_000.0
+        t_warmup = 10_000.0
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+
+        # Adapted μ should be roughly correct
+        for i in 1:d
+            @test abs(flow.μ[i] - mean(D)[i]) < 1.5
+        end
+
+        # Trace mean should be accurate
+        trace_mean = mean(trace)
+        for i in 1:d
+            @test abs(trace_mean[i] - mean(D)[i]) < 1.5
+        end
+
+        # Adapted Γ should be a valid LowRankPrecision
+        @test flow.Γ isa PDMPSamplers.LowRankPrecision
+        @test all(isfinite, flow.Γ.D)
+        @test all(x -> x > 0, flow.Γ.D)
+        @test all(isfinite, flow.Γ.Λ)
+        @test all(x -> x > 0, flow.Γ.Λ)
+
+        @test length(trace) > 100
+    end
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Test 3b: Logistic regression (lowrank)
+    # ──────────────────────────────────────────────────────────────────────
+    @testset "Logistic regression (lowrank)" begin
+        Random.seed!(66666)
+        d = 4
+        n = 200
+        target = gen_data(LogisticRegressionModel, d, n)
+
+        flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
+        x0 = randn(d)
+        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        ξ0 = SkeletonPoint(x0, θ0)
+
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = GridThinningStrategy()
+
+        T = 100_000.0
+        t_warmup = 10_000.0
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+
+        trace_mean = mean(trace)
+        @test length(trace) > 100
+        @test all(isfinite, trace_mean)
+        @test all(isfinite, flow.μ)
+        @test flow.Γ isa PDMPSamplers.LowRankPrecision
+        @test all(x -> x > 0, flow.Γ.D)
+    end
+
+end

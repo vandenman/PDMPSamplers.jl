@@ -215,23 +215,23 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
 
     has_xy = stats.sum_xy !== nothing
 
+    d = size(trace.positions, 1)
+
     @inbounds for k in stats.cursor:(n - 1)
         dt = trace.times[k + 1] - trace.times[k]
         dt <= 0 && continue
 
-        d = size(trace.positions, 1)
-
         for i in 1:d
             xi = trace.positions[i, k]
-            iszero(xi) && continue
-
             xi_next = trace.positions[i, k + 1]
+
+            # Always accumulate observation time (denominator must include all segments)
+            stats.coord_time[i] += dt
 
             # TRAPEZOIDAL mean integral (μ-independent, O(dt³) per segment)
             stats.sum_x_lin[i] += (xi + xi_next) / 2 * dt
 
             # PIECEWISE-CONSTANT (left Riemann sum, μ-independent, for variance)
-            stats.coord_time[i] += dt
             stats.sum_x[i] += xi * dt
             stats.sum_x2[i] += xi^2 * dt
         end
@@ -239,12 +239,8 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
         if has_xy
             for j in 1:d
                 xj = trace.positions[j, k]
-                iszero(xj) && continue
-
                 for i in j:d
                     xi = trace.positions[i, k]
-                    iszero(xi) && continue
-
                     val = xi * xj * dt
                     stats.sum_xy[i, j] += val
                     i != j && (stats.sum_xy[j, i] += val)

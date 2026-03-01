@@ -93,7 +93,6 @@ function lowrank_mul!(y::AbstractVector, lrp::LowRankPrecision, x::AbstractVecto
     ldiv!(L_M', buf_r1)
 
     # Step 4: D⁻¹V * (M⁻¹ V'D⁻¹x) → subtract from D⁻¹x
-    buf_r2 = lrp.buf_r2  # reuse as temp
     mul!(buf_d, lrp.DinvV, buf_r1, -1.0, 1.0)  # buf_d = D⁻¹x - D⁻¹V M⁻¹ V'D⁻¹x
 
     # Step 5: y = α * Γx + β * y
