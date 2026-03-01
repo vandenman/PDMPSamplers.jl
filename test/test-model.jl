@@ -22,7 +22,7 @@ import ForwardDiff
         # 2. From Gradient Strategy + HVP
         model_hvp = PDMPModel(d, grad_strat, f_hvp!)
         @test model_hvp.grad === grad_strat
-        @test model_hvp.hvp isa Base.Fix1
+        @test model_hvp.hvp isa PDMPSamplers.InplaceHVP
         @test model_hvp.hvp.f === f_hvp!
 
         # 3. From LogDensity with AD backend

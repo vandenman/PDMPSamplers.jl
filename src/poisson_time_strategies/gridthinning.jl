@@ -84,10 +84,10 @@ end
 
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics,
-    grad_and_hess_or_grad_and_hvp::Union{Function,NTuple{2,Function}}, add_rate::Bool=true;
+    grad_and_hess_or_grad_and_hvp::F, add_rate::Bool=true;
     cached_y0::Float64=NaN, cached_d0::Float64=NaN,
     early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing,
-    state_cache::Union{AbstractPDMPState,Nothing}=nothing)
+    state_cache::Union{AbstractPDMPState,Nothing}=nothing) where {F}
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
@@ -244,7 +244,7 @@ max_grid_horizon(::AnyBoomerang) = 8π
 max_grid_horizon(pd::PreconditionedDynamics) = max_grid_horizon(pd.dynamics)
 
 # --- helper functions for λ(t) and λ'(t) ---
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::NTuple{2,Function}, add_rate::Bool=true)
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H}, add_rate::Bool=true) where {G,H}
 
     xt, vt = state.ξ.x, state.ξ.θ  # state already moved to time t
 
