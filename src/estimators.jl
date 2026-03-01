@@ -31,7 +31,7 @@ function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
         x0j = trace.positions[j, i]
         θ0j = trace.velocities[j, i]
         τ = trace.times[i+1] - trace.times[i]
-        if base isa Boomerang
+        if base isa AnyBoomerang
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q, base.μ[j])
         else
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q)
@@ -70,7 +70,7 @@ end
 function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
     lo, hi = Inf, -Inf
     base = _underlying_flow(trace.flow)
-    is_boom = base isa Boomerang
+    is_boom = base isa AnyBoomerang
 
     @inbounds for k in 1:length(trace)
         xj = trace.positions[j, k]
@@ -88,7 +88,7 @@ end
 function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
     lo, hi = Inf, -Inf
     base = _underlying_flow(trace.flow)
-    is_boom = base isa Boomerang
+    is_boom = base isa AnyBoomerang
 
     for event in trace.events
         xj = event.position[j]
@@ -259,7 +259,7 @@ end
 function Statistics.quantile(trace::AbstractPDMPTrace, p::AbstractVector{<:Real}; coordinate::Integer)
     all(x -> 0 < x < 1, p) || throw(DomainError(p, "All quantile probabilities must be in (0, 1)"))
     base = _underlying_flow(trace.flow)
-    if base isa Boomerang
+    if base isa AnyBoomerang
         return [_quantile_scalar(trace, pi, coordinate) for pi in p]
     end
     total_time, dc, pm = _collect_sweep_events(trace, coordinate)
@@ -275,7 +275,7 @@ end
 
 function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer)
     base = _underlying_flow(trace.flow)
-    if base isa Boomerang
+    if base isa AnyBoomerang
         lo, hi = _trace_coordinate_bounds(trace, coordinate)
         f(q) = cdf(trace, q; coordinate) - p
         return Roots.find_zero(f, (lo, hi), Roots.Bisection())
@@ -508,7 +508,9 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), ::Un
 end
 
 # --- Boomerang integration methods ---
-# Boomerang trajectory: x_i(s) = Δ_i cos(s) + θ_i sin(s) + μ_i, where Δ_i = x0_i - μ_i
+# For the immutable Boomerang (calibrated, μ_ref = μ_true), use the exact sinusoidal
+# integral which is precise and converges correctly when μ_ref = μ_true.
+# Trajectory: x_i(s) = Δ_i cos(s) + θ_i sin(s) + μ_i, where Δ_i = x0_i - μ_i
 # ∫₀^Δt x_i(s) ds = Δ_i sin(Δt) + θ_i (1 - cos(Δt)) + μ_i Δt
 function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
@@ -517,7 +519,17 @@ function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang, x0, x1, 
     return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
 end
 
-function _integrate_segment(::typeof(Statistics.var), flow::Boomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
+# For the MutableBoomerang (adaptive), use the trapezoidal rule (x₀ + x₁)/2 · dt.
+# The sinusoidal formula converges to μ_ref (not μ_true) when μ_ref ≠ μ_true,
+# because the trajectory oscillates around μ_ref and the ∫sin(dt)/dt correction
+# vanishes. The trapezoidal rule is μ-independent, unbiased, and has O(dt³)
+# per-segment error (vs O(dt²) for piecewise-constant).
+function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
+    dt = t1 - t0
+    return @. (x0 + x1) / 2 * dt
+end
+
+function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
     dt = t1 - t0
     μ = flow.μ
     s, c = sincos(dt)
@@ -558,14 +570,14 @@ function _integrate_segment(::typeof(Statistics.var), flow::Boomerang, x0, x1, �
     return result
 end
 
-function _integrate_segment(::typeof(Statistics.cov), flow::Boomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
+function _integrate_segment(::typeof(Statistics.cov), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
     d = length(x0)
     segment_integral = zeros(d, d)
     _integrate_segment!(segment_integral, Statistics.cov, flow, x0, x1, θ0, θ1, t0, t1, μ_est)
     return segment_integral
 end
 
-function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow::Boomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
+function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
     dt = t1 - t0
     μ = flow.μ
     d = length(x0)
@@ -594,13 +606,13 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow
     return buf
 end
 
-function _integrate_segment(::typeof(inclusion_probs), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+function _integrate_segment(::typeof(inclusion_probs), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
     result = zeros(length(x0))
     _integrate_segment!(result, inclusion_probs, flow, x0, x1, θ0, θ1, t0, t1)
     return result
 end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
     # x_i(s) = (x0[i] - μ[i]) cos(s) + θ0[i] sin(s) + μ[i]
     # x_i(s) == 0 only on a set of measure zero for most initial conditions,
     # so inclusion_probs integral = dt when the trajectory is not identically zero.
@@ -637,7 +649,7 @@ function _time_below_segment(::Union{ZigZag, BouncyParticle}, x0j::Real, θ0j::R
     return θ0j > 0 ? t_clamped : τ - t_clamped
 end
 
-function _time_below_segment(flow::Boomerang, x0j::Real, θ0j::Real, τ::Real, q::Real, μj::Real)
+function _time_below_segment(flow::AnyBoomerang, x0j::Real, θ0j::Real, τ::Real, q::Real, μj::Real)
     a = x0j - μj
     b = θ0j
     C = q - μj
