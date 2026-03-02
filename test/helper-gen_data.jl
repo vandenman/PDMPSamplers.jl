@@ -613,7 +613,7 @@ data_name(::Type{Distributions.ZeroMeanIsoNormal}, d) = "N(0, I($d))"
 data_name(::Type{Distributions.MvNormal}, d) = "N(μ, Σ$d)"
 data_name(::Type{Distributions.FullNormal}, d) = "N(μ, Σ$d)"
 data_name(::Type{<:Distributions.MvTDist}, d) = "T(ν, μ, Σ$d)"
-data_name(::Type{<:Distributions.AbstractMvNormal}, d) = "MvNormal($d)"
+data_name(::Type{<:Distributions.AbstractMvNormal}, d) = "N($d)"
 
 data_name(::Type{<:Distributions.Product{<:Any, T, <:Any}}, d) where T = data_name(T, d)
 data_name(::Type{<:Distributions.Bernoulli}, d) = "Bern"
@@ -693,11 +693,38 @@ end
 # test_approximation: compare trace estimators against known distribution
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Cache for expensive trace statistics. Avoids recomputing ESS, mean, cov,
+# quantiles when the same trace is passed twice (check_only → full call).
+const _trace_stats_cache = Dict{UInt, NamedTuple}()
+
+function _get_trace_stats(trace::PDMPSamplers.AbstractPDMPTrace, D, coordinate::Int=1)
+    key = objectid(trace)
+    haskey(_trace_stats_cache, key) && return _trace_stats_cache[key]
+
+    min_ess = minimum(ess(trace))
+    trace_mean = mean(trace)
+    trace_cov = cov(trace)
+
+    probs = .1:.1:.99
+    q_observed = quantile(trace, collect(probs); coordinate)
+
+    stats = (; min_ess, trace_mean, trace_cov, q_observed, probs)
+    _trace_stats_cache[key] = stats
+
+    # Keep only the most recent entry to avoid memory bloat
+    length(_trace_stats_cache) > 1 && for k in keys(_trace_stats_cache)
+        k != key && delete!(_trace_stats_cache, k)
+    end
+
+    return stats
+end
+
 function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvNormal;
                             elapsed::Union{Real,Nothing}=nothing, check_only::Bool=false)
 
     d = length(D)
-    min_ess = minimum(ess(trace))
+    cached = _get_trace_stats(trace, D)
+    min_ess = cached.min_ess
     if min_ess < 500
         show_test_diagnostics && @info "Skipping test_approximation (low ESS)" min_ess
         return check_only ? false : nothing
@@ -707,8 +734,8 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     cov_rtol   = 0.4  + 10.0 * mc
     quant_rtol = 0.2  + 3.0  * mc
 
-    trace_mean = mean(trace)
-    trace_cov = cov(trace)
+    trace_mean = cached.trace_mean
+    trace_cov = cached.trace_cov
 
     # Scale-aware mean test: standardize errors by marginal SDs, then use χ² threshold.
     # This correctly accounts for the target's variance scale, unlike the previous
@@ -719,10 +746,10 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     T²_thresh = quantile(Chisq(d), 1 - 1e-4)
 
     # test quantiles in the first dimension
-    probs = .1:.1:.99
+    probs = cached.probs
     dist = Normal(mean(D)[1], sqrt(cov(D)[1, 1]))
     q_expected = map(Base.Fix1(quantile, dist), probs)
-    q_observed = quantile(trace, collect(probs); coordinate=1)
+    q_observed = cached.q_observed
 
     # closeness metrics (< 1.0 means passing)
     c_mean  = T² / T²_thresh
@@ -757,7 +784,8 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     ν_D, μ_D, Σ_D = Distributions.params(D)
     d = length(D)
 
-    min_ess = minimum(ess(trace))
+    cached = _get_trace_stats(trace, D)
+    min_ess = cached.min_ess
     if min_ess < 500
         show_test_diagnostics && @info "Skipping test_approximation (low ESS)" min_ess
         return check_only ? false : nothing
@@ -769,8 +797,8 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     cov_rtol   = 0.70 + 50.0 * kurtosis_factor * mc
     quant_rtol = 0.30 + 5.0  * kurtosis_factor * mc
 
-    trace_mean = mean(trace)
-    trace_cov = cov(trace)
+    trace_mean = cached.trace_mean
+    trace_cov = cached.trace_cov
 
     # Scale-aware mean test: standardize by marginal SDs, use χ² threshold with
     # kurtosis correction for the heavier tails of the t-distribution.
@@ -780,10 +808,10 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
     T²_thresh = quantile(Chisq(d), 1 - 1e-4) * kurtosis_factor^2
 
     # test quantiles in the first dimension
-    qprobs = .1:.1:.99
+    qprobs = cached.probs
     marginal_dist = μ_D[1] + sqrt(Σ_D[1, 1]) * Distributions.TDist(ν_D)
     q_expected = map(Base.Fix1(quantile, marginal_dist), qprobs)
-    q_observed = quantile(trace, collect(qprobs); coordinate=1)
+    q_observed = cached.q_observed
 
     # closeness metrics (< 1.0 means passing)
     c_mean  = T² / T²_thresh

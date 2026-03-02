@@ -48,7 +48,7 @@ struct PDMPModel{G<:GradientStrategy,H}
             nothing
         elseif hvp_inplace
             out_hvp = zeros(d)
-            Base.Fix1(hvp, out_hvp)
+            InplaceHVP(hvp, out_hvp)
         else
             hvp
         end
@@ -146,8 +146,16 @@ function with_stats(model::PDMPModel, stats::StatisticCounter)
     PDMPModel(model.d, grad_new, hvp_new, false, false)
 end
 
+struct InplaceHVP{F, O<:AbstractVector} <: Function
+    f::F
+    out::O
+end
+(h::InplaceHVP)(x::AbstractVector, v::AbstractVector) = h.f(h.out, x, v)
+_copy_callable(h::InplaceHVP) = InplaceHVP(_copy_callable(h.f), copy(h.out))
+
 struct WithStatsHVP{F,S} <: Function
     f::F
     stats::S
 end
+(ws::WithStatsHVP)(x::AbstractVector, v::AbstractVector) = (ws.stats.∇²f_calls += 1; ws.f(x, v))
 (ws::WithStatsHVP)(args...) = (ws.stats.∇²f_calls += 1; ws.f(args...))

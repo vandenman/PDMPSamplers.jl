@@ -55,7 +55,7 @@ end
 
     β_map = find_map(target, d)
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang, PreconditionedZigZag, PreconditionedBPS)
+    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS)
 
     @testset "Full gradient" begin
         @testset "$pdmp_type" for pdmp_type in pdmp_types
@@ -81,7 +81,7 @@ end
             trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
             acceptance_prob = stats.reflections_accepted / stats.reflections_events
-            if !(flow isa Boomerang)
+            if !(flow isa AnyBoomerang)
                 @test acceptance_prob > 0.4
             end
             @test length(trace) > 100

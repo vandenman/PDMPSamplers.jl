@@ -2,7 +2,7 @@
 
 @testset "Basic PDMP Sampler Tests" begin
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang, PreconditionedZigZag, PreconditionedBPS)
+    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS)
     factorized_gradient_types = (CoordinateWiseGradient, FullGradient)
     nonfactorized_gradient_types = (FullGradient,)
 
@@ -36,7 +36,7 @@
                     # ThinningStrategy requires manual bounds unsuitable for non-Gaussian targets
                     algorithm === ThinningStrategy && data_type === Distributions.MvTDist && continue
                     # Boomerang's Gaussian reference dynamics are a poor match for heavy-tailed targets
-                    pdmp_type <: Union{Boomerang, PreconditionedDynamics{<:Any, Boomerang}} && data_type === Distributions.MvTDist && continue
+                    pdmp_type <: Union{AnyBoomerang, PreconditionedDynamics{<:Any, Boomerang}} && data_type === Distributions.MvTDist && continue
 
                     # Use a stable seed for target generation so all samplers face the same target
                     Random.seed!(hash((data_type, data_arg)))
@@ -53,7 +53,7 @@
                             c0 = 1e-2
                             ThinningStrategy(LocalBounds(fill(c0, d)))
                         else
-                            c0 = if pdmp_type <: Union{Boomerang,PreconditionedDynamics{<:Any,Boomerang}} && data_type <: Distributions.AbstractMvNormal
+                            c0 = if pdmp_type <: Union{AnyBoomerang,PreconditionedDynamics{<:Any,Boomerang}} && data_type <: Distributions.AbstractMvNormal
                                 0.0
                             elseif pdmp_type === ZigZag
                                 1e-6
@@ -98,7 +98,7 @@
 
                     PDMPSamplers.ispositive(refresh_rate(flow)) && @test stats.refreshment_events > 100
 
-                    if !(flow isa Boomerang)
+                    if !(flow isa AnyBoomerang)
                         @test acceptance_prob > 0.4
                     end
                     @test length(trace) > 100

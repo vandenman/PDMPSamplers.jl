@@ -4,7 +4,7 @@
 
 _interpolate_coord(::Union{ZigZag,BouncyParticle}, x0j::Float64, θ0j::Float64, s::Float64, ::Float64) = x0j + θ0j * s
 
-function _interpolate_coord(::Boomerang, x0j::Float64, θ0j::Float64, s::Float64, μj::Float64)
+function _interpolate_coord(::AnyBoomerang, x0j::Float64, θ0j::Float64, s::Float64, μj::Float64)
     μj + (x0j - μj) * cos(s) + θ0j * sin(s)
 end
 
@@ -32,7 +32,7 @@ end
 
 # Identity × Boomerang: closed-form
 function _transformed_mean_segment(
-    ::IdentityTransform, ::Boomerang,
+    ::IdentityTransform, ::AnyBoomerang,
     x0j::Float64, θ0j::Float64, dt::Float64, μj::Float64
 )
     Δ = x0j - μj
@@ -101,7 +101,7 @@ end
 
 # Identity × Boomerang: closed-form
 function _transformed_var_segment(
-    ::IdentityTransform, ::Boomerang,
+    ::IdentityTransform, ::AnyBoomerang,
     x0j::Float64, θ0j::Float64, dt::Float64, μj::Float64, μfj::Float64
 )
     a = x0j - μj
@@ -176,7 +176,7 @@ function Statistics.mean(trace::AbstractPDMPTrace, transforms::AbstractVector{<:
     next = iterate(iter, next[2])
     isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
 
-    is_boomerang = base isa Boomerang
+    is_boomerang = base isa AnyBoomerang
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
         dt = t₁ - t₀
@@ -222,7 +222,7 @@ function Statistics.var(trace::AbstractPDMPTrace, transforms::AbstractVector{<:P
     next = iterate(iter, next[2])
     isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
 
-    is_boomerang = base isa Boomerang
+    is_boomerang = base isa AnyBoomerang
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
         dt = t₁ - t₀
