@@ -89,4 +89,14 @@ function PDMPModel(model_path::String, data_path::String=""; kwargs...)
     return PDMPModel(sm)
 end
 
+# Precompile entry-point signatures.
+# We cannot invoke these (no .so on disk at precompile time), but recording
+# the specialisations caches the inference work for these constructors.
+import PrecompileTools
+PrecompileTools.@compile_workload begin
+    precompile(PDMPModel, (BridgeStan.StanModel,))
+    precompile(PDMPModel, (String, String))
+    precompile(PDMPModel, (String,))
+end
+
 end # module

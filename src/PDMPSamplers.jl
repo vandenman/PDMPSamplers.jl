@@ -180,5 +180,6 @@ export
 # test_boomerang_target,
 # test_boomerang_dynamics
 
+include("precompile_workload.jl")
 
 end # module PDMPSamplers
