@@ -319,7 +319,7 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
 
     d = length(xt)
     t_start = t₀
-    t_end = _last_event_time(trace)
+    t_end = last_event_time(trace)
     total_time = t_end - t_start
 
     batch_duration = total_time / n_batches

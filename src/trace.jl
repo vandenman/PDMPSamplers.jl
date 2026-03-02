@@ -129,6 +129,24 @@ function Base.first(trace::PDMPTrace)
 end
 Base.first(trace::FactorizedTrace) = trace.initial_state
 
+function Base.last(trace::PDMPTrace)
+    n = length(trace.times)
+    PDMPEvent(trace.times[n], trace.positions[:, n], trace.velocities[:, n])
+end
+function Base.last(trace::FactorizedTrace)
+    # Reconstruct the full last state by replaying all events
+    e1 = trace.initial_state
+    x, θ = copy(e1.position), copy(e1.velocity)
+    t = e1.time
+    for event in trace.events
+        Δt = event.time - t
+        move_forward_time!(SkeletonPoint(x, θ), Δt, trace.flow)
+        _to_next_event!(x, θ, event)
+        t = event.time
+    end
+    PDMPEvent(t, x, θ)
+end
+
 function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, event::PDMPEvent) where {T,U}
     push!(trace.times, event.time)
     append!(trace.positions, event.position)
@@ -207,6 +225,12 @@ Base.collect(trace::AbstractPDMPTrace) = collect(t => x for (t, x) in trace)
 event_times(trace::PDMPTrace) = trace.times
 event_times(trace::FactorizedTrace) = [trace.initial_state.time; [e.time for e in trace.events]]
 
+first_event_time(trace::PDMPTrace) = trace.times[1]
+first_event_time(trace::FactorizedTrace) = trace.initial_state.time
+
+last_event_time(trace::PDMPTrace) = trace.times[end]
+last_event_time(trace::FactorizedTrace) = trace.events[end].time
+
 # could be a separate file from here?
 # shouldn't T1 and T2 always be identical?
 struct TraceManager{T}
@@ -267,8 +291,6 @@ _n_raw_events(trace::FactorizedTrace) = length(trace.events)
 _event_time(trace::PDMPTrace, k::Int) = trace.times[k]
 _event_time(trace::FactorizedTrace, k::Int) = trace.events[k].time
 
-_last_event_time(trace::PDMPTrace) = trace.times[end]
-_last_event_time(trace::FactorizedTrace) = trace.events[end].time
 
 function _apply_event!(x::AbstractVector, θ::AbstractVector, trace::PDMPTrace, k::Int)
     copyto!(x, view(trace.positions, :, k))
@@ -279,7 +301,7 @@ function _apply_event!(x::AbstractVector, θ::AbstractVector, trace::FactorizedT
     _to_next_event!(x, θ, trace.events[k])
 end
 
-_to_range(D::PDMPDiscretize) = first(D.trace).time:D.dt:_last_event_time(D.trace)
+_to_range(D::PDMPDiscretize) = first(D.trace).time:D.dt:last_event_time(D.trace)
 
 # could technically figure this out?
 Base.IteratorSize(::PDMPDiscretize) = Base.HasLength()
@@ -294,7 +316,7 @@ function Base.iterate(D::PDMPDiscretize)
     t_start, x, θ = e1.time, copy(e1.position), copy(e1.velocity)
 
     # --- Set up the time range for discretization ---
-    t_stop = _last_event_time(trace)
+    t_stop = last_event_time(trace)
     t_range = t_start:D.dt:t_stop
 
     # Get the iterator for the range. We've already "produced" the value

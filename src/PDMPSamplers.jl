@@ -153,6 +153,9 @@ export
     cdf,
     inclusion_probs,
     refresh_rate,
+    event_times,
+    first_event_time,
+    last_event_time,
     ess,
     n_chains,
 
