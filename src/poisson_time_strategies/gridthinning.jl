@@ -263,6 +263,15 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
 end
 
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, grad_and_nothing::Tuple{G,Nothing}, add_rate::Bool=true) where {G}
+    grad = grad_and_nothing[1]
+    xt = state.ξ.x
+    ∇U_xt = grad(xt)
+    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    return rate, zero(rate)
+end
+
 function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponential()), refresh_rate::Real=0.0)
 
     area_before = zero(eltype(pcb.Λ_vals))
@@ -313,17 +322,24 @@ _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_s
 
 function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     T = typeof(strat.t_max)
-    N_min = min_grid_cells(flow, strat.N_min, strat.N)
+    # When no HVP is available, the grid bound is looser (no derivative info),
+    # so increase grid resolution to compensate.
+    grad_only = model.hvp === nothing
+    N_base = grad_only ? strat.N * 2 : strat.N
+    N_min = min_grid_cells(flow, strat.N_min, N_base)
+    if grad_only
+        N_min = max(N_min, 15)
+    end
     est = _default_early_stop(flow, strat.early_stop_threshold)
     GridAdaptiveState(
-        PiecewiseConstantBound(collect(range(0.0, strat.t_max, strat.N + 1)), zeros(T, strat.N)),
-        Base.RefValue{Int}(strat.N),
+        PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
+        Base.RefValue{Int}(N_base),
         Base.RefValue{Float64}(strat.t_max),
         strat.α⁺,
         strat.α⁻,
         strat.safety_limit,
         N_min,
-        strat.N,
+        N_base,
         est,
         copy(state),
         copy(state),

@@ -254,39 +254,128 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
     return stats
 end
 
+
+# --- 5b. Welford online adaptation ---
+
+"""
+    WelfordBoomerangStats
+
+Welford online statistics accumulator for Boomerang adaptation.
+Updates mean and (co)variance from event positions in a numerically
+stable, allocation-free manner. Replaces trajectory integration with
+per-event updates for smoother, faster convergence.
+"""
+mutable struct WelfordBoomerangStats
+    n::Int
+    mean::Vector{Float64}
+    M2::Vector{Float64}
+    M2_cross::Union{Nothing, Matrix{Float64}}
+    delta_buf::Vector{Float64}
+end
+
+function WelfordBoomerangStats(d::Integer; fullrank::Bool=false)
+    WelfordBoomerangStats(0, zeros(d), zeros(d), fullrank ? zeros(d, d) : nothing, zeros(d))
+end
+
+function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector)
+    ws.n += 1
+    n = ws.n
+    d = length(ws.mean)
+    buf = ws.delta_buf
+
+    @inbounds for i in 1:d
+        buf[i] = x[i] - ws.mean[i]
+    end
+    @inbounds for i in 1:d
+        ws.mean[i] += buf[i] / n
+    end
+    @inbounds for i in 1:d
+        delta2_i = x[i] - ws.mean[i]
+        ws.M2[i] += buf[i] * delta2_i
+    end
+
+    if ws.M2_cross !== nothing
+        @inbounds for j in 1:d, i in j:d
+            delta2_j = x[j] - ws.mean[j]
+            val = buf[i] * delta2_j
+            ws.M2_cross[i, j] += val
+            i != j && (ws.M2_cross[j, i] += val)
+        end
+    end
+    return ws
+end
+
+function stats_mean(ws::WelfordBoomerangStats)
+    return copy(ws.mean)
+end
+
+function stats_var(ws::WelfordBoomerangStats)
+    ws.n < 2 && return ones(length(ws.mean))
+    return max.(ws.M2 ./ (ws.n - 1), 0.0)
+end
+
+stats_std(ws::WelfordBoomerangStats) = sqrt.(stats_var(ws))
+
+function stats_cov(ws::WelfordBoomerangStats)
+    d = length(ws.mean)
+    ws.M2_cross === nothing && error("WelfordBoomerangStats not initialized for fullrank (no M2_cross)")
+    ws.n < 2 && return Matrix{Float64}(I, d, d)
+    return ws.M2_cross ./ (ws.n - 1)
+end
+
+
 """
     adapt_interval(no_updates_done::Int, base_dt::Float64)
 
 Geometrically growing adaptation interval: starts at `base_dt`,
-doubles every 3 updates (caps at 32× base).
+doubles every 5 updates (caps at 64× base).
 """
 function adapt_interval(no_updates_done::Int, base_dt::Float64)
-    factor = min(2.0^(no_updates_done ÷ 3), 32.0)
+    factor = min(2.0^(no_updates_done ÷ 5), 64.0)
     return base_dt * factor
 end
 
 """
-    BoomerangAdapter <: AbstractAdapter
+    BoomerangAdapter{S} <: AbstractAdapter
 
 Adapter for `MutableBoomerang` that learns μ and Γ during warmup.
 Supports `:diagonal` (Phase 1) and `:fullrank` (Phase 2) schemes.
+
+Parameterized on the stats accumulator type `S`, which defaults to
+`WelfordBoomerangStats` for numerically stable per-event updates.
 """
-mutable struct BoomerangAdapter <: AbstractAdapter
+mutable struct BoomerangAdapter{S} <: AbstractAdapter
     const base_dt::Float64
     last_update::Float64
     no_updates_done::Int
     const scheme::Symbol
-    stats::BoomerangWarmupStats
+    stats::S
     did_update::Bool
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
-    stats = BoomerangWarmupStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
+    stats = WelfordBoomerangStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
     BoomerangAdapter(base_dt, t0, 0, scheme, stats, false)
 end
 
-function adapt!(ad::BoomerangAdapter, state, flow::MutableBoomerang, grad, trace_mgr)
-    # Always accumulate online stats from newly completed segments
+function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr)
+    ad.did_update = false
+
+    if state.t[] < trace_mgr.t_warmup
+        welford_update!(ad.stats, state.ξ.x)
+    end
+
+    dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
+    if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= dt_now)
+        update_boomerang!(flow, ad.stats, Val(ad.scheme))
+        refresh_velocity!(state, flow)
+        ad.last_update = state.t[]
+        ad.no_updates_done += 1
+        ad.did_update = true
+    end
+end
+
+function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::MutableBoomerang, grad, trace_mgr)
     update_stats!(ad.stats, trace_mgr)
     ad.did_update = false
 
@@ -313,14 +402,20 @@ did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 
 const BOOM_DIAG_FLOOR = 1e-8
 
+const AnyBoomerangStats = Union{BoomerangWarmupStats, WelfordBoomerangStats}
+_has_data(stats::BoomerangWarmupStats) = !all(iszero, stats.coord_time)
+_has_data(stats::WelfordBoomerangStats) = stats.n >= 2
+_shrinkage_time(stats::BoomerangWarmupStats) = maximum(stats.coord_time)
+_shrinkage_time(stats::WelfordBoomerangStats) = Float64(stats.n)
+
 """
-    update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:diagonal})
+    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:diagonal})
 
 Update `flow.μ` and diagonal `flow.Γ` from online sufficient statistics.
 Recomputes Cholesky factors `L` and `ΣL` without explicit matrix inverse.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:diagonal})
-    all(iszero, stats.coord_time) && return flow
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:diagonal})
+    _has_data(stats) || return flow
 
     μ_est = stats_mean(stats)
     σ2_est = stats_var(stats)
@@ -353,14 +448,14 @@ const BOOM_SHRINKAGE_BASE = 0.5
 const BOOM_SHRINKAGE_DROP_TIME = 200.0
 
 """
-    update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
+    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:fullrank})
 
 Update `flow.μ` and dense `flow.Γ` from online sufficient statistics.
 Estimates full covariance, applies shrinkage regularization, and recomputes
 Cholesky factors `L` and `ΣL`. Falls back to diagonal update on factorization failure.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
-    all(iszero, stats.coord_time) && return flow
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:fullrank})
+    _has_data(stats) || return flow
 
     d = length(flow.μ)
     μ_est = stats_mean(stats)
@@ -370,10 +465,8 @@ function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, 
     σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
     Σ0 = Diagonal(σ2_diag)
 
-    # Shrinkage toward diagonal: strong initially, decays with observation time.
-    # After sufficient warmup (T > BOOM_SHRINKAGE_DROP_TIME), allow α to reach zero
-    # for unbiased convergence, provided condition number is healthy.
-    total_time = maximum(stats.coord_time)
+    # Shrinkage toward diagonal: strong initially, decays with observation count/time.
+    total_time = _shrinkage_time(stats)
     α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
     if total_time > BOOM_SHRINKAGE_DROP_TIME
         α = 0.0
@@ -445,8 +538,8 @@ end
 
 # --- Low-rank adaptation ---
 
-function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:lowrank})
-    all(iszero, stats.coord_time) && return flow
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:lowrank})
+    _has_data(stats) || return flow
 
     lrp = flow.Γ::LowRankPrecision
     d = length(flow.μ)
@@ -459,7 +552,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, 
     Σ0 = Diagonal(σ2_diag)
 
     # Shrinkage schedule (same as fullrank)
-    total_time = maximum(stats.coord_time)
+    total_time = _shrinkage_time(stats)
     α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
     if total_time > BOOM_SHRINKAGE_DROP_TIME
         α = 0.0
@@ -509,5 +602,8 @@ function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0)
     else
         scheme = :fullrank
     end
-    return BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=scheme)
+    # Use 1/5 of the provided precond_dt as base for Boomerang adaptation,
+    # giving ~5x more frequent initial updates than the generic default.
+    boom_base_dt = Float64(precond_dt) / 5.0
+    return BoomerangAdapter(boom_base_dt, Float64(t0), d; scheme=scheme)
 end
