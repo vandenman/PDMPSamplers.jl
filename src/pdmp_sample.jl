@@ -80,7 +80,7 @@ function _pdmp_sample_single(
     t_warmup_abs = t₀ + t_warmup
     trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
-    adapter = default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup ÷ 10, t₀)
+    adapter = default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀)
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
     if progress

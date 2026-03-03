@@ -22,6 +22,16 @@ struct SubsampledGradient{F1, F2, F3, F4} <: GlobalGradientStrategy
     use_full_gradient_for_reflections::Bool
 end
 
+Base.copy(g::SubsampledGradient) = SubsampledGradient(
+    _copy_callable(g.f),
+    _copy_callable(g.resample_indices!),
+    _copy_callable(g.update_anchor!),
+    copy(g.full),
+    g.nsub,
+    g.no_anchor_updates,
+    g.use_full_gradient_for_reflections,
+)
+
 # temporary backwards compatibility constructor for now
 # SubsampledGradient(f::F1, resample_indices!::F2, nsub::Int) where {F1, F2} =
 #     SubsampledGradient(f, resample_indices!, (trace) -> nothing, (args...) -> nothing, nsub, 0)

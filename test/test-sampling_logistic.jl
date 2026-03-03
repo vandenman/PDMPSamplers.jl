@@ -112,6 +112,37 @@ end
         test_logistic_approximation(trace, β_map; name="LogReg($d,$n) sub", elapsed=stats.elapsed_time)
     end
 
+    @testset "Subsampled gradient multi-chain independence (ZigZag)" begin
+        Random.seed!(hash((:zigzag, :logistic_sub_multichain)))
+
+        nsub = n ÷ 10
+        T = 5_000.0
+
+        grad = SubsampledGradient(Base.Fix1(neg_gradient_sub_cv!, target), Base.Fix1(resample_indices!, target), nsub)
+        flow = ZigZag(Matrix(1.0I(d)), zeros(d))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp_sub!, target))
+        alg = GridThinningStrategy()
+
+        x0 = zeros(d)
+        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        ξ0 = SkeletonPoint(x0, θ0)
+
+        chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T; n_chains=2, progress=false)
+
+        @test length(chains) == 2
+        trace1, _ = chains[1]
+        trace2, _ = chains[2]
+        @test length(trace1) > 50
+        @test length(trace2) > 50
+
+        # Chains must have independent state: their means should differ
+        @test mean(trace1) != mean(trace2)
+
+        # Both chains should give reasonable posterior means
+        test_logistic_approximation(trace1, β_map; name="LogReg($d,$n) sub chain1")
+        test_logistic_approximation(trace2, β_map; name="LogReg($d,$n) sub chain2")
+    end
+
     @testset "Sticky ZigZag" begin
         d_s, n_s = 5, 200
         β_gen_s = [0.5, 0.0, 1.0, 0.0, -0.8]
