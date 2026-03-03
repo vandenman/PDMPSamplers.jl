@@ -65,24 +65,25 @@ end
 
 
 # --- Gradient Factory ---
-# Fallback: Swallow extra args (anchor_dt, t0)
+# Fallback: Swallow extra args (t_warmup, t0)
 default_gradient_adapter(::Any, args...) = NoAdaptation()
 
-# Specific:
-function default_gradient_adapter(::SubsampledGradient, anchor_dt, t0)
+# Specific: anchor_dt derived from grad.no_anchor_updates so each chain respects its own setting
+function default_gradient_adapter(grad::SubsampledGradient, t_warmup, t0)
+    grad.no_anchor_updates == 0 && return GradientResampler()
     return SequenceAdapter((
         GradientResampler(),
-        AnchorUpdater(anchor_dt, t0)
+        AnchorUpdater(t_warmup / grad.no_anchor_updates, t0)
     ))
 end
 
 
 # --- 4. The Top-Level Interface ---
 
-function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, precond_dt=10.0, anchor_dt=10.0, t0=0.0)
+function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, precond_dt=10.0, t_warmup=100.0, t0=0.0)
     # Explicitly pass positional args to the sub-factories
     adpt_flow = default_dynamics_adapter(flow, precond_dt, t0)
-    adpt_grad = default_gradient_adapter(grad, anchor_dt, t0)
+    adpt_grad = default_gradient_adapter(grad, t_warmup, t0)
 
     # Clean return logic
     if adpt_flow isa NoAdaptation && adpt_grad isa NoAdaptation
