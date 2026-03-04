@@ -272,6 +272,28 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, zero(rate)
 end
 
+struct FiniteDiffHVP{G}
+    grad::G
+    buf::Vector{Float64}
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP, add_rate::Bool=true)
+    xt, vt = state.ξ.x, state.ξ.θ
+    ∇U_xt = fd.grad(xt)
+
+    h = 1e-5 * max(1.0, norm(xt) / norm(vt))
+    fd.buf .= xt .+ h .* vt
+    ∇U_shifted = fd.grad(fd.buf)
+    Hxt_vt = (∇U_shifted .- ∇U_xt) ./ h
+
+    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = ∂λ∂t(state, ∇U_xt, Hxt_vt, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
 function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponential()), refresh_rate::Real=0.0)
 
     area_before = zero(eltype(pcb.Λ_vals))
@@ -315,6 +337,7 @@ Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     α⁻::Float64 = 0.5
     safety_limit::Int = 500
     early_stop_threshold::Float64 = Inf
+    use_fd_hvp::Bool = false
 end
 
 _default_early_stop(::ContinuousDynamics, est::Float64) = est
@@ -322,9 +345,10 @@ _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_s
 
 function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     T = typeof(strat.t_max)
-    # When no HVP is available, the grid bound is looser (no derivative info),
-    # so increase grid resolution to compensate.
-    grad_only = model.hvp === nothing
+    # When no HVP is available and FD-HVP is not used, the grid bound is looser
+    # (no derivative info), so increase grid resolution to compensate.
+    has_deriv_info = model.hvp !== nothing || strat.use_fd_hvp
+    grad_only = !has_deriv_info
     N_base = grad_only ? strat.N * 2 : strat.N
     N_min = min_grid_cells(flow, strat.N_min, N_base)
     if grad_only
@@ -344,6 +368,7 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         copy(state),
         copy(state),
         similar(state.ξ.x, 0),
+        strat.use_fd_hvp,
     )
 end
 
@@ -360,6 +385,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     state_cache::S
     state_cache2::S
     empty_∇ϕx::V
+    use_fd_hvp::Bool
 end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
@@ -382,7 +408,11 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
     grad_func = make_grad_U_func(state_, flow, model.grad, cache)
     hvp_func = model.hvp
-    grad_and_hvp = (grad_func, hvp_func)
+    grad_and_hvp = if hvp_func === nothing && alg.use_fd_hvp
+        FiniteDiffHVP(grad_func, similar(state.ξ.x))
+    else
+        (grad_func, hvp_func)
+    end
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 

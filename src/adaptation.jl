@@ -255,72 +255,113 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
 end
 
 
-# --- 5b. Welford online adaptation ---
+# --- 5b. Streaming time-weighted adaptation ---
 
 """
     WelfordBoomerangStats
 
-Welford online statistics accumulator for Boomerang adaptation.
-Updates mean and (co)variance from event positions in a numerically
-stable, allocation-free manner. Replaces trajectory integration with
-per-event updates for smoother, faster convergence.
+Streaming time-weighted statistics accumulator for Boomerang adaptation.
+Computes the same integrals as `BoomerangWarmupStats` (trapezoidal mean,
+left-Riemann variance) but operates per-event without needing the trace
+buffer. Stores previous-event state so each `welford_update!` integrates
+exactly one trajectory segment.
 """
 mutable struct WelfordBoomerangStats
-    n::Int
-    mean::Vector{Float64}
-    M2::Vector{Float64}
-    M2_cross::Union{Nothing, Matrix{Float64}}
-    delta_buf::Vector{Float64}
+    total_time::Float64
+    sum_x_lin::Vector{Float64}                # ∑ (xᵢ + xᵢ₊₁)/2 · dt  (trapezoidal mean)
+    sum_x::Vector{Float64}                    # ∑ xᵢ · dt              (left Riemann, for var)
+    sum_x2::Vector{Float64}                   # ∑ xᵢ² · dt             (left Riemann, for var)
+    sum_xy::Union{Nothing, Matrix{Float64}}   # ∑ xᵢ xⱼ · dt           (fullrank only)
+    prev_x::Vector{Float64}
+    prev_t::Float64
+    initialized::Bool
 end
 
 function WelfordBoomerangStats(d::Integer; fullrank::Bool=false)
-    WelfordBoomerangStats(0, zeros(d), zeros(d), fullrank ? zeros(d, d) : nothing, zeros(d))
+    WelfordBoomerangStats(
+        0.0, zeros(d), zeros(d), zeros(d),
+        fullrank ? zeros(d, d) : nothing,
+        zeros(d), 0.0, false,
+    )
 end
 
-function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector)
-    ws.n += 1
-    n = ws.n
-    d = length(ws.mean)
-    buf = ws.delta_buf
-
-    @inbounds for i in 1:d
-        buf[i] = x[i] - ws.mean[i]
-    end
-    @inbounds for i in 1:d
-        ws.mean[i] += buf[i] / n
-    end
-    @inbounds for i in 1:d
-        delta2_i = x[i] - ws.mean[i]
-        ws.M2[i] += buf[i] * delta2_i
+function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, t::Float64)
+    if !ws.initialized
+        ws.prev_x .= x
+        ws.prev_t = t
+        ws.initialized = true
+        return ws
     end
 
-    if ws.M2_cross !== nothing
-        @inbounds for j in 1:d, i in j:d
-            delta2_j = x[j] - ws.mean[j]
-            val = buf[i] * delta2_j
-            ws.M2_cross[i, j] += val
-            i != j && (ws.M2_cross[j, i] += val)
+    dt = t - ws.prev_t
+    dt <= 0 && return ws
+
+    d = length(ws.sum_x)
+    has_xy = ws.sum_xy !== nothing
+    ws.total_time += dt
+
+    @inbounds for i in 1:d
+        xi = ws.prev_x[i]
+        ws.sum_x_lin[i] += (xi + x[i]) / 2 * dt
+        ws.sum_x[i] += xi * dt
+        ws.sum_x2[i] += xi * xi * dt
+    end
+
+    if has_xy
+        @inbounds for j in 1:d
+            xj = ws.prev_x[j]
+            for i in j:d
+                xi = ws.prev_x[i]
+                val = xi * xj * dt
+                ws.sum_xy[i, j] += val
+                i != j && (ws.sum_xy[j, i] += val)
+            end
         end
     end
+
+    ws.prev_x .= x
+    ws.prev_t = t
     return ws
 end
 
 function stats_mean(ws::WelfordBoomerangStats)
-    return copy(ws.mean)
+    d = length(ws.sum_x_lin)
+    μ = zeros(d)
+    ws.total_time > 0 || return μ
+    @inbounds for i in 1:d
+        μ[i] = ws.sum_x_lin[i] / ws.total_time
+    end
+    return μ
 end
 
 function stats_var(ws::WelfordBoomerangStats)
-    ws.n < 2 && return ones(length(ws.mean))
-    return max.(ws.M2 ./ (ws.n - 1), 0.0)
+    d = length(ws.sum_x)
+    v = ones(d)
+    ws.total_time > 0 || return v
+    @inbounds for i in 1:d
+        μi = ws.sum_x[i] / ws.total_time
+        v[i] = max(ws.sum_x2[i] / ws.total_time - μi * μi, 0.0)
+    end
+    return v
 end
 
 stats_std(ws::WelfordBoomerangStats) = sqrt.(stats_var(ws))
 
 function stats_cov(ws::WelfordBoomerangStats)
-    d = length(ws.mean)
-    ws.M2_cross === nothing && error("WelfordBoomerangStats not initialized for fullrank (no M2_cross)")
-    ws.n < 2 && return Matrix{Float64}(I, d, d)
-    return ws.M2_cross ./ (ws.n - 1)
+    d = length(ws.sum_x)
+    ws.sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy)")
+    ws.total_time <= 0 && return Matrix{Float64}(I, d, d)
+    T = ws.total_time
+    C = zeros(d, d)
+    @inbounds for j in 1:d
+        μj = ws.sum_x[j] / T
+        for i in j:d
+            μi = ws.sum_x[i] / T
+            C[i, j] = ws.sum_xy[i, j] / T - μi * μj
+            C[j, i] = C[i, j]
+        end
+    end
+    return C
 end
 
 
@@ -328,10 +369,10 @@ end
     adapt_interval(no_updates_done::Int, base_dt::Float64)
 
 Geometrically growing adaptation interval: starts at `base_dt`,
-doubles every 5 updates (caps at 64× base).
+doubles every 3 updates (caps at 32× base).
 """
 function adapt_interval(no_updates_done::Int, base_dt::Float64)
-    factor = min(2.0^(no_updates_done ÷ 5), 64.0)
+    factor = min(2.0^(no_updates_done ÷ 3), 32.0)
     return base_dt * factor
 end
 
@@ -362,13 +403,16 @@ function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::Muta
     ad.did_update = false
 
     if state.t[] < trace_mgr.t_warmup
-        welford_update!(ad.stats, state.ξ.x)
+        welford_update!(ad.stats, state.ξ.x, state.t[])
     end
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= dt_now)
         update_boomerang!(flow, ad.stats, Val(ad.scheme))
         refresh_velocity!(state, flow)
+        # After flow.μ changes, reset prev_x so next segment starts fresh
+        ad.stats.prev_x .= state.ξ.x
+        ad.stats.prev_t = state.t[]
         ad.last_update = state.t[]
         ad.no_updates_done += 1
         ad.did_update = true
@@ -404,9 +448,9 @@ const BOOM_DIAG_FLOOR = 1e-8
 
 const AnyBoomerangStats = Union{BoomerangWarmupStats, WelfordBoomerangStats}
 _has_data(stats::BoomerangWarmupStats) = !all(iszero, stats.coord_time)
-_has_data(stats::WelfordBoomerangStats) = stats.n >= 2
+_has_data(stats::WelfordBoomerangStats) = stats.total_time > 0
 _shrinkage_time(stats::BoomerangWarmupStats) = maximum(stats.coord_time)
-_shrinkage_time(stats::WelfordBoomerangStats) = Float64(stats.n)
+_shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
 
 """
     update_boomerang!(flow::MutableBoomerang, stats, ::Val{:diagonal})
@@ -602,8 +646,5 @@ function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0)
     else
         scheme = :fullrank
     end
-    # Use 1/5 of the provided precond_dt as base for Boomerang adaptation,
-    # giving ~5x more frequent initial updates than the generic default.
-    boom_base_dt = Float64(precond_dt) / 5.0
-    return BoomerangAdapter(boom_base_dt, Float64(t0), d; scheme=scheme)
+    return BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=scheme)
 end

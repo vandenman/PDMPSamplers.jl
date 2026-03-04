@@ -100,9 +100,12 @@ export
     PreconditionedDynamics,
     AbstractPreconditioner,
     DiagonalPreconditioner,
+    DensePreconditioner,
     # short hands
     PreconditionedZigZag,
     PreconditionedBPS,
+    DensePreconditionedZigZag,
+    DensePreconditionedBPS,
     λ, # should be renamed to rate or so to have a non-unicode name
     move_forward_time,
     move_forward_time!,

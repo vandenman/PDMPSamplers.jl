@@ -107,6 +107,35 @@ end
 # Sweep-line quantile for linear dynamics (ZigZag & BPS)
 # ──────────────────────────────────────────────────────────────────────────────
 
+"""
+    _trace_coordinate_bounds(trace, j) -> (lo, hi)
+
+Return tight lower/upper bounds on the range visited by coordinate `j` over the full trace.
+For linear dynamics (ZigZag, BPS) this is just the min/max of all skeleton positions.
+For Boomerang dynamics the trajectory oscillates on a circle of radius
+`R = hypot(x0 - μ[j], θ0)`, so each segment can reach as far as `μ[j] ± R`;
+these extrema are included even if never actually hit within the segment's finite arc.
+The bounds are used as the bracketing interval for bisection in `_quantile_scalar`.
+"""
+function _trace_coordinate_bounds end
+
+"""
+    _collect_sweep_events(trace, j) -> (total_time, density_changes, point_masses)
+
+Build the position-domain representation of the marginal occupation measure for
+coordinate `j` under **linear dynamics** (ZigZag, BPS).
+
+The trajectory on segment `i` is `x_j(t) = x0 + θ0·t`, so its occupation
+density in position space is the uniform value `1/|θ0|` over `[x_min, x_max]`.
+This is encoded as a pair of signed slope changes:
+  - `(x_min, +1/|θ0|)` — density switches on at the left endpoint
+  - `(x_max, -1/|θ0|)` — density switches off at the right endpoint
+Stationary segments (`θ0 == 0`) contribute a point mass of duration `τ` at their
+fixed position.
+
+The resulting lists are consumed by `_quantile_linear_sweep` to invert the CDF
+in O(N log N) time without evaluating the CDF explicitly.
+"""
 function _collect_sweep_events(trace::PDMPTrace, j::Integer)
     n = length(trace)
     n < 2 && error("Cannot compute quantile on a trace with fewer than 2 events")
@@ -169,6 +198,23 @@ function _collect_sweep_events(trace::FactorizedTrace, j::Integer)
     return total_time, density_changes, point_masses
 end
 
+"""
+    _quantile_linear_sweep(total_time, density_changes, point_masses, sorted_targets)
+
+Exact O(N log N) quantile inversion for **linear dynamics** (ZigZag, BPS).
+
+The marginal CDF for linear dynamics is piecewise linear in position:
+between two adjacent position events the accumulated slope is a constant
+density `ρ`, so `F(q) = F(q_prev) + ρ·(q - q_prev)`, which inverts immediately
+as `q = q_prev + (target - F_prev)/ρ`.
+
+The algorithm sorts all density change- and point-mass events in position space,
+then scans left to right, maintaining a running cumulative mass and current slope.
+Each quantile target is resolved in O(1) once the correct interval is reached.
+
+`sorted_targets` must be in **increasing order** and expressed as absolute mass
+values (i.e. `p * total_time`). Returns quantile positions in the same order.
+"""
 function _quantile_linear_sweep(
     total_time::Float64,
     density_changes::Vector{Tuple{Float64, Float64}},
@@ -260,7 +306,7 @@ function Statistics.quantile(trace::AbstractPDMPTrace, p::AbstractVector{<:Real}
     all(x -> 0 < x < 1, p) || throw(DomainError(p, "All quantile probabilities must be in (0, 1)"))
     base = _underlying_flow(trace.flow)
     if base isa AnyBoomerang
-        return [_quantile_scalar(trace, pi, coordinate) for pi in p]
+        return _quantile_boomerang_vector(trace, p, coordinate)
     end
     total_time, dc, pm = _collect_sweep_events(trace, coordinate)
     order = sortperm(collect(p))
@@ -273,15 +319,120 @@ function Statistics.quantile(trace::AbstractPDMPTrace, p::AbstractVector{<:Real}
     return results
 end
 
+"""
+    _quantile_scalar(trace, p, coordinate)
+
+Compute a single quantile for `coordinate` at probability `p`.
+
+Dispatches on the underlying flow type:
+- **Linear dynamics (ZigZag, BPS):** delegates to `_quantile_linear_sweep` via
+  `_collect_sweep_events`. The CDF is piecewise linear, so inversion is analytic.
+- **Boomerang:** falls back to bisection via `Roots.find_zero`. The per-segment
+  contribution to the CDF is an arccos expression (the trajectory follows
+  `x_j(t) = μ_j + R cos(t - φ)`, giving an occupation density proportional to
+  `1/sqrt(R² - (x - μ_j)²)` — the arcsine distribution). Summing N such terms
+  yields no known closed-form inverse, so bisection on the exact CDF is used.
+  The bracket `[lo, hi]` is the tightest possible range from `_trace_coordinate_bounds`.
+"""
 function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer)
     base = _underlying_flow(trace.flow)
     if base isa AnyBoomerang
         lo, hi = _trace_coordinate_bounds(trace, coordinate)
-        f(q) = cdf(trace, q; coordinate) - p
+        segments, total_time, μj = _precompute_boomerang_segments(trace, coordinate)
+        f(q) = _cdf_boomerang_precomputed(trace.flow, segments, total_time, μj, q) - p
         return Roots.find_zero(f, (lo, hi), Roots.Bisection())
     end
     total_time, dc, pm = _collect_sweep_events(trace, coordinate)
     return _quantile_linear_sweep(total_time, dc, pm, [p * total_time])[1]
+end
+
+"""
+    _precompute_boomerang_segments(trace, j) -> (segments, total_time, μj)
+
+Cache the per-segment data `(x0j, θ0j, τ)` needed by `_cdf_boomerang_precomputed`
+for coordinate `j`. Precomputing avoids re-parsing the trace on every bisection step,
+reducing the O(N) CDF cost to a tight loop over a plain `Vector{NTuple}`.
+"""
+function _precompute_boomerang_segments(trace::PDMPTrace, j::Integer)
+    base = _underlying_flow(trace.flow)
+    μj = Float64(base.μ[j])
+    n = length(trace)
+    segments = Vector{NTuple{3, Float64}}(undef, n - 1)
+    @inbounds for i in 1:n-1
+        segments[i] = (
+            Float64(trace.positions[j, i]),
+            Float64(trace.velocities[j, i]),
+            Float64(trace.times[i+1] - trace.times[i]),
+        )
+    end
+    total_time = Float64(trace.times[end] - trace.times[1])
+    return segments, total_time, μj
+end
+
+"""
+    _cdf_boomerang_precomputed(flow, segments, total_time, μj, q)
+
+Evaluate the marginal CDF at `q` for coordinate `j` under Boomerang dynamics,
+using pre-cached segment data. Each segment contributes `_time_below_segment`,
+which computes the arc time for which `x_j(t) ≤ q` using crossing times derived
+from the arccos formula. The aggregate CDF is a sum of these arccos terms, which
+has no analytic inverse — hence this function is called repeatedly by bisection.
+"""
+function _cdf_boomerang_precomputed(
+    flow::ContinuousDynamics,
+    segments::Vector{NTuple{3, Float64}},
+    total_time::Float64,
+    μj::Float64,
+    q::Float64,
+)
+    base = _underlying_flow(flow)
+    total_below = 0.0
+    @inbounds for (x0j, θ0j, τ) in segments
+        total_below += _time_below_segment(base, x0j, θ0j, τ, q, μj)
+    end
+    return total_below / total_time
+end
+
+"""
+    _quantile_boomerang_vector(trace, p, coordinate)
+
+Compute multiple quantiles at sorted probability vector `p` for Boomerang dynamics.
+Sorts the targets and narrows the bisection bracket progressively: once the `i`-th
+quantile `q_i` is found, it serves as the lower bound for `q_{i+1}` (since the CDF
+is monotone), reducing unnecessary bracket width for subsequent bisection calls.
+"""
+function _quantile_boomerang_vector(trace::PDMPTrace, p::AbstractVector{<:Real}, coordinate::Integer)
+    lo, hi = _trace_coordinate_bounds(trace, coordinate)
+    segments, total_time, μj = _precompute_boomerang_segments(trace, coordinate)
+    flow = trace.flow
+
+    order = sortperm(p)
+    results = Vector{Float64}(undef, length(p))
+
+    current_lo = lo
+    for idx in order
+        f(q) = _cdf_boomerang_precomputed(flow, segments, total_time, μj, q) - p[idx]
+        qi = Roots.find_zero(f, (current_lo, hi), Roots.Bisection())
+        results[idx] = qi
+        current_lo = qi
+    end
+    return results
+end
+
+function _quantile_boomerang_vector(trace::AbstractPDMPTrace, p::AbstractVector{<:Real}, coordinate::Integer)
+    lo, hi = _trace_coordinate_bounds(trace, coordinate)
+
+    order = sortperm(p)
+    results = Vector{Float64}(undef, length(p))
+
+    current_lo = lo
+    for idx in order
+        f(q) = cdf(trace, q; coordinate) - p[idx]
+        qi = Roots.find_zero(f, (current_lo, hi), Roots.Bisection())
+        results[idx] = qi
+        current_lo = qi
+    end
+    return results
 end
 
 function Statistics.median(trace::AbstractPDMPTrace; coordinate::Integer=-1)
@@ -636,9 +787,21 @@ end
 """
     _time_below_segment(flow, x0j, θ0j, τ, q[, μj])
 
-Return the duration within a segment `[0, τ]` for which coordinate `j` satisfies `x_j(t) ≤ q`.
-Linear dynamics: `x_j(t) = x0j + θ0j * t`.
-Boomerang dynamics: `x_j(t) = μj + (x0j - μj) cos(t) + θ0j sin(t)`.
+Return the duration within `[0, τ]` for which coordinate `j` satisfies `x_j(t) ≤ q`.
+
+**Linear dynamics** (`x_j(t) = x0j + θ0j·t`):
+The crossing time `t* = (q - x0j)/θ0j` is unique; the time below is the clamped
+portion before or after the crossing depending on the sign of `θ0j`.
+
+**Boomerang dynamics** (`x_j(t) = μj + R cos(t - φ)`, `R = hypot(x0j - μj, θ0j)`):
+The occupation density in position space is `∝ 1/|dx/dt| = 1/sqrt(R² - (x-μj)²)`,
+i.e. the arcsine distribution — diverging at the turning points ±R. The crossing
+condition `x_j(t) = q` may have multiple solutions within `[0, τ]`; these are found
+as `t = φ ± arccos(C/R) + 2πk` for `C = q - μj`. The arc-length time below `q`
+is accumulated by evaluating the midpoint of each sub-interval.
+
+This function is the inner kernel called at every bisection step for Boomerang
+quantiles (via `_cdf_boomerang_precomputed`).
 """
 function _time_below_segment(::Union{ZigZag, BouncyParticle}, x0j::Real, θ0j::Real, τ::Real, q::Real)
     if iszero(θ0j)
@@ -655,35 +818,27 @@ function _time_below_segment(flow::AnyBoomerang, x0j::Real, θ0j::Real, τ::Real
     C = q - μj
     R = hypot(a, b)
 
-    (R ≤ 0 || C ≥ R)  && return τ
-    C ≤ -R             && return zero(τ)
+    (R ≤ 0 || C ≥ R) && return Float64(τ)
+    C ≤ -R            && return 0.0
 
     φ = atan(b, a)
     α = acos(clamp(C / R, -one(R), one(R)))
+    period = 2π
 
-    crossings = Float64[]
-    for sign in (1, -1)
-        base = φ + sign * α
-        k_min = ceil(Int, -base / (2π))
-        k_max = floor(Int, (τ - base) / (2π))
-        for k in k_min:k_max
-            t = base + 2π * k
-            if 0 < t < τ
-                push!(crossings, t)
-            end
-        end
-    end
+    # x(t) = μ + R cos(t - φ) ≤ q  ⟺  cos(t - φ) ≤ C/R
+    # Solution intervals: [φ + α + 2πk, φ - α + 2π(k+1)] for integer k
+    left_base = φ + α
+    right_base = φ - α + period
 
-    sort!(crossings)
-    pushfirst!(crossings, 0.0)
-    push!(crossings, Float64(τ))
+    k_min = ceil(Int, -right_base / period)
+    k_max = floor(Int, (τ - left_base) / period)
 
     time_below = 0.0
-    for i in 1:length(crossings) - 1
-        t_mid = (crossings[i] + crossings[i + 1]) / 2
-        x_mid = μj + a * cos(t_mid) + b * sin(t_mid)
-        if x_mid ≤ q
-            time_below += crossings[i + 1] - crossings[i]
+    for k in k_min:k_max
+        lo = max(left_base + period * k, 0.0)
+        hi = min(right_base + period * k, Float64(τ))
+        if hi > lo
+            time_below += hi - lo
         end
     end
     return time_below

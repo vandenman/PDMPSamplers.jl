@@ -2,13 +2,13 @@
 
 @testset "Basic PDMP Sampler Tests" begin
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS)
+    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS, DensePreconditionedZigZag, DensePreconditionedBPS)
     factorized_gradient_types = (CoordinateWiseGradient, FullGradient)
     nonfactorized_gradient_types = (FullGradient,)
 
     get_gradient_types(::Type{<:FactorizedDynamics}) = factorized_gradient_types
     get_gradient_types(::Type{<:NonFactorizedDynamics}) = nonfactorized_gradient_types
-    get_gradient_types(::Type{<:PreconditionedDynamics{<:AbstractPreconditioner,T}}) where T = (FullGradient,)
+    get_gradient_types(::Type{<:PreconditionedDynamics}) = (FullGradient,)
 
     get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient}) = (ThinningStrategy, GridThinningStrategy,)
     get_algorithm_types(::Type{<:PreconditionedDynamics}, ::Type{<:FullGradient}) = (GridThinningStrategy,)

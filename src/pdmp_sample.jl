@@ -7,12 +7,13 @@ function pdmp_sample(
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
     n_chains::Int=1, threaded::Bool=false,
-    progress::Bool=true
+    progress::Bool=true,
+    adapter::Union{AbstractAdapter,Nothing}=nothing
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
 
     if n_chains == 1
-        trace, stats = _pdmp_sample_single(ξ₀, flow, model, alg, t₀, T, t_warmup; progress)
+        trace, stats = _pdmp_sample_single(ξ₀, flow, model, alg, t₀, T, t_warmup; progress, adapter)
         return PDMPChains([trace], [stats])
     end
 
@@ -20,14 +21,14 @@ function pdmp_sample(
         tasks = map(1:n_chains) do _
             Threads.@spawn begin
                 model_i = _copy_model(model)
-                _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false)
+                _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter)
             end
         end
         results = fetch.(tasks)
     else
         results = map(1:n_chains) do _
             model_i = _copy_model(model)
-            _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false)
+            _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter)
         end
     end
 
@@ -47,7 +48,8 @@ function _pdmp_sample_single(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
-    progress::Bool=true
+    progress::Bool=true,
+    adapter::Union{AbstractAdapter,Nothing}=nothing
 )
 
     # TODO: it's possible to sample to have t_warmup < T...
@@ -80,7 +82,7 @@ function _pdmp_sample_single(
     t_warmup_abs = t₀ + t_warmup
     trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
-    adapter = default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀)
+    adapter = adapter === nothing ? default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
     if progress
@@ -155,6 +157,9 @@ function initialize_cache(::ContinuousDynamics, ::GradientStrategy, ::PoissonTim
 end
 function initialize_cache(flow::PreconditionedDynamics, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
     return initialize_cache(flow.dynamics, grad, alg, t, ξ)
+end
+function initialize_cache(flow::PreconditionedDynamics{DensePreconditioner}, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
+    return (; z=similar(ξ.x))
 end
 function initialize_cache(::BouncyParticle, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
     return (; z=similar(ξ.x))
