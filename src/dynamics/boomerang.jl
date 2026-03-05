@@ -365,14 +365,14 @@ function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     if iszero(μ)
         iszero(x) && iszero(θ) && return Inf
         iszero(θ) && return oftype(float(x), π / 2)
-        if θ * x >= 0.0
+        if θ * x >= 0.0 # TODO: ispositive(θ * x) or !isnegative?
             return π - atan(x / θ)
         else
             return atan(-x / θ)
         end
     else
         u = x^2 - 2μ * x + θ^2
-        u < 0 && return Inf
+        u < 0 && return Inf # same here, maybe an oftype?
         denom = 2μ - x
         sqrtu = sqrt(u)
         t1 = mod(2atan(sqrtu - θ, denom), 2π)
