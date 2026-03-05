@@ -1,6 +1,6 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-@testset "Preconditioned dynamics coverage" begin
+@testset "Preconditioned dynamics edge cases" begin
 
     @testset "DensePreconditioner constructors and fields" begin
         dp = DensePreconditioner(4)
@@ -333,15 +333,18 @@
     @testset "update_preconditioner! DensePreconditioner non-posdef fallback" begin
         d = 2
         dzz = DensePreconditionedZigZag(d)
-        # Trace with identical positions → singular covariance
-        events = [
-            PDMPEvent(Float64(i), [1.0, 2.0], randn(d)) for i in 0:10
-        ]
-        trace = PDMPSamplers.PDMPTrace(events, dzz)
-        state = PDMPState(5.0, SkeletonPoint([1.0, 2.0], PDMPSamplers.initialize_velocity(dzz, d)))
+
+        # Wrap a trace so that Statistics.cov returns a non-positive-definite matrix.
+        # Real trace covariances are always PSD; this tests the defensive catch block.
+        struct _NonPDCovTrace <: PDMPSamplers.AbstractPDMPTrace
+            flow::Any
+        end
+        Statistics.cov(::_NonPDCovTrace) = [1.0 2.0; 2.0 1.0]
+
+        fake_trace = _NonPDCovTrace(dzz)
+        state = PDMPState(5.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(dzz, d)))
         old_L = copy(dzz.metric.L)
-        PDMPSamplers.update_preconditioner!(dzz, trace, state)
-        # Should return without error (PosDefException caught)
+        PDMPSamplers.update_preconditioner!(dzz, fake_trace, state)
         @test dzz.metric.L == old_L
     end
 
