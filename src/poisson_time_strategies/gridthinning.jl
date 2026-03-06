@@ -111,7 +111,6 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     for i in 2:N+1
         Δt = t_grid[i] - t_grid[i-1]
         move_forward_time!(state_t, Δt, flow)
-        validate_state(state_t, flow, "after moving forward in time in Grid algorithm")
         y_vals[i], d_vals[i] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
 
         # Compute bound for interval [i-1] immediately so we can track cumulative integral
@@ -131,6 +130,8 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
             break
         end
     end
+
+    validate_state(state_t, flow, "after grid construction in Grid algorithm")
 
     if !isnothing(stats)
         stats.grid_builds += 1
@@ -200,36 +201,46 @@ function ∂λ∂t(state::AbstractPDMPState, ::AbstractVector, curvature_input::
     return curvature_input
 end
 
-function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::AnyBoomerang)
+function ∂λ∂t(state::PDMPState, ∇U_xt::AbstractVector, curvature_input, flow::AnyBoomerang)
     vt = state.ξ.θ
     xt = state.ξ.x
     f_prime_t = extract_vhv(vt, curvature_input)
     f_prime_t -= dot(vt, flow.Γ, vt)
-    if state isa StickyPDMPState
-        for i in eachindex(xt)
-            state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
-        end
-    else
-        for i in eachindex(xt)
-            f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
-        end
+    for i in eachindex(xt)
+        f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
     end
     return f_prime_t
 end
 
-function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::LowRankMutableBoomerang)
+function ∂λ∂t(state::StickyPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::AnyBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = extract_vhv(vt, curvature_input)
+    f_prime_t -= dot(vt, flow.Γ, vt)
+    for i in eachindex(xt)
+        state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
+    end
+    return f_prime_t
+end
+
+function ∂λ∂t(state::PDMPState, ∇U_xt::AbstractVector, curvature_input, flow::LowRankMutableBoomerang)
     vt = state.ξ.θ
     xt = state.ξ.x
     f_prime_t = extract_vhv(vt, curvature_input)
     f_prime_t -= lowrank_quadform(flow.Γ, vt)
-    if state isa StickyPDMPState
-        for i in eachindex(xt)
-            state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
-        end
-    else
-        for i in eachindex(xt)
-            f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
-        end
+    for i in eachindex(xt)
+        f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
+    end
+    return f_prime_t
+end
+
+function ∂λ∂t(state::StickyPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::LowRankMutableBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = extract_vhv(vt, curvature_input)
+    f_prime_t -= lowrank_quadform(flow.Γ, vt)
+    for i in eachindex(xt)
+        state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
     end
     return f_prime_t
 end
@@ -319,19 +330,23 @@ end
 struct FiniteDiffHVP{G}
     grad::G
     buf::Vector{Float64}
+    grad_buf::Vector{Float64}
+    hvp_buf::Vector{Float64}
 end
+FiniteDiffHVP(grad, buf::Vector{Float64}) = FiniteDiffHVP(grad, buf, similar(buf), similar(buf))
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP, add_rate::Bool=true)
     xt, vt = state.ξ.x, state.ξ.θ
     ∇U_xt = fd.grad(xt)
+    copyto!(fd.grad_buf, ∇U_xt)
 
     h = 1e-5 * max(1.0, norm(xt) / norm(vt))
     fd.buf .= xt .+ h .* vt
     ∇U_shifted = fd.grad(fd.buf)
-    Hxt_vt = (∇U_shifted .- ∇U_xt) ./ h
+    fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
 
-    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, ∇U_xt, Hxt_vt, flow)
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
 
     rate = pos(f_t)
     rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
@@ -413,6 +428,7 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         copy(state),
         similar(state.ξ.x, 0),
         strat.use_fd_hvp,
+        similar(state.ξ.x),
     )
 end
 
@@ -430,6 +446,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     state_cache2::S
     empty_∇ϕx::V
     use_fd_hvp::Bool
+    fd_buf::Vector{Float64}
 end
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
@@ -456,7 +473,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     grad_and_hvp = if vhv_func !== nothing
         VHVProvider(grad_func, vhv_func)
     elseif hvp_func === nothing && alg.use_fd_hvp
-        FiniteDiffHVP(grad_func, similar(state.ξ.x))
+        FiniteDiffHVP(grad_func, alg.fd_buf)
     else
         (grad_func, hvp_func)
     end

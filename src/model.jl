@@ -206,7 +206,10 @@ struct _VHVCallable{F,B<:ADTypes.AbstractADType}
 end
 
 function (c::_VHVCallable)(x::AbstractVector, v::AbstractVector, w::AbstractVector)
-    f_line = t -> c.g_scalar(x .+ t .* v, v, w)
+    f_line = t -> begin
+        xt = x .+ t .* v
+        c.g_scalar(xt, v, w)
+    end
     return DI.derivative(f_line, c.backend, zero(eltype(x)))
 end
 
@@ -228,8 +231,8 @@ end
 
 function (c::_VHVFromLogDensity)(x::AbstractVector, v::AbstractVector, w::AbstractVector)
     g_scalar = t -> begin
-        x_new = x .+ t .* v
-        grad = DI.gradient(c.logp, c.backend, x_new)
+        xt = x .+ t .* v
+        grad = DI.gradient(c.logp, c.backend, xt)
         -dot(w, grad)
     end
     return DI.derivative(g_scalar, c.backend, zero(eltype(x)))
