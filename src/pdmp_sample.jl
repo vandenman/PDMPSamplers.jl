@@ -40,7 +40,8 @@ end
 function _copy_model(model::PDMPModel)
     grad_new = copy(model.grad)
     hvp_new = model.hvp === nothing ? nothing : _copy_callable(model.hvp)
-    return PDMPModel(model.d, grad_new, hvp_new, false, false)
+    vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
+    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false)
 end
 
 # the inner workhorse that runs a single chain

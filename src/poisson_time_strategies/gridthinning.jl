@@ -178,28 +178,33 @@ end
 
 # --- ∂λ∂t: time-derivative of the rate, dispatched on flow type ---
 
-function ∂λ∂t(state::AbstractPDMPState, ::AbstractVector, Hxt_vt::AbstractVector, ::ContinuousDynamics)
-    return dot(state.ξ.θ, Hxt_vt)
+extract_vhv(vt::AbstractVector, Hxt_vt::AbstractVector) = dot(vt, Hxt_vt)
+extract_vhv(::AbstractVector, vhv::Real) = vhv
+
+function ∂λ∂t(state::AbstractPDMPState, ::AbstractVector, curvature_input, ::ContinuousDynamics)
+    return extract_vhv(state.ξ.θ, curvature_input)
 end
 
-function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::AbstractVector, ::ZigZag)
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input::AbstractVector, ::ZigZag)
     vt = state.ξ.θ
     f_prime_t = zero(eltype(vt))
     for i in eachindex(∇U_xt)
         if ispositive(vt[i] * ∇U_xt[i])
-            f_prime_t += vt[i] * Hxt_vt[i]
+            f_prime_t += vt[i] * curvature_input[i]
         end
     end
     return f_prime_t
 end
 
-function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::AbstractVector, flow::AnyBoomerang)
+function ∂λ∂t(state::AbstractPDMPState, ::AbstractVector, curvature_input::Real, ::ZigZag)
+    return curvature_input
+end
+
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::AnyBoomerang)
     vt = state.ξ.θ
     xt = state.ξ.x
-    f_prime_t = dot(vt, Hxt_vt)
-    # Subtract the reference Hessian part: H_ϕ = H_U - Γ.
+    f_prime_t = extract_vhv(vt, curvature_input)
     f_prime_t -= dot(vt, flow.Γ, vt)
-    # Add the velocity drift part: dθ/dt = -(x - μ), allocation-free.
     if state isa StickyPDMPState
         for i in eachindex(xt)
             state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
@@ -212,10 +217,10 @@ function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::Ab
     return f_prime_t
 end
 
-function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::AbstractVector, flow::LowRankMutableBoomerang)
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::LowRankMutableBoomerang)
     vt = state.ξ.θ
     xt = state.ξ.x
-    f_prime_t = dot(vt, Hxt_vt)
+    f_prime_t = extract_vhv(vt, curvature_input)
     f_prime_t -= lowrank_quadform(flow.Γ, vt)
     if state isa StickyPDMPState
         for i in eachindex(xt)
@@ -229,8 +234,8 @@ function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::Ab
     return f_prime_t
 end
 
-function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, Hxt_vt::AbstractVector, pd::PreconditionedDynamics)
-    return ∂λ∂t(state, ∇U_xt, Hxt_vt, pd.dynamics)
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, pd::PreconditionedDynamics)
+    return ∂λ∂t(state, ∇U_xt, curvature_input, pd.dynamics)
 end
 
 # --- Grid parameter caps, dispatched on flow type ---
@@ -261,6 +266,45 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
     return rate, rate_deriv
 
+end
+
+struct VHVProvider{G,V}
+    grad::G
+    vhv::V
+end
+
+function _compute_vhv_scalar(vhv_func, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ContinuousDynamics)
+    xt, vt = state.ξ.x, state.ξ.θ
+    return vhv_func(xt, vt, vt)
+end
+
+function _compute_vhv_scalar(vhv_func, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ZigZag)
+    xt, vt = state.ξ.x, state.ξ.θ
+    w = similar(vt)
+    for i in eachindex(vt)
+        w[i] = ispositive(vt[i] * ∇U_xt[i]) ? vt[i] : zero(eltype(vt))
+    end
+    return vhv_func(xt, vt, w)
+end
+
+function _compute_vhv_scalar(vhv_func, state::AbstractPDMPState, ∇U_xt::AbstractVector, pd::PreconditionedDynamics)
+    return _compute_vhv_scalar(vhv_func, state, ∇U_xt, pd.dynamics)
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::VHVProvider, add_rate::Bool=true)
+    xt, vt = state.ξ.x, state.ξ.θ
+
+    ∇U_xt = provider.grad(xt)
+
+    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+
+    curvature_scalar = _compute_vhv_scalar(provider.vhv, state, ∇U_xt, flow)
+    f_prime_t = ∂λ∂t(state, ∇U_xt, curvature_scalar, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+
+    return rate, rate_deriv
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, grad_and_nothing::Tuple{G,Nothing}, add_rate::Bool=true) where {G}
@@ -408,7 +452,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
     grad_func = make_grad_U_func(state_, flow, model.grad, cache)
     hvp_func = model.hvp
-    grad_and_hvp = if hvp_func === nothing && alg.use_fd_hvp
+    vhv_func = model.vhv
+    grad_and_hvp = if vhv_func !== nothing
+        VHVProvider(grad_func, vhv_func)
+    elseif hvp_func === nothing && alg.use_fd_hvp
         FiniteDiffHVP(grad_func, similar(state.ξ.x))
     else
         (grad_func, hvp_func)
