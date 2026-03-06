@@ -2,13 +2,13 @@
 
 @testset "Sticky PDMP Sampler Tests" begin
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS)
+    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS, DensePreconditionedZigZag, DensePreconditionedBPS)
     factorized_gradient_types = (FullGradient,)
     nonfactorized_gradient_types = (FullGradient,)
 
     get_gradient_types(::Type{<:FactorizedDynamics}) = factorized_gradient_types
     get_gradient_types(::Type{<:NonFactorizedDynamics}) = nonfactorized_gradient_types
-    get_gradient_types(::Type{<:PreconditionedDynamics{<:AbstractPreconditioner,T}}) where T = get_gradient_types(T)
+    get_gradient_types(::Type{<:PreconditionedDynamics}) = (FullGradient,)
 
     get_algorithm_types(::Type{<:ContinuousDynamics}, ::Type{<:FullGradient}) = (ThinningStrategy, GridThinningStrategy,)
     get_algorithm_types(::Type{<:PreconditionedDynamics}, ::Type{<:FullGradient}) = (GridThinningStrategy,)
@@ -32,11 +32,14 @@
             @testset "$algorithm" for algorithm in get_algorithm_types(pdmp_type, gradient_type)
                 @testset "$(data_name(data_type, data_arg))" for data_type in data_types, data_arg in data_args[data_type]
 
-                    # MvTDist slab: only ZigZag-based samplers converge reliably
+                    # MvTDist slab: only ZigZag-based samplers converge reliably.
+                    # Dense preconditioners are incompatible: freezing canonical v[i]=0
+                    # doesn't zero physical θ[j] = Σ L[j,k]v[k] due to off-diagonal L.
                     if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}
                         pdmp_type <: Union{BouncyParticle, AnyBoomerang,
                             PreconditionedDynamics{<:Any, BouncyParticle},
-                            PreconditionedDynamics{<:Any, Boomerang}} && continue
+                            PreconditionedDynamics{<:Any, Boomerang},
+                            PreconditionedDynamics{DensePreconditioner}} && continue
                         algorithm === ThinningStrategy && continue
                     end
 

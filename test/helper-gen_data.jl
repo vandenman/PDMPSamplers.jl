@@ -25,6 +25,10 @@ function neg_hvp!(t::MvNormalTarget, out::AbstractVector, ::AbstractVector, v::A
     mul!(out, t.Σ_inv, v)
 end
 
+function neg_vhv(t::MvNormalTarget, ::AbstractVector, v::AbstractVector, w::AbstractVector)
+    dot(w, t.Σ_inv, v)
+end
+
 function neg_partial(t::MvNormalTarget, x::AbstractVector, i::Integer)
     dot(view(t.Σ_inv, :, i), x) - t.potential[i]
 end
@@ -104,6 +108,17 @@ function neg_hvp!(t::MvTDistTarget, out::AbstractVector, x::AbstractVector, v::A
     axpy!(-2 * c1 / (t.ν + q) * scalar, t.mahal_num, out)
 
     return out
+end
+
+function neg_vhv(t::MvTDistTarget, x::AbstractVector, v::AbstractVector, w::AbstractVector)
+    t.x_centered .= x .- t.μ
+    mul!(t.mahal_num, t.Σ_inv, t.x_centered)  # Σ⁻¹u
+    q = dot(t.x_centered, t.mahal_num)
+    c1 = (t.ν + t.d) / (t.ν + q)
+    wΣv = dot(w, t.Σ_inv, v)
+    uΣv = dot(t.mahal_num, v)
+    uΣw = dot(t.mahal_num, w)
+    return c1 * wΣv - 2 * c1 / (t.ν + q) * uΣv * uΣw
 end
 
 function neg_partial(t::MvTDistTarget, x::AbstractVector, i::Integer)
@@ -325,6 +340,19 @@ function neg_hvp!(t::LogisticRegressionTarget, out::AbstractVector, β::Abstract
     t.η .*= t.p              # η <- w .* (X * v)
     mul!(t.buffer, X', t.η)
     out .+= t.buffer
+end
+
+function neg_vhv(t::LogisticRegressionTarget, β::AbstractVector, v::AbstractVector, w::AbstractVector)
+    X, Λ0 = t.obj.X, t.Λ0
+    result = dot(w, Λ0, v)
+    mul!(t.η, X, β)
+    t.p .= LogExpFunctions.logistic.(t.η)
+    t.p .= t.p .* (1.0 .- t.p)
+    mul!(t.η, X, v)              # η = Xv
+    t.η .*= t.p                  # η = weights .* Xv
+    mul!(t.buffer, X', t.η)      # buffer = X'(weights .* Xv)
+    result += dot(w, t.buffer)   # w'X'(weights .* Xv) = (Xw)'diag(weights)(Xv)
+    return result
 end
 
 # --- Subsampled Hessian-vector product (no CV here) ---

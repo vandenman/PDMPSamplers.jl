@@ -254,6 +254,117 @@ function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
     return stats
 end
 
+
+# --- 5b. Streaming time-weighted adaptation ---
+
+"""
+    WelfordBoomerangStats
+
+Streaming time-weighted statistics accumulator for Boomerang adaptation.
+Computes the same integrals as `BoomerangWarmupStats` (trapezoidal mean,
+left-Riemann variance) but operates per-event without needing the trace
+buffer. Stores previous-event state so each `welford_update!` integrates
+exactly one trajectory segment.
+"""
+mutable struct WelfordBoomerangStats
+    total_time::Float64
+    sum_x_lin::Vector{Float64}                # ∑ (xᵢ + xᵢ₊₁)/2 · dt  (trapezoidal mean)
+    sum_x::Vector{Float64}                    # ∑ xᵢ · dt              (left Riemann, for var)
+    sum_x2::Vector{Float64}                   # ∑ xᵢ² · dt             (left Riemann, for var)
+    sum_xy::Union{Nothing, Matrix{Float64}}   # ∑ xᵢ xⱼ · dt           (fullrank only)
+    prev_x::Vector{Float64}
+    prev_t::Float64
+    initialized::Bool
+end
+
+function WelfordBoomerangStats(d::Integer; fullrank::Bool=false)
+    WelfordBoomerangStats(
+        0.0, zeros(d), zeros(d), zeros(d),
+        fullrank ? zeros(d, d) : nothing,
+        zeros(d), 0.0, false,
+    )
+end
+
+function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, t::Float64)
+    if !ws.initialized
+        ws.prev_x .= x
+        ws.prev_t = t
+        ws.initialized = true
+        return ws
+    end
+
+    dt = t - ws.prev_t
+    dt <= 0 && return ws
+
+    d = length(ws.sum_x)
+    has_xy = ws.sum_xy !== nothing
+    ws.total_time += dt
+
+    @inbounds for i in 1:d
+        xi = ws.prev_x[i]
+        ws.sum_x_lin[i] += (xi + x[i]) / 2 * dt
+        ws.sum_x[i] += xi * dt
+        ws.sum_x2[i] += xi * xi * dt
+    end
+
+    if has_xy
+        @inbounds for j in 1:d
+            xj = ws.prev_x[j]
+            for i in j:d
+                xi = ws.prev_x[i]
+                val = xi * xj * dt
+                ws.sum_xy[i, j] += val
+                i != j && (ws.sum_xy[j, i] += val)
+            end
+        end
+    end
+
+    ws.prev_x .= x
+    ws.prev_t = t
+    return ws
+end
+
+function stats_mean(ws::WelfordBoomerangStats)
+    d = length(ws.sum_x_lin)
+    μ = zeros(d)
+    ws.total_time > 0 || return μ
+    @inbounds for i in 1:d
+        μ[i] = ws.sum_x_lin[i] / ws.total_time
+    end
+    return μ
+end
+
+function stats_var(ws::WelfordBoomerangStats)
+    d = length(ws.sum_x)
+    v = ones(d)
+    ws.total_time > 0 || return v
+    @inbounds for i in 1:d
+        μi = ws.sum_x[i] / ws.total_time
+        v[i] = max(ws.sum_x2[i] / ws.total_time - μi * μi, 0.0)
+    end
+    return v
+end
+
+stats_std(ws::WelfordBoomerangStats) = sqrt.(stats_var(ws))
+
+function stats_cov(ws::WelfordBoomerangStats)
+    d = length(ws.sum_x)
+    ws.sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy)")
+    ws.total_time <= 0 && return Matrix{Float64}(I, d, d)
+    T = ws.total_time
+    C = zeros(d, d)
+    @inbounds for j in 1:d
+        μj = ws.sum_x[j] / T
+        for i in j:d
+            μi = ws.sum_x[i] / T
+            C[i, j] = ws.sum_xy[i, j] / T - μi * μj
+            C[j, i] = C[i, j]
+        end
+    end
+    return C
+end
+
+
 """
     adapt_interval(no_updates_done::Int, base_dt::Float64)
 
@@ -266,27 +377,49 @@ function adapt_interval(no_updates_done::Int, base_dt::Float64)
 end
 
 """
-    BoomerangAdapter <: AbstractAdapter
+    BoomerangAdapter{S} <: AbstractAdapter
 
 Adapter for `MutableBoomerang` that learns μ and Γ during warmup.
 Supports `:diagonal` (Phase 1) and `:fullrank` (Phase 2) schemes.
+
+Parameterized on the stats accumulator type `S`, which defaults to
+`WelfordBoomerangStats` for numerically stable per-event updates.
 """
-mutable struct BoomerangAdapter <: AbstractAdapter
+mutable struct BoomerangAdapter{S} <: AbstractAdapter
     const base_dt::Float64
     last_update::Float64
     no_updates_done::Int
     const scheme::Symbol
-    stats::BoomerangWarmupStats
+    stats::S
     did_update::Bool
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
-    stats = BoomerangWarmupStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
+    stats = WelfordBoomerangStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
     BoomerangAdapter(base_dt, t0, 0, scheme, stats, false)
 end
 
-function adapt!(ad::BoomerangAdapter, state, flow::MutableBoomerang, grad, trace_mgr)
-    # Always accumulate online stats from newly completed segments
+function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr)
+    ad.did_update = false
+
+    if state.t[] < trace_mgr.t_warmup
+        welford_update!(ad.stats, state.ξ.x, state.t[])
+    end
+
+    dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
+    if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= dt_now)
+        update_boomerang!(flow, ad.stats, Val(ad.scheme))
+        refresh_velocity!(state, flow)
+        # After flow.μ changes, reset prev_x so next segment starts fresh
+        ad.stats.prev_x .= state.ξ.x
+        ad.stats.prev_t = state.t[]
+        ad.last_update = state.t[]
+        ad.no_updates_done += 1
+        ad.did_update = true
+    end
+end
+
+function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::MutableBoomerang, grad, trace_mgr)
     update_stats!(ad.stats, trace_mgr)
     ad.did_update = false
 
@@ -313,14 +446,20 @@ did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 
 const BOOM_DIAG_FLOOR = 1e-8
 
+const AnyBoomerangStats = Union{BoomerangWarmupStats, WelfordBoomerangStats}
+_has_data(stats::BoomerangWarmupStats) = !all(iszero, stats.coord_time)
+_has_data(stats::WelfordBoomerangStats) = stats.total_time > 0
+_shrinkage_time(stats::BoomerangWarmupStats) = maximum(stats.coord_time)
+_shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
+
 """
-    update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:diagonal})
+    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:diagonal})
 
 Update `flow.μ` and diagonal `flow.Γ` from online sufficient statistics.
 Recomputes Cholesky factors `L` and `ΣL` without explicit matrix inverse.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:diagonal})
-    all(iszero, stats.coord_time) && return flow
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:diagonal})
+    _has_data(stats) || return flow
 
     μ_est = stats_mean(stats)
     σ2_est = stats_var(stats)
@@ -353,14 +492,14 @@ const BOOM_SHRINKAGE_BASE = 0.5
 const BOOM_SHRINKAGE_DROP_TIME = 200.0
 
 """
-    update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
+    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:fullrank})
 
 Update `flow.μ` and dense `flow.Γ` from online sufficient statistics.
 Estimates full covariance, applies shrinkage regularization, and recomputes
 Cholesky factors `L` and `ΣL`. Falls back to diagonal update on factorization failure.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:fullrank})
-    all(iszero, stats.coord_time) && return flow
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:fullrank})
+    _has_data(stats) || return flow
 
     d = length(flow.μ)
     μ_est = stats_mean(stats)
@@ -370,10 +509,8 @@ function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, 
     σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
     Σ0 = Diagonal(σ2_diag)
 
-    # Shrinkage toward diagonal: strong initially, decays with observation time.
-    # After sufficient warmup (T > BOOM_SHRINKAGE_DROP_TIME), allow α to reach zero
-    # for unbiased convergence, provided condition number is healthy.
-    total_time = maximum(stats.coord_time)
+    # Shrinkage toward diagonal: strong initially, decays with observation count/time.
+    total_time = _shrinkage_time(stats)
     α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
     if total_time > BOOM_SHRINKAGE_DROP_TIME
         α = 0.0
@@ -445,8 +582,8 @@ end
 
 # --- Low-rank adaptation ---
 
-function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, ::Val{:lowrank})
-    all(iszero, stats.coord_time) && return flow
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:lowrank})
+    _has_data(stats) || return flow
 
     lrp = flow.Γ::LowRankPrecision
     d = length(flow.μ)
@@ -459,7 +596,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::BoomerangWarmupStats, 
     Σ0 = Diagonal(σ2_diag)
 
     # Shrinkage schedule (same as fullrank)
-    total_time = maximum(stats.coord_time)
+    total_time = _shrinkage_time(stats)
     α = BOOM_SHRINKAGE_BASE / (1.0 + total_time / 50.0)
     if total_time > BOOM_SHRINKAGE_DROP_TIME
         α = 0.0
