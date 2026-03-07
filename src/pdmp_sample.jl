@@ -229,7 +229,7 @@ function _pdmp_sample_single(
         stats,
         health;
         phase=:main,
-        adapter=nothing,
+        adapter,
         progress,
         prg,
         tstop,
