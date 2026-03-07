@@ -24,14 +24,27 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test_throws ArgumentError EventCountCriterion(0)
         @test_throws ArgumentError WallTimeCriterion(0.0)
         @test_throws ArgumentError WallTimeCriterion(Inf)
+        @test_throws ArgumentError TotalWallTimeCriterion(0.0)
+        @test_throws ArgumentError TotalWallTimeCriterion(Inf)
         @test_throws ArgumentError ESSCriterion(0.0)
         @test_throws ArgumentError ESSCriterion(1.0; check_every=0)
         @test_throws ArgumentError ESSCriterion(1.0; min_trace_length=1)
         @test_throws ArgumentError ESSCriterion(1.0; trace_selector=:invalid)
+        @test_throws ArgumentError OnlineESSCriterion(0.0)
+        @test_throws ArgumentError OnlineESSCriterion(1.0; check_every=0)
+        @test_throws ArgumentError OnlineESSCriterion(1.0; min_samples=1)
+        @test_throws ArgumentError OnlineESSCriterion(1.0; batch_size=0)
+        @test_throws ArgumentError OnlineESSCriterion(1.0; trace_selector=:invalid)
+        @test_throws ArgumentError AnyCriterion()
+        @test_throws ArgumentError AllCriteria()
 
         @test stop_after(; T=10.0) isa FixedTimeCriterion
         @test stop_after(; events=100) isa EventCountCriterion
         @test stop_after(; ess=50.0, events=100) isa AnyCriterion
+        @test stop_after(; wall_seconds=0.1) isa WallTimeCriterion
+        @test stop_after(; ess=50.0, ess_mode=:online) isa OnlineESSCriterion
+        @test stop_after(; ess=50.0, ess_mode=:online, events=100) isa AnyCriterion
+        @test_throws ArgumentError stop_after(; ess=50.0, ess_mode=:invalid)
         @test_throws ArgumentError stop_after()
     end
 
@@ -116,6 +129,61 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         )
         @test stats_ess.stop_reason == :reached_ess
         @test length(trace_ess) >= 5
+
+        Random.seed!(994)
+        ξ0, flow, model, alg = _stopping_setup()
+        _, stats_total_wall = pdmp_sample(
+            ξ0,
+            flow,
+            model,
+            alg,
+            0.0,
+            10_000.0,
+            0.0;
+            warmup_stop=FixedTimeCriterion(0.0),
+            stop=TotalWallTimeCriterion(1e-6),
+            progress=false
+        )
+        @test stats_total_wall.stop_reason == :reached_wall_time
+
+        Random.seed!(995)
+        ξ0, flow, model, alg = _stopping_setup()
+        trace_online, stats_online = pdmp_sample(
+            ξ0,
+            flow,
+            model,
+            alg,
+            0.0,
+            10_000.0,
+            0.0;
+            warmup_stop=FixedTimeCriterion(0.0),
+            stop=OnlineESSCriterion(0.1; check_every=1, min_samples=5, batch_size=3),
+            progress=false
+        )
+        @test stats_online.stop_reason == :reached_ess
+        @test length(trace_online) >= 5
+    end
+
+    @testset "TotalWallTimeCriterion unit" begin
+        c = TotalWallTimeCriterion(1.0)
+        @test c.start_ns[] == zero(UInt64)
+        @test !PDMPSamplers.is_satisfied(c, nothing, nothing, nothing)
+        PDMPSamplers.initialize!(c, nothing, nothing, nothing)
+        @test c.start_ns[] != zero(UInt64)
+        t1 = c.start_ns[]
+        PDMPSamplers.initialize!(c, nothing, nothing, nothing)
+        @test c.start_ns[] == t1
+
+        c_fast = TotalWallTimeCriterion(1e-9)
+        PDMPSamplers.initialize!(c_fast, nothing, nothing, nothing)
+        sleep(0.001)
+        @test PDMPSamplers.is_satisfied(c_fast, nothing, nothing, nothing)
+        @test PDMPSamplers.stop_reason(c_fast) == :reached_wall_time
+
+        c_copy = copy(c)
+        @test c !== c_copy
+        @test c.start_ns !== c_copy.start_ns
+        @test c.start_ns[] == c_copy.start_ns[]
     end
 
     @testset "Combinators and copies" begin
@@ -135,6 +203,18 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test crit !== crit_copy
         @test crit.criteria[1] !== crit_copy.criteria[1]
         @test crit.criteria[2] !== crit_copy.criteria[2]
+
+        crit_all = AllCriteria(WallTimeCriterion(1.0), ESSCriterion(10.0))
+        crit_all_copy = copy(crit_all)
+        @test crit_all !== crit_all_copy
+        @test crit_all.criteria[1] !== crit_all_copy.criteria[1]
+        @test crit_all.criteria[2] !== crit_all_copy.criteria[2]
+
+        crit_online = OnlineESSCriterion(10.0; check_every=5, min_samples=4, batch_size=2)
+        crit_online_copy = copy(crit_online)
+        @test crit_online !== crit_online_copy
+        @test crit_online.batch_sum !== crit_online_copy.batch_sum
+        @test crit_online.target_ess == crit_online_copy.target_ess
     end
 
     @testset "Warmup phase routing and multi-chain criterion isolation" begin
