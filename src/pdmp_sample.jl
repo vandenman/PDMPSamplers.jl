@@ -190,12 +190,11 @@ function _pdmp_sample_single(
     stop_criterion = isnothing(stop) ? FixedTimeCriterion(T) : stop
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
+    progress_stops = 300
     if progress
-        progress_stops = 300
         prg = ProgressMeter.Progress(progress_stops, dt=1)
         tstop = Ref(T / progress_stops)
     else
-        progress_stops = 300
         prg = nothing
         tstop = Ref(Inf)
     end

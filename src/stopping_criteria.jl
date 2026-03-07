@@ -137,7 +137,7 @@ function ESSCriterion(
     target = Float64(target_ess)
     isfinite(target) && target > 0 || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
     check_every > 0 || throw(ArgumentError("check_every must be > 0, got $check_every"))
-    min_trace_length > 1 || throw(ArgumentError("min_trace_length must be > 1, got $min_trace_length"))
+    min_trace_length >= 2 || throw(ArgumentError("min_trace_length must be >= 2, got $min_trace_length"))
     trace_selector in (:main, :warmup) || throw(ArgumentError("trace_selector must be :main or :warmup, got $trace_selector"))
     return ESSCriterion(target, check_every, min_trace_length, 0, false, trace_selector)
 end
@@ -205,7 +205,7 @@ function OnlineESSCriterion(
     target = Float64(target_ess)
     isfinite(target) && target > 0 || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
     check_every > 0 || throw(ArgumentError("check_every must be > 0, got $check_every"))
-    min_samples > 1 || throw(ArgumentError("min_samples must be > 1, got $min_samples"))
+    min_samples >= 2 || throw(ArgumentError("min_samples must be >= 2, got $min_samples"))
     batch_size > 0 || throw(ArgumentError("batch_size must be > 0, got $batch_size"))
     trace_selector in (:main, :warmup) || throw(ArgumentError("trace_selector must be :main or :warmup, got $trace_selector"))
     return OnlineESSCriterion(
@@ -296,7 +296,6 @@ function is_satisfied(c::OnlineESSCriterion, state, trace_manager, stats)
     c.satisfied && return true
     c.events_since_check >= c.check_every || return false
     c.n_samples >= c.min_samples || return false
-    c.n_samples >= 2 || return false
     c.n_batches >= 2 || return false
 
     sample_denom = c.n_samples - 1
@@ -346,28 +345,16 @@ function AllCriteria(criteria::StoppingCriterion...)
     return AllCriteria(criteria)
 end
 
-function initialize!(c::AnyCriterion, state, trace_manager, stats)
+const _ComposedCriterion = Union{AnyCriterion, AllCriteria}
+
+function initialize!(c::_ComposedCriterion, state, trace_manager, stats)
     for criterion in c.criteria
         initialize!(criterion, state, trace_manager, stats)
     end
     return nothing
 end
 
-function initialize!(c::AllCriteria, state, trace_manager, stats)
-    for criterion in c.criteria
-        initialize!(criterion, state, trace_manager, stats)
-    end
-    return nothing
-end
-
-function update!(c::AnyCriterion, state, trace_manager, stats, event_type)
-    for criterion in c.criteria
-        update!(criterion, state, trace_manager, stats, event_type)
-    end
-    return nothing
-end
-
-function update!(c::AllCriteria, state, trace_manager, stats, event_type)
+function update!(c::_ComposedCriterion, state, trace_manager, stats, event_type)
     for criterion in c.criteria
         update!(criterion, state, trace_manager, stats, event_type)
     end
@@ -390,9 +377,7 @@ end
 
 function stop_reason(c::AnyCriterion, state, trace_manager, stats)
     for criterion in c.criteria
-        if is_satisfied(criterion, state, trace_manager, stats)
-            return stop_reason(criterion, state, trace_manager, stats)
-        end
+        is_satisfied(criterion, state, trace_manager, stats) && return stop_reason(criterion)
     end
     return :none
 end
