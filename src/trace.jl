@@ -248,8 +248,14 @@ end
 get_warmup_trace(mgr::TraceManager) = mgr.warmup_trace
 get_main_trace(mgr::TraceManager)   = mgr.main_trace
 
-function record_event!(mgr::TraceManager, state, flow, args)
-    trace = state.t[] < mgr.t_warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
+function record_event!(mgr::TraceManager, state, flow, args; phase::Symbol=:auto)
+    trace = if phase === :warmup
+        get_warmup_trace(mgr)
+    elseif phase === :main
+        get_main_trace(mgr)
+    else
+        state.t[] < mgr.t_warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
+    end
     push_trace!(trace, state, flow, args)
     return nothing
 end

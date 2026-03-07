@@ -483,6 +483,8 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
 
     xt_next = similar(xt)
     θt_next = similar(θt)
+    xt_at_seg = similar(xt)
+    θt_at_seg = similar(θt)
 
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
@@ -497,8 +499,8 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
 
             if chunk_end > seg_start
                 elapsed = seg_start - t₀
-                xt_at_seg = copy(xt)
-                θt_at_seg = copy(θt)
+                copyto!(xt_at_seg, xt)
+                copyto!(θt_at_seg, θt)
                 if elapsed > 0
                     move_forward_time!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow)
                 end

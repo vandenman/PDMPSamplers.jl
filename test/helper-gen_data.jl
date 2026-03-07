@@ -74,9 +74,9 @@ end
 # MvTDist target
 # ──────────────────────────────────────────────────────────────────────────────
 
-struct MvTDistTarget{T<:Distributions.MvTDist}
+struct MvTDistTarget{T<:Distributions.MvTDist, S<:AbstractMatrix{Float64}}
     D::T
-    Σ_inv::Symmetric{Float64, Matrix{Float64}}
+    Σ_inv::Symmetric{Float64, S}
     μ::Vector{Float64}
     ν::Float64
     d::Int
