@@ -37,19 +37,28 @@ stop_reason(::FixedTimeCriterion) = :reached_time
 """
     EventCountCriterion(max_events)
 
-Stop when total event proposals reach `max_events`.
+Stop when `max_events` events have occurred in the current phase.
+Counts accepted reflections, refreshments, and sticky events from `StatisticCounter`.
+The count is phase-local: a baseline is recorded at `initialize!`, and only events
+since that point count toward the budget.
 """
-struct EventCountCriterion <: StoppingCriterion
-    max_events::Int
+mutable struct EventCountCriterion <: StoppingCriterion
+    const max_events::Int
+    baseline::Int
     function EventCountCriterion(max_events::Integer)
         max_events > 0 || throw(ArgumentError("max_events must be > 0, got $max_events"))
-        return new(max_events)
+        return new(max_events, 0)
     end
+end
+
+function initialize!(c::EventCountCriterion, state, trace_manager, stats)
+    c.baseline = stats.reflections_events + stats.refreshment_events + stats.sticky_events
+    return nothing
 end
 
 function is_satisfied(c::EventCountCriterion, state, trace_manager, stats)
     total = stats.reflections_events + stats.refreshment_events + stats.sticky_events
-    return total >= c.max_events
+    return (total - c.baseline) >= c.max_events
 end
 
 stop_reason(::EventCountCriterion) = :reached_event_budget
@@ -76,6 +85,7 @@ function initialize!(c::WallTimeCriterion, state, trace_manager, stats)
 end
 
 function is_satisfied(c::WallTimeCriterion, state, trace_manager, stats)
+    c.start_ns == zero(UInt64) && return false
     elapsed = (time_ns() - c.start_ns) / 1e9
     return elapsed >= c.max_seconds
 end
@@ -118,6 +128,8 @@ stop_reason(::TotalWallTimeCriterion) = :reached_wall_time
     ESSCriterion(target_ess; check_every=500, min_trace_length=10, trace_selector=:main)
 
 Stop when the minimum coordinate ESS reaches `target_ess`.
+Computes `ess(trace)` (O(n) in trace length) every `check_every` events.
+For long runs, prefer `OnlineESSCriterion` which uses O(1)-per-event online estimation.
 """
 mutable struct ESSCriterion <: StoppingCriterion
     target_ess::Float64
@@ -172,9 +184,13 @@ end
 stop_reason(::ESSCriterion) = :reached_ess
 
 """
-    OnlineESSCriterion(target_ess; check_every=500, min_samples=10, batch_size=50, trace_selector=:main)
+    OnlineESSCriterion(target_ess; check_every=500, min_samples=10, batch_size=50)
 
 Stop when a resumable online ESS estimate reaches `target_ess`.
+Uses Welford-based online variance with batch means, consuming O(1) per event.
+The ESS estimate is based on unweighted skeleton positions (not time-weighted path integrals),
+which is an approximation for continuous-time PDMP trajectories. The criterion is inherently
+phase-local: it accumulates statistics only for events in the phase it is attached to.
 """
 mutable struct OnlineESSCriterion <: StoppingCriterion
     target_ess::Float64
@@ -186,7 +202,6 @@ mutable struct OnlineESSCriterion <: StoppingCriterion
     n_samples::Int
     batch_fill::Int
     n_batches::Int
-    trace_selector::Symbol
     batch_sum::Vector{Float64}
     mean_samples::Vector{Float64}
     m2_samples::Vector{Float64}
@@ -199,15 +214,13 @@ function OnlineESSCriterion(
     target_ess::Real;
     check_every::Integer=500,
     min_samples::Integer=10,
-    batch_size::Integer=50,
-    trace_selector::Symbol=:main
+    batch_size::Integer=50
 )
     target = Float64(target_ess)
     isfinite(target) && target > 0 || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
     check_every > 0 || throw(ArgumentError("check_every must be > 0, got $check_every"))
     min_samples >= 2 || throw(ArgumentError("min_samples must be >= 2, got $min_samples"))
     batch_size > 0 || throw(ArgumentError("batch_size must be > 0, got $batch_size"))
-    trace_selector in (:main, :warmup) || throw(ArgumentError("trace_selector must be :main or :warmup, got $trace_selector"))
     return OnlineESSCriterion(
         target,
         Int(check_every),
@@ -218,7 +231,6 @@ function OnlineESSCriterion(
         0,
         0,
         0,
-        trace_selector,
         Float64[],
         Float64[],
         Float64[],
@@ -330,6 +342,7 @@ end
     AllCriteria(criteria...)
 
 Stop when all child criteria are satisfied.
+`stop_reason` returns `:all_criteria_satisfied` without forwarding to individual criteria.
 """
 struct AllCriteria{Cs<:Tuple} <: StoppingCriterion
     criteria::Cs
@@ -384,6 +397,8 @@ end
 
 stop_reason(::AllCriteria) = :all_criteria_satisfied
 
+# Value copy: start_ns is overwritten by initialize! at the start of each phase,
+# unlike TotalWallTimeCriterion which uses a Ref to share a single global start time.
 function Base.copy(c::WallTimeCriterion)
     return WallTimeCriterion(c.max_seconds, c.start_ns)
 end
@@ -402,7 +417,6 @@ function Base.copy(c::OnlineESSCriterion)
         check_every=c.check_every,
         min_samples=c.min_samples,
         batch_size=c.batch_size,
-        trace_selector=c.trace_selector,
     )
     copied.events_since_check = c.events_since_check
     copied.satisfied = c.satisfied
@@ -419,7 +433,11 @@ function Base.copy(c::OnlineESSCriterion)
 end
 
 Base.copy(c::FixedTimeCriterion) = c
-Base.copy(c::EventCountCriterion) = c
+function Base.copy(c::EventCountCriterion)
+    ec = EventCountCriterion(c.max_events)
+    ec.baseline = c.baseline
+    return ec
+end
 
 function Base.copy(c::AnyCriterion)
     return AnyCriterion(map(copy, c.criteria)...)
@@ -467,7 +485,6 @@ function stop_after(
                 check_every=ess_check_every,
                 min_samples=ess_min_trace_length,
                 batch_size=ess_batch_size,
-                trace_selector=ess_trace_selector,
             )
         else
             throw(ArgumentError("ess_mode must be :exact or :online, got $ess_mode"))

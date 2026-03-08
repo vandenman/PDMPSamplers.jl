@@ -352,8 +352,6 @@ function neg_vhv(t::LogisticRegressionTarget, β::AbstractVector, v::AbstractVec
     t.p .= t.p .* (1.0 .- t.p)
     mul!(t.η, X, v)              # η = Xv
     t.η .*= t.p                  # η = weights .* Xv
-    # mul!(t.buffer, X', t.η)      # buffer = X'(weights .* Xv)
-    # result += dot(w, t.buffer)   # w'X'(weights .* Xv) = (Xw)'diag(weights)(Xv)
     result += dot(t.η, X, w)
     return result
 end

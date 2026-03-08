@@ -1,14 +1,14 @@
 # --- 1. Infrastructure ---
 struct NoAdaptation <: AbstractAdapter end
-adapt!(::NoAdaptation, args...) = nothing
+adapt!(::NoAdaptation, args...; phase::Symbol=:warmup) = nothing
 
 struct SequenceAdapter{T} <: AbstractAdapter
     adapters::T
 end
 
-function adapt!(seq::SequenceAdapter, state, flow, grad, trace_mgr)
+function adapt!(seq::SequenceAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup)
     for a in seq.adapters
-        adapt!(a, state, flow, grad, trace_mgr)
+        adapt!(a, state, flow, grad, trace_mgr; phase)
     end
 end
 
@@ -23,9 +23,8 @@ mutable struct PreconditionerAdapter <: AbstractAdapter
     scheme::Symbol
 end
 
-function adapt!(ad::PreconditionerAdapter, state, flow, grad, trace_mgr)
-    # Note: We use the raw 'flow' here. Dispatch on update_preconditioner! handles the check.
-    if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= ad.dt)
+function adapt!(ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup)
+    if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
         update_preconditioner!(flow, get_warmup_trace(trace_mgr), state, iszero(ad.no_updates_done))
         ad.last_update = state.t[]
         ad.no_updates_done += 1
@@ -36,7 +35,7 @@ end
 struct GradientResampler <: AbstractAdapter end
 
 # Dispatch specifically on SubsampledGradient for safety, or generic if 'resample_indices!' is standard
-adapt!(::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr) = grad.resample_indices!(grad.nsub)
+adapt!(::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup) = grad.resample_indices!(grad.nsub)
 
 # C. Anchor Updating (Control Variates)
 mutable struct AnchorUpdater <: AbstractAdapter
@@ -44,8 +43,8 @@ mutable struct AnchorUpdater <: AbstractAdapter
     last_update::Float64
 end
 
-function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr)
-    if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= ad.dt)
+function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup)
+    if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
         grad.update_anchor!(get_warmup_trace(trace_mgr))
         ad.last_update = state.t[]
     end
@@ -399,15 +398,15 @@ function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Sym
     BoomerangAdapter(base_dt, t0, 0, scheme, stats, false)
 end
 
-function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr)
+function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup)
     ad.did_update = false
 
-    if state.t[] < trace_mgr.t_warmup
+    if phase === :warmup
         welford_update!(ad.stats, state.ξ.x, state.t[])
     end
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
-    if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= dt_now)
+    if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
         update_boomerang!(flow, ad.stats, Val(ad.scheme))
         refresh_velocity!(state, flow)
         # After flow.μ changes, reset prev_x so next segment starts fresh
@@ -419,12 +418,12 @@ function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::Muta
     end
 end
 
-function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::MutableBoomerang, grad, trace_mgr)
+function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup)
     update_stats!(ad.stats, trace_mgr)
     ad.did_update = false
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
-    if state.t[] < trace_mgr.t_warmup && (state.t[] - ad.last_update >= dt_now)
+    if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
         update_boomerang!(flow, ad.stats, Val(ad.scheme))
         refresh_velocity!(state, flow)
         ad.last_update = state.t[]
@@ -434,7 +433,7 @@ function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::Mutab
 end
 
 # Fallback: if the flow is not MutableBoomerang, do nothing
-adapt!(::BoomerangAdapter, state, flow, grad, trace_mgr) = nothing
+adapt!(::BoomerangAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup) = nothing
 
 # --- Query whether dynamics adaptation occurred (for sticky time invalidation) ---
 did_dynamics_adapt(::AbstractAdapter) = false

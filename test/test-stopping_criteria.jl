@@ -34,7 +34,6 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test_throws ArgumentError OnlineESSCriterion(1.0; check_every=0)
         @test_throws ArgumentError OnlineESSCriterion(1.0; min_samples=1)
         @test_throws ArgumentError OnlineESSCriterion(1.0; batch_size=0)
-        @test_throws ArgumentError OnlineESSCriterion(1.0; trace_selector=:invalid)
         @test_throws ArgumentError AnyCriterion()
         @test_throws ArgumentError AllCriteria()
 
@@ -164,6 +163,12 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test length(trace_online) >= 5
     end
 
+    @testset "WallTimeCriterion uninitialized guard" begin
+        c = WallTimeCriterion(1.0)
+        @test c.start_ns == zero(UInt64)
+        @test !PDMPSamplers.is_satisfied(c, nothing, nothing, nothing)
+    end
+
     @testset "TotalWallTimeCriterion unit" begin
         c = TotalWallTimeCriterion(1.0)
         @test c.start_ns[] == zero(UInt64)
@@ -215,6 +220,35 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test crit_online !== crit_online_copy
         @test crit_online.batch_sum !== crit_online_copy.batch_sum
         @test crit_online.target_ess == crit_online_copy.target_ess
+    end
+
+    @testset "EventCountCriterion is phase-local" begin
+        Random.seed!(1234)
+        ξ0, flow, model, alg = _stopping_setup()
+        trace, stats = pdmp_sample(
+            ξ0, flow, model, alg,
+            0.0, 10_000.0, 0.0;
+            warmup_stop=EventCountCriterion(20),
+            stop=EventCountCriterion(10),
+            progress=false
+        )
+        total = stats.reflections_events + stats.refreshment_events + stats.sticky_events
+        @test total >= 30
+    end
+
+    @testset "stop_after online ESS + events end-to-end" begin
+        Random.seed!(1235)
+        ξ0, flow, model, alg = _stopping_setup()
+        criterion = stop_after(; ess=0.1, ess_mode=:online, events=50, ess_batch_size=3)
+        trace, stats = pdmp_sample(
+            ξ0, flow, model, alg,
+            0.0, 10_000.0, 0.0;
+            warmup_stop=FixedTimeCriterion(0.0),
+            stop=criterion,
+            progress=false
+        )
+        @test stats.stop_reason in (:reached_ess, :reached_event_budget)
+        @test length(trace) > 1
     end
 
     @testset "Warmup phase routing and multi-chain criterion isolation" begin

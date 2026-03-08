@@ -5,7 +5,7 @@ pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) 
 """
     pdmp_sample(ξ₀, flow, model, alg, t₀=0.0, T=10_000, t_warmup=0.0;
                 stop=nothing, warmup_stop=nothing, n_chains=1, threaded=false,
-                progress=true, adapter=nothing)
+                progress=true, adapter=NoAdaptation())
 
 Run PDMP sampling with optional stopping criteria for warmup and main sampling phases.
 
@@ -15,7 +15,9 @@ Provided criteria take precedence over time arguments.
 
 Warmup runs first with adaptation enabled and writes to the warmup trace.
 Main sampling runs second with adaptation disabled and writes to the main trace.
-Criteria are initialized per phase, so mutable criteria (e.g. wall-time/ESS counters) are phase-local.
+Criteria are initialized per phase, so mutable criteria (e.g. `WallTimeCriterion`, ESS counters)
+are phase-local. An exception is `TotalWallTimeCriterion`, whose timer starts once globally
+and is not re-initialized per phase.
 """
 
 function pdmp_sample(
@@ -26,7 +28,7 @@ function pdmp_sample(
     warmup_stop::Union{StoppingCriterion,Nothing}=nothing,
     n_chains::Int=1, threaded::Bool=false,
     progress::Bool=true,
-    adapter::Union{AbstractAdapter,Nothing}=nothing
+    adapter::AbstractAdapter=NoAdaptation()
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
 
@@ -99,7 +101,7 @@ function _update_progress!(progress::Bool, prg, tstop::Base.RefValue{Float64}, T
 end
 
 function _run_phase!(
-    criterion::C,
+    criterion::StoppingCriterion,
     state::AbstractPDMPState,
     model_::PDMPModel,
     flow::ContinuousDynamics,
@@ -109,13 +111,13 @@ function _run_phase!(
     stats::StatisticCounter,
     health::HealthMonitor;
     phase::Symbol,
-    adapter::Union{AbstractAdapter,Nothing}=nothing,
+    adapter::AbstractAdapter=NoAdaptation(),
     progress::Bool=false,
     prg=nothing,
     tstop::Base.RefValue{Float64}=Ref(Inf),
     T::Float64=0.0,
     progress_stops::Int=300
-) where {C<:StoppingCriterion}
+)
     initialize!(criterion, state, trace_manager, stats)
 
     while true
@@ -127,13 +129,11 @@ function _run_phase!(
         event_type = _step!(state, model_, flow, alg_, cache, stats, trace_manager; phase)
         update!(criterion, state, trace_manager, stats, event_type)
 
-        if !isnothing(adapter)
-            adapt!(adapter, state, flow, model_.grad, trace_manager)
-            if did_dynamics_adapt(adapter)
-                _reset_inner_grid!(alg_)
-                if alg_ isa StickyLoopState
-                    update_all_stick_times!(alg_, state, flow)
-                end
+        adapt!(adapter, state, flow, model_.grad, trace_manager; phase)
+        if did_dynamics_adapt(adapter)
+            _reset_inner_grid!(alg_)
+            if alg_ isa StickyLoopState
+                update_all_stick_times!(alg_, state, flow)
             end
         end
 
@@ -147,7 +147,7 @@ function _pdmp_sample_single(
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
     progress::Bool=true,
-    adapter::Union{AbstractAdapter,Nothing}=nothing,
+    adapter::AbstractAdapter=NoAdaptation(),
     stop::Union{StoppingCriterion,Nothing}=nothing,
     warmup_stop::Union{StoppingCriterion,Nothing}=nothing
 )
@@ -184,7 +184,7 @@ function _pdmp_sample_single(
     t_warmup_abs = t₀ + t_warmup
     trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
-    adapter = adapter === nothing ? default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
+    adapter = adapter isa NoAdaptation ? default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
 
     warmup_criterion = isnothing(warmup_stop) ? FixedTimeCriterion(t_warmup_abs) : warmup_stop
     stop_criterion = isnothing(stop) ? FixedTimeCriterion(T) : stop
