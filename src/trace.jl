@@ -240,6 +240,10 @@ struct TraceManager{T}
 end
 function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics, alg::PoissonTimeStrategy, t_warmup::Real)
     TT = _trace_type(flow, alg)
+    _build_trace_manager(TT, state, flow, t_warmup)
+end
+
+function _build_trace_manager(::Type{TT}, state::AbstractPDMPState, flow::ContinuousDynamics, t_warmup::Real) where TT
     main_trace = make_empty_trace(TT, state, flow)
     warmup_trace = make_empty_trace(TT, state, flow)
     TraceManager(main_trace, warmup_trace, float(t_warmup))
@@ -248,8 +252,14 @@ end
 get_warmup_trace(mgr::TraceManager) = mgr.warmup_trace
 get_main_trace(mgr::TraceManager)   = mgr.main_trace
 
-function record_event!(mgr::TraceManager, state, flow, args)
-    trace = state.t[] < mgr.t_warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
+function record_event!(mgr::TraceManager, state, flow, args; phase::Symbol=:auto)
+    trace = if phase === :warmup
+        get_warmup_trace(mgr)
+    elseif phase === :main
+        get_main_trace(mgr)
+    else
+        state.t[] < mgr.t_warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
+    end
     push_trace!(trace, state, flow, args)
     return nothing
 end

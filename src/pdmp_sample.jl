@@ -2,18 +2,38 @@ pdmp_sample(d::Integer, args...; kwargs...) = pdmp_sample(randn(d), args...; kwa
 pdmp_sample(x₀::AbstractVector, θ₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; kwargs...)
 pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, initialize_velocity(flow, length(x₀))), flow, args...; kwargs...)
 
+"""
+    pdmp_sample(ξ₀, flow, model, alg, t₀=0.0, T=10_000, t_warmup=0.0;
+                stop=nothing, warmup_stop=nothing, n_chains=1, threaded=false,
+                progress=true, adapter=NoAdaptation())
+
+Run PDMP sampling with optional stopping criteria for warmup and main sampling phases.
+
+If `warmup_stop === nothing`, warmup uses `FixedTimeCriterion(t₀ + t_warmup)`.
+If `stop === nothing`, sampling uses `FixedTimeCriterion(T)`.
+Provided criteria take precedence over time arguments.
+
+Warmup runs first with adaptation enabled and writes to the warmup trace.
+Main sampling runs second with adaptation disabled and writes to the main trace.
+Criteria are initialized per phase, so mutable criteria (e.g. `WallTimeCriterion`, ESS counters)
+are phase-local. An exception is `TotalWallTimeCriterion`, whose timer starts once globally
+and is not re-initialized per phase.
+"""
+
 function pdmp_sample(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
+    stop::Union{StoppingCriterion,Nothing}=nothing,
+    warmup_stop::Union{StoppingCriterion,Nothing}=nothing,
     n_chains::Int=1, threaded::Bool=false,
     progress::Bool=true,
-    adapter::Union{AbstractAdapter,Nothing}=nothing
+    adapter::AbstractAdapter=NoAdaptation()
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
 
     if n_chains == 1
-        trace, stats = _pdmp_sample_single(ξ₀, flow, model, alg, t₀, T, t_warmup; progress, adapter)
+        trace, stats = _pdmp_sample_single(ξ₀, flow, model, alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop)
         return PDMPChains([trace], [stats])
     end
 
@@ -21,14 +41,18 @@ function pdmp_sample(
         tasks = map(1:n_chains) do _
             Threads.@spawn begin
                 model_i = _copy_model(model)
-                _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter)
+                stop_i = _maybe_copy_criterion(stop)
+                warmup_stop_i = _maybe_copy_criterion(warmup_stop)
+                _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
             end
         end
         results = fetch.(tasks)
     else
         results = map(1:n_chains) do _
             model_i = _copy_model(model)
-            _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter)
+            stop_i = _maybe_copy_criterion(stop)
+            warmup_stop_i = _maybe_copy_criterion(warmup_stop)
+            _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
         end
     end
 
@@ -36,6 +60,9 @@ function pdmp_sample(
     all_stats = [r[2] for r in results]
     return PDMPChains(traces, all_stats)
 end
+
+_maybe_copy_criterion(::Nothing) = nothing
+_maybe_copy_criterion(c::StoppingCriterion) = copy(c)
 
 function _copy_model(model::PDMPModel)
     grad_new = copy(model.grad)
@@ -45,12 +72,84 @@ function _copy_model(model::PDMPModel)
 end
 
 # the inner workhorse that runs a single chain
+function _step!(
+    state::AbstractPDMPState,
+    model_::PDMPModel,
+    flow::ContinuousDynamics,
+    alg_::PoissonTimeStrategy,
+    cache::NamedTuple,
+    stats::StatisticCounter,
+    trace_manager::TraceManager;
+    phase::Symbol
+)
+    τ, event_type, meta = next_event_time(model_, flow, alg_, state, cache, stats)
+
+    @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+
+    needs_saving, saving_args = handle_event!(τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+    needs_saving && record_event!(trace_manager, state, flow, saving_args; phase)
+
+    return event_type
+end
+
+function _update_progress!(progress::Bool, prg, tstop::Base.RefValue{Float64}, T::Float64, progress_stops::Int, state::AbstractPDMPState)
+    if progress && state.t[] > tstop[]
+        tstop[] += T / progress_stops
+        ProgressMeter.next!(prg)
+    end
+    return nothing
+end
+
+function _run_phase!(
+    criterion::StoppingCriterion,
+    state::AbstractPDMPState,
+    model_::PDMPModel,
+    flow::ContinuousDynamics,
+    alg_::PoissonTimeStrategy,
+    cache::NamedTuple,
+    trace_manager::TraceManager,
+    stats::StatisticCounter,
+    health::HealthMonitor;
+    phase::Symbol,
+    adapter::AbstractAdapter=NoAdaptation(),
+    progress::Bool=false,
+    prg=nothing,
+    tstop::Base.RefValue{Float64}=Ref(Inf),
+    T::Float64=0.0,
+    progress_stops::Int=300
+)
+    initialize!(criterion, state, trace_manager, stats)
+
+    while true
+        if is_satisfied(criterion, state, trace_manager, stats)
+            stats.stop_reason = stop_reason(criterion, state, trace_manager, stats)
+            return nothing
+        end
+
+        event_type = _step!(state, model_, flow, alg_, cache, stats, trace_manager; phase)
+        update!(criterion, state, trace_manager, stats, event_type)
+
+        adapt!(adapter, state, flow, model_.grad, trace_manager; phase)
+        if did_dynamics_adapt(adapter)
+            _reset_inner_grid!(alg_)
+            if alg_ isa StickyLoopState
+                update_all_stick_times!(alg_, state, flow)
+            end
+        end
+
+        check_health!(health, stats)
+        _update_progress!(progress, prg, tstop, T, progress_stops, state)
+    end
+end
+
 function _pdmp_sample_single(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
     progress::Bool=true,
-    adapter::Union{AbstractAdapter,Nothing}=nothing
+    adapter::AbstractAdapter=NoAdaptation(),
+    stop::Union{StoppingCriterion,Nothing}=nothing,
+    warmup_stop::Union{StoppingCriterion,Nothing}=nothing
 )
 
     # TODO: it's possible to sample to have t_warmup < T...
@@ -72,7 +171,9 @@ function _pdmp_sample_single(
     # it = Iterators.drop(aa, 3)
     # first(it)
 
-    t_warmup < (T - t₀) || throw(ArgumentError("t_warmup ($t_warmup) is larger than T - t₀ ($T - $t₀ = $(T - t₀)), which implies storing nothing at all. This is probably an error."))
+    if isnothing(warmup_stop)
+        t_warmup < (T - t₀) || throw(ArgumentError("t_warmup ($t_warmup) is larger than T - t₀ ($T - $t₀ = $(T - t₀)), which implies storing nothing at all. This is probably an error."))
+    end
 
     t_start = time_ns()
 
@@ -83,44 +184,58 @@ function _pdmp_sample_single(
     t_warmup_abs = t₀ + t_warmup
     trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
-    adapter = adapter === nothing ? default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
+    adapter = adapter isa NoAdaptation ? default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
+
+    warmup_criterion = isnothing(warmup_stop) ? FixedTimeCriterion(t_warmup_abs) : warmup_stop
+    stop_criterion = isnothing(stop) ? FixedTimeCriterion(T) : stop
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
+    progress_stops = 300
     if progress
-        progress_stops = 300
         prg = ProgressMeter.Progress(progress_stops, dt=1)
-        tstop = T / progress_stops
+        tstop = Ref(T / progress_stops)
+    else
+        prg = nothing
+        tstop = Ref(Inf)
     end
 
+    _run_phase!(
+        warmup_criterion,
+        state,
+        model_,
+        flow,
+        alg_,
+        cache,
+        trace_manager,
+        stats,
+        health;
+        phase=:warmup,
+        adapter,
+        progress,
+        prg,
+        tstop,
+        T=Float64(T),
+        progress_stops
+    )
 
-    while state.t[] < T # !isdone(state, trace, stopping_criterion)
-
-        τ, event_type, meta = next_event_time(model_, flow, alg_, state, cache, stats)
-
-        @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
-
-        needs_saving, saving_args = handle_event!(τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
-
-        needs_saving && record_event!(trace_manager, state, flow, saving_args)
-
-        adapt!(adapter, state, flow, model_.grad, trace_manager)
-        if did_dynamics_adapt(adapter)
-            # After the dynamics (μ, Γ) change, the rate landscape shifts and
-            # the grid thinning's t_max (which may have grown during the old
-            # rate regime) can be vastly too large.  Reset it so the grid
-            # re-adapts to the new rate scale.
-            _reset_inner_grid!(alg_)
-            if alg_ isa StickyLoopState
-                update_all_stick_times!(alg_, state, flow)
-            end
-        end
-        check_health!(health, stats)
-
-        if progress && state.t[] > tstop
-            tstop += T / progress_stops
-            ProgressMeter.next!(prg)
-        end
-    end
+    _run_phase!(
+        stop_criterion,
+        state,
+        model_,
+        flow,
+        alg_,
+        cache,
+        trace_manager,
+        stats,
+        health;
+        phase=:main,
+        adapter,
+        progress,
+        prg,
+        tstop,
+        T=Float64(T),
+        progress_stops
+    )
 
     stats.elapsed_time = (time_ns() - t_start) / 1e9
 
@@ -217,7 +332,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
                 saving_args = reflect!(state, ∇ϕx, flow, cache)
             end
             needs_saving = true
-            alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+            (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
             # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
         else
 
@@ -236,7 +351,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
                 # @show "after reflect", state
                 needs_saving = true
 
-                alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+                (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
                 # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
             else
                 # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
@@ -259,13 +374,13 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
 
     elseif event_type == :sticky
 
         stats.sticky_events += 1
         i = meta.i
-        stick_or_unstick!(state, flow, alg, i)
+        stick_or_unstick!(state::StickyPDMPState, flow, alg, i)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true
         if isfactorized(flow)
@@ -277,7 +392,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
         # for now only when horizon is reached.
         stats.last_rejected = true
     end

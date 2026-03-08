@@ -10,7 +10,7 @@
 
 struct MvNormalTarget{T<:Distributions.AbstractMvNormal}
     D::T
-    Σ_inv::Matrix{Float64}
+    Σ_inv::Symmetric{Float64, Matrix{Float64}}#Matrix{Float64}
     potential::Vector{Float64}   # Σ_inv * μ
     buffer::Vector{Float64}
 end
@@ -42,7 +42,7 @@ function gen_data(::Type{Distributions.MvNormal}, d, η,
     potential = Σ_inv * μ
     buffer = similar(potential)
     D = MvNormal(μ, Σ)
-    return MvNormalTarget(D, Matrix(Σ_inv), potential, buffer)
+    return MvNormalTarget(D, Σ_inv, potential, buffer)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -74,9 +74,9 @@ end
 # MvTDist target
 # ──────────────────────────────────────────────────────────────────────────────
 
-struct MvTDistTarget{T<:Distributions.MvTDist}
+struct MvTDistTarget{T<:Distributions.MvTDist, S<:AbstractMatrix{Float64}}
     D::T
-    Σ_inv::Matrix{Float64}
+    Σ_inv::Symmetric{Float64, S}
     μ::Vector{Float64}
     ν::Float64
     d::Int
@@ -141,7 +141,7 @@ function gen_data(::Type{Distributions.MvTDist}, d, η,
 
     D = MvTDist(ν, μ, Σ)
 
-    Σ_inv = Matrix(inv(Σ))
+    Σ_inv = Symmetric(inv(Σ))
     scalar_coeff = (ν + d) / ν
 
     x_centered = similar(μ)
@@ -187,7 +187,7 @@ struct GaussianMeanTarget{T<:MvNormal}
     μ0::Vector{Float64}
     x̄::Vector{Float64}
     n::Int
-    Σ_tot_inv::Matrix{Float64}
+    Σ_tot_inv::Symmetric{Float64, Matrix{Float64}}
     # work buffers
     buffer::Vector{Float64}
     x̄_sub::Vector{Float64}
@@ -232,7 +232,7 @@ function gen_data(::Type{GaussianMeanModel}, d, n, μ = zeros(d), Σ = I(d))
     obj = GaussianMeanModel(n, μ, Σ)
     D = analytic_posterior(obj)
 
-    Λ = inv(cov(obj.D)) # could do this in a safer way
+    Λ = Symmetric(inv(cov(obj.D))) # could do this in a safer way
     Λ0 = inv(I)
     μ0 = obj.prior_μ
     x̄ = vec(mean(obj.X, dims=1))
@@ -241,7 +241,7 @@ function gen_data(::Type{GaussianMeanModel}, d, n, μ = zeros(d), Σ = I(d))
     Σ_tot_inv = Λ0 + n .* Λ
     indices = Vector{Int}(undef, 0)
 
-    return GaussianMeanTarget(D, obj, Matrix(Λ), Λ0, μ0, x̄, n, Matrix(Σ_tot_inv),
+    return GaussianMeanTarget(D, obj, Λ, Λ0, μ0, x̄, n, Σ_tot_inv,
                               buffer, x̄_sub, indices)
 end
 
@@ -338,20 +338,21 @@ function neg_hvp!(t::LogisticRegressionTarget, out::AbstractVector, β::Abstract
 
     mul!(t.η, X, v)          # η <- X * v
     t.η .*= t.p              # η <- w .* (X * v)
+    # could be one mul!(out, X', t.η, true, true) ?
     mul!(t.buffer, X', t.η)
     out .+= t.buffer
 end
 
 function neg_vhv(t::LogisticRegressionTarget, β::AbstractVector, v::AbstractVector, w::AbstractVector)
     X, Λ0 = t.obj.X, t.Λ0
-    result = dot(w, Λ0, v)
+    result = dot(w, Symmetric(Λ0), v) # NOTE: more optimizable if Λ0 is diagonal, perhaps t should be parametric in the type of Λ0
     mul!(t.η, X, β)
+    # these two lines could be fused and optimized further, but let's keep it simple for now
     t.p .= LogExpFunctions.logistic.(t.η)
     t.p .= t.p .* (1.0 .- t.p)
     mul!(t.η, X, v)              # η = Xv
     t.η .*= t.p                  # η = weights .* Xv
-    mul!(t.buffer, X', t.η)      # buffer = X'(weights .* Xv)
-    result += dot(w, t.buffer)   # w'X'(weights .* Xv) = (Xw)'diag(weights)(Xv)
+    result += dot(t.η, X, w)
     return result
 end
 

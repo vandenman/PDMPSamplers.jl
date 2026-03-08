@@ -47,7 +47,7 @@ using the grid-based method from Andral & Kamatani (2024).
 """
 function construct_upper_bound(ξ::SkeletonPoint, flow, ∇U!::Function, t_max::Real, N::Int)
 
-    pcb = PiecewiseConstantBound{eltype(ξ.x)}(Vector{eltype(ξ.x)}(undef, N + 1), Vector{eltype(ξ.x)}(undef, N))
+    pcb = PiecewiseConstantBound(Vector{eltype(ξ.x)}(undef, N + 1), Vector{eltype(ξ.x)}(undef, N))
     recompute_time_grid!(pcb, t_max, N)
     construct_upper_bound!(pcb, ξ, flow, ∇U!)
     return pcb
@@ -414,6 +414,11 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         N_min = max(N_min, 15)
     end
     est = _default_early_stop(flow, strat.early_stop_threshold)
+    _build_grid_adaptive_state(strat, state, N_base, N_min, est)
+end
+
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
+    T = typeof(strat.t_max)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         Base.RefValue{Int}(N_base),

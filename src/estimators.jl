@@ -353,6 +353,10 @@ Cache the per-segment data `(x0j, θ0j, τ)` needed by `_cdf_boomerang_precomput
 for coordinate `j`. Precomputing avoids re-parsing the trace on every bisection step,
 reducing the O(N) CDF cost to a tight loop over a plain `Vector{NTuple}`.
 """
+function _precompute_boomerang_segments(trace::FactorizedTrace, j::Integer)
+    return _precompute_boomerang_segments(PDMPTrace(trace), j)
+end
+
 function _precompute_boomerang_segments(trace::PDMPTrace, j::Integer)
     base = _underlying_flow(trace.flow)
     μj = Float64(base.μ[j])
@@ -483,6 +487,8 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
 
     xt_next = similar(xt)
     θt_next = similar(θt)
+    xt_at_seg = similar(xt)
+    θt_at_seg = similar(θt)
 
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
@@ -497,8 +503,8 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
 
             if chunk_end > seg_start
                 elapsed = seg_start - t₀
-                xt_at_seg = copy(xt)
-                θt_at_seg = copy(θt)
+                copyto!(xt_at_seg, xt)
+                copyto!(θt_at_seg, θt)
                 if elapsed > 0
                     move_forward_time!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow)
                 end

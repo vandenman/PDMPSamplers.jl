@@ -63,6 +63,7 @@ include("transforms.jl")
 include("estimators.jl")
 include("transformed_estimators.jl")
 include("adaptation.jl")
+include("stopping_criteria.jl")
 
 include("pdmp_sample.jl")
 include("chains.jl")
@@ -142,6 +143,16 @@ export
 
     # Main interface
     pdmp_sample,
+    StoppingCriterion,
+    FixedTimeCriterion,
+    EventCountCriterion,
+    WallTimeCriterion,
+    TotalWallTimeCriterion,
+    ESSCriterion,
+    OnlineESSCriterion,
+    AnyCriterion,
+    AllCriteria,
+    stop_after,
     # initialize_velocity,
     # refresh_velocity!,
     # move_forward_time!,
