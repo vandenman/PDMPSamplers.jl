@@ -332,7 +332,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
                 saving_args = reflect!(state, ∇ϕx, flow, cache)
             end
             needs_saving = true
-            alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+            (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
             # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
         else
 
@@ -351,7 +351,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
                 # @show "after reflect", state
                 needs_saving = true
 
-                alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+                (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
                 # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
             else
                 # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
@@ -374,13 +374,13 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
 
     elseif event_type == :sticky
 
         stats.sticky_events += 1
         i = meta.i
-        stick_or_unstick!(state, flow, alg, i)
+        stick_or_unstick!(state::StickyPDMPState, flow, alg, i)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true
         if isfactorized(flow)
@@ -392,7 +392,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
         # for now only when horizon is reached.
         stats.last_rejected = true
     end

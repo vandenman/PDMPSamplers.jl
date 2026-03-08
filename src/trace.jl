@@ -240,6 +240,10 @@ struct TraceManager{T}
 end
 function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics, alg::PoissonTimeStrategy, t_warmup::Real)
     TT = _trace_type(flow, alg)
+    _build_trace_manager(TT, state, flow, t_warmup)
+end
+
+function _build_trace_manager(::Type{TT}, state::AbstractPDMPState, flow::ContinuousDynamics, t_warmup::Real) where TT
     main_trace = make_empty_trace(TT, state, flow)
     warmup_trace = make_empty_trace(TT, state, flow)
     TraceManager(main_trace, warmup_trace, float(t_warmup))
