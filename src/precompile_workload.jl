@@ -12,7 +12,7 @@ PrecompileTools.@compile_workload begin
 
     alg = GridThinningStrategy()
     T = 50.0   # just enough events to trigger compilation
-    x0 = zeros(d)
+    x0 = ones(d)
 
     # ── 1. BouncyParticle ────────────────────────────────────────────────────
     flow_bps = BouncyParticle(I(d), zeros(d))
