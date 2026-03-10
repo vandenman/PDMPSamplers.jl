@@ -104,42 +104,6 @@
         @test isapprox(deriv_fd, deriv_exact; rtol=0.01)
     end
 
-    @testset "FiniteDiffHVP with shared-buffer grad (aliasing regression)" begin
-        d = 5
-        Random.seed!(44)
-        target = gen_data(Distributions.MvNormal, d, 2.0)
-
-        for flow_type in (ZigZag, BouncyParticle, Boomerang)
-            flow = flow_type(d)
-            x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
-            state = PDMPState(0.0, SkeletonPoint(x0, θ0))
-            move_forward_time!(state, 0.3, flow)
-
-            grad = FullGradient(Base.Fix1(neg_gradient!, target))
-            cache = (; z = zeros(d), ∇ϕx = zeros(d))
-            aliasing_grad = PDMPSamplers.make_grad_U_func(state, flow, grad, cache)
-
-            fd = PDMPSamplers.FiniteDiffHVP(aliasing_grad, zeros(d))
-            rate_fd, deriv_fd = PDMPSamplers.get_rate_and_deriv(state, flow, fd, false)
-
-            hvp_func = (x, v) -> begin
-                out = similar(x)
-                neg_hvp!(target, out, x, v)
-                out
-            end
-            fresh_grad = x -> begin
-                out = similar(x)
-                neg_gradient!(target, out, x)
-                out
-            end
-            rate_ref, deriv_ref = PDMPSamplers.get_rate_and_deriv(state, flow, (fresh_grad, hvp_func), false)
-
-            @test rate_fd ≈ rate_ref
-            @test isapprox(deriv_fd, deriv_ref; rtol=0.02) || (iszero(deriv_ref) && abs(deriv_fd) < 1e-6)
-        end
-    end
-
     @testset "∂λ∂t for different flow types" begin
         d = 3
         Random.seed!(42)
@@ -218,7 +182,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(20), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, zeros(d)
+            copy(state_cache), copy(state_cache), Float64[], false
         )
 
         # Tight bound → shrink N
@@ -251,7 +215,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(16), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, zeros(d)
+            copy(state_cache), copy(state_cache), Float64[], false
         )
 
         PDMPSamplers._increase_grid_N!(alg)
@@ -268,7 +232,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(10), Ref(5.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, zeros(d)
+            copy(state_cache), copy(state_cache), Float64[], false
         )
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)

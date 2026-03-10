@@ -314,7 +314,7 @@
     end
 
     @testset "End-to-end adaptive Boomerang lowrank" begin
-        d = 3
+        d = 5
         Random.seed!(42)
         target = gen_data(Distributions.MvNormal, d, 2.0)
         μ_true = mean(target.D)

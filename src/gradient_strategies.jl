@@ -20,6 +20,7 @@ struct SubsampledGradient{F1, F2, F3, F4} <: GlobalGradientStrategy
     nsub::Int
     no_anchor_updates::Int
     use_full_gradient_for_reflections::Bool
+    resample_dt::Float64
 end
 
 Base.copy(g::SubsampledGradient) = SubsampledGradient(
@@ -30,16 +31,20 @@ Base.copy(g::SubsampledGradient) = SubsampledGradient(
     g.nsub,
     g.no_anchor_updates,
     g.use_full_gradient_for_reflections,
+    g.resample_dt,
 )
 
 # temporary backwards compatibility constructor for now
 # SubsampledGradient(f::F1, resample_indices!::F2, nsub::Int) where {F1, F2} =
 #     SubsampledGradient(f, resample_indices!, (trace) -> nothing, (args...) -> nothing, nsub, 0)
 SubsampledGradient(f::Function, resample_indices!::Function, nsub::Int) =
-    SubsampledGradient(f, resample_indices!, (trace) -> nothing, (args...) -> nothing, nsub, 0, false)
+    SubsampledGradient(f, resample_indices!, (trace) -> nothing, FullGradient((args...) -> nothing), nsub, 0, false, 0.0)
 
-SubsampledGradient(f::Function, resample_indices!::Function, update_anchor!::Function, full::Function, nsub::Int, no_anchor_updates::Int, use_full_gradient_for_reflections::Bool) =
-    SubsampledGradient(f, resample_indices!, update_anchor!, FullGradient(full), nsub, no_anchor_updates, use_full_gradient_for_reflections)
+SubsampledGradient(f::Function, resample_indices!::Function, update_anchor!::Function, full::Function,
+                   nsub::Int, no_anchor_updates::Int, use_full_gradient_for_reflections::Bool;
+                   resample_dt::Float64=0.0) =
+    SubsampledGradient(f, resample_indices!, update_anchor!, FullGradient(full), nsub, no_anchor_updates,
+                       use_full_gradient_for_reflections, resample_dt)
 
 struct CoordinateWiseGradient{F} <: CoordinateWiseGradientStrategy
     f::F
@@ -49,7 +54,8 @@ Base.copy(g::CoordinateWiseGradient) = CoordinateWiseGradient(_copy_callable(g.f
 
 with_stats(grad::FullGradient,       stats::StatisticCounter) = FullGradient(with_stats(grad.f, stats))
 function with_stats(grad::SubsampledGradient, stats::StatisticCounter)
-    SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.full, grad.nsub, grad.no_anchor_updates, grad.use_full_gradient_for_reflections)
+    SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.full, grad.nsub,
+                       grad.no_anchor_updates, grad.use_full_gradient_for_reflections, grad.resample_dt)
 end
 with_stats(grad::CoordinateWiseGradient, stats::StatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))
 

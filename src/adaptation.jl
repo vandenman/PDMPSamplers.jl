@@ -32,10 +32,18 @@ function adapt!(ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::
 end
 
 # B. Gradient Resampling (Subsampling)
-struct GradientResampler <: AbstractAdapter end
+mutable struct GradientResampler <: AbstractAdapter
+    const dt::Float64
+    last_update::Float64
+end
+GradientResampler() = GradientResampler(0.0, -Inf)
 
-# Dispatch specifically on SubsampledGradient for safety, or generic if 'resample_indices!' is standard
-adapt!(::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup) = grad.resample_indices!(grad.nsub)
+function adapt!(ad::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup)
+    if ad.dt <= 0.0 || (state.t[] - ad.last_update >= ad.dt)
+        grad.resample_indices!(grad.nsub)
+        ad.last_update = state.t[]
+    end
+end
 
 # C. Anchor Updating (Control Variates)
 mutable struct AnchorUpdater <: AbstractAdapter
@@ -69,9 +77,10 @@ default_gradient_adapter(::Any, args...) = NoAdaptation()
 
 # Specific: anchor_dt derived from grad.no_anchor_updates so each chain respects its own setting
 function default_gradient_adapter(grad::SubsampledGradient, t_warmup, t0)
-    grad.no_anchor_updates == 0 && return GradientResampler()
+    resampler = GradientResampler(grad.resample_dt, t0)
+    grad.no_anchor_updates == 0 && return resampler
     return SequenceAdapter((
-        GradientResampler(),
+        resampler,
         AnchorUpdater(t_warmup / grad.no_anchor_updates, t0)
     ))
 end
