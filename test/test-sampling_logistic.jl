@@ -189,4 +189,46 @@ end
         end
     end
 
+    @testset "CV-subsampled gradient and HVP unbiasedness (MC)" begin
+        Random.seed!(hash(:logistic_mc_unbiasedness))
+
+        d_mc, n_mc = 4, 300
+        nsub = n_mc ÷ 10
+        N_mc = 2_000
+
+        target_mc = gen_data(LogisticRegressionModel, d_mc, n_mc)
+
+        β = randn(d_mc)
+        v = randn(d_mc)
+
+        set_anchor!(target_mc, randn(d_mc))   # anchor ≠ β to stress-test CV
+
+        true_grad = zeros(d_mc)
+        neg_gradient!(target_mc, true_grad, β)
+
+        true_hvp = zeros(d_mc)
+        neg_hvp!(target_mc, true_hvp, β, v)
+
+        grad_acc = zeros(d_mc)
+        hvp_acc  = zeros(d_mc)
+        g_tmp    = zeros(d_mc)
+        h_tmp    = zeros(d_mc)
+
+        for _ in 1:N_mc
+            resample_indices!(target_mc, nsub)
+            neg_gradient_sub_cv!(target_mc, g_tmp, β)
+            neg_hvp_sub!(target_mc, h_tmp, β, v)
+            grad_acc .+= g_tmp
+            hvp_acc  .+= h_tmp
+        end
+
+        mc_grad = grad_acc ./ N_mc
+        mc_hvp  = hvp_acc  ./ N_mc
+
+        mc_se = 1.0 / sqrt(N_mc)
+
+        @test isapprox(mc_grad, true_grad; atol=mc_se * norm(true_grad) + mc_se)
+        @test isapprox(mc_hvp,  true_hvp;  atol=mc_se * norm(true_hvp)  + mc_se)
+    end
+
 end
