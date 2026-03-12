@@ -210,6 +210,15 @@ All Boomerang dynamics methods dispatch on this type.
 """
 const AnyBoomerang = Union{Boomerang, MutableBoomerang}
 
+function Base.copy(flow::MutableBoomerang)
+    MutableBoomerang(
+        copy(flow.Γ), copy(flow.μ), flow.λref, flow.ρ,
+        flow.L === nothing ? nothing : copy(flow.L),
+        flow.ΣL === nothing ? nothing : copy(flow.ΣL),
+        flow.eigen_cache === nothing ? nothing : deepcopy(flow.eigen_cache)
+    )
+end
+
 function MutableBoomerang(Γ, μ, λ = 0.1; ρ=0.0)
     if Γ isa Diagonal
         return MutableBoomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L, nothing)

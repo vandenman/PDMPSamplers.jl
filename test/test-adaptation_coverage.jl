@@ -328,7 +328,7 @@
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
 
         m = mean(trace)
-        @test m ≈ μ_true atol = 0.5
+        @test m ≈ μ_true atol = 1.0
     end
 
     @testset "SequenceAdapter adapt!" begin

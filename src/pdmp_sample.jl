@@ -40,19 +40,21 @@ function pdmp_sample(
     if threaded
         tasks = map(1:n_chains) do _
             Threads.@spawn begin
+                flow_i = _copy_flow(flow)
                 model_i = _copy_model(model)
                 stop_i = _maybe_copy_criterion(stop)
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
+                _pdmp_sample_single(copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
             end
         end
         results = fetch.(tasks)
     else
         results = map(1:n_chains) do _
+            flow_i = _copy_flow(flow)
             model_i = _copy_model(model)
             stop_i = _maybe_copy_criterion(stop)
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(copy(ξ₀), flow, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
+            _pdmp_sample_single(copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
         end
     end
 
@@ -63,6 +65,10 @@ end
 
 _maybe_copy_criterion(::Nothing) = nothing
 _maybe_copy_criterion(c::StoppingCriterion) = copy(c)
+
+_copy_flow(flow::ContinuousDynamics) = flow
+_copy_flow(flow::MutableBoomerang) = copy(flow)
+_copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metric), _copy_flow(pd.dynamics))
 
 function _copy_model(model::PDMPModel)
     grad_new = copy(model.grad)

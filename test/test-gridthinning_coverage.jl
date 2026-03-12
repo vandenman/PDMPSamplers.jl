@@ -182,7 +182,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(20), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
         )
 
         # Tight bound → shrink N
@@ -215,7 +215,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(16), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
         )
 
         PDMPSamplers._increase_grid_N!(alg)
@@ -232,7 +232,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(10), Ref(5.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
         )
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)
