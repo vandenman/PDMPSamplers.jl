@@ -178,4 +178,21 @@ import ForwardDiff
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=false)
         @test stats.sticky_events > 0
     end
+
+    @testset "pdmp_sample with pre-built model vector" begin
+        d = 2
+        μ_true = [1.0, -1.0]
+        A = [2.0 0.5; 0.5 1.5]
+        neg_grad!(out, x) = (mul!(out, A, x .- μ_true); out)
+        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false, false)
+
+        flow = ZigZag(d)
+        alg  = GridThinningStrategy()
+        models = [make_model(), make_model()]
+
+        chains = pdmp_sample(d, flow, models, alg, 0.0, 2_000.0; progress=false, threaded=false)
+        @test length(chains.traces) == 2
+        m = mean(chains)
+        @test m ≈ μ_true atol = 1.25
+    end
 end

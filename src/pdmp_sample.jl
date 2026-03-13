@@ -63,6 +63,50 @@ function pdmp_sample(
     return PDMPChains(traces, all_stats)
 end
 
+function pdmp_sample(
+    ξ₀::SkeletonPoint, flow::ContinuousDynamics, models::AbstractVector{<:PDMPModel},
+    alg::PoissonTimeStrategy,
+    t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
+    stop::Union{StoppingCriterion,Nothing}=nothing,
+    warmup_stop::Union{StoppingCriterion,Nothing}=nothing,
+    threaded::Bool=false,
+    progress::Bool=true,
+    adapter::AbstractAdapter=NoAdaptation()
+)
+    n_chains = length(models)
+    n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
+
+    if n_chains == 1
+        trace, stats = _pdmp_sample_single(ξ₀, flow, models[1], alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop)
+        return PDMPChains([trace], [stats])
+    end
+
+    if threaded
+        tasks = map(1:n_chains) do i
+            Threads.@spawn begin
+                flow_i        = _copy_flow(flow)
+                stop_i        = _maybe_copy_criterion(stop)
+                warmup_stop_i = _maybe_copy_criterion(warmup_stop)
+                _pdmp_sample_single(copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
+                    progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
+            end
+        end
+        results = fetch.(tasks)
+    else
+        results = map(1:n_chains) do i
+            flow_i        = _copy_flow(flow)
+            stop_i        = _maybe_copy_criterion(stop)
+            warmup_stop_i = _maybe_copy_criterion(warmup_stop)
+            _pdmp_sample_single(copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
+                progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
+        end
+    end
+
+    traces    = [r[1] for r in results]
+    all_stats = [r[2] for r in results]
+    return PDMPChains(traces, all_stats)
+end
+
 _maybe_copy_criterion(::Nothing) = nothing
 _maybe_copy_criterion(c::StoppingCriterion) = copy(c)
 
