@@ -252,7 +252,7 @@ end
 # --- Grid parameter caps, dispatched on flow type ---
 
 min_grid_cells(::ContinuousDynamics, N_min::Int, ::Int) = N_min
-min_grid_cells(::AnyBoomerang, N_min::Int, ::Int) = max(N_min, 10)
+min_grid_cells(::AnyBoomerang, N_min::Int, ::Int) = max(N_min, 5)
 min_grid_cells(pd::PreconditionedDynamics, N_min::Int, N::Int) = min_grid_cells(pd.dynamics, N_min, N)
 
 max_grid_horizon(::ContinuousDynamics) = 1e10
@@ -395,7 +395,7 @@ Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     α⁺::Float64 = 1.5
     α⁻::Float64 = 0.5
     safety_limit::Int = 500
-    early_stop_threshold::Float64 = Inf
+    early_stop_threshold::Float64 = 5.0
     use_fd_hvp::Bool = false
 end
 
@@ -540,6 +540,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         if rand() * lb_reflection <= l_reflection
             tightness = l_reflection / lb_reflection
             _adapt_grid_N!(alg, tightness)
+            _adapt_grid_t_max!(alg, τ_reflection)
             stats.grid_N_current = alg.N[]
             return τ_reflection, :reflect, GradientMeta(∇ϕx)
         end
@@ -594,5 +595,16 @@ function _increase_grid_N!(alg::GridAdaptiveState)
     if new_N != N
         alg.N[] = new_N
         recompute_time_grid!(alg)
+    end
+end
+
+function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64)
+    t_max = alg.t_max[]
+    if τ_accepted < 0.25 * t_max
+        new_t_max = max(4.0 * τ_accepted, 0.1)
+        if new_t_max < t_max
+            alg.t_max[] = new_t_max
+            recompute_time_grid!(alg)
+        end
     end
 end
