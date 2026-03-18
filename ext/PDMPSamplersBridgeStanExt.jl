@@ -5,16 +5,22 @@ using BridgeStan
 import PDMPSamplers: PDMPModel, FullGradient
 
 """
-    PDMPModel(sm::BridgeStan.StanModel)
+    PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
 
 Construct a `PDMPModel` from a BridgeStan StanModel.
 
 BridgeStan provides compiled Stan models with efficient gradient computations.
 This constructor wraps the model's log density gradient function for use with PDMP samplers.
-The HVP (Hessian-vector product) is always enabled since it's compiled in Stan anyway.
+
+When `hvp=false`, directional curvature is computed via scalar finite
+differences (`FiniteDiffVHV`), which reuses the base gradient from the rate computation
+and adds only one extra gradient call per grid point. When `hvp=true` (default), Stan's compiled
+Hessian-vector product is used instead, giving exact curvature at the cost of a full
+d-vector HVP per grid point.
 
 # Arguments
 - `sm::BridgeStan.StanModel`: A compiled Stan model
+- `hvp::Bool=true`: Whether to use Stan's compiled HVP for curvature
 
 # Example
 ```julia
@@ -24,7 +30,6 @@ using BridgeStan, PDMPSamplers
 sm = StanModel("path/to/model.so", "path/to/data.json")
 pdmp_model = PDMPModel(sm)
 
-# Use with PDMP samplers
 flow = ZigZag(...)
 alg = GridThinningStrategy()
 trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
@@ -34,33 +39,30 @@ trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
 - BridgeStan works in the unconstrained parameter space
 - The model automatically handles the appropriate transformations
 - Gradients are computed efficiently through Stan's autodiff system
-- HVP is always enabled for compatibility with GridThinningStrategy
 """
-function PDMPModel(sm::BridgeStan.StanModel)
+function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
 
-    # Get dimension from the Stan model
     d = BridgeStan.param_unc_num(sm)
-
-    # Prepare buffers
     out = zeros(d)
 
     # Create gradient function that calls Stan's log_density_gradient
-    # BridgeStan's log_density_gradient! computes the gradient of log p(x)
     grad_f! = (out, x) -> begin
         BridgeStan.log_density_gradient!(sm, x, out)
         out .= .-out
         return out
     end
 
-    # Use Stan's compiled Hessian-vector product
-    out_hvp = zeros(d)
-    hvp_f = Base.Fix1((out, x, v) -> begin
-        BridgeStan.log_density_hessian_vector_product!(sm, x, v, out)
-        out .= .-out
-        return out
-    end, out_hvp)
+    if hvp
+        out_hvp = zeros(d)
+        hvp_f = Base.Fix1((out, x, v) -> begin
+            BridgeStan.log_density_hessian_vector_product!(sm, x, v, out)
+            out .= .-out
+            return out
+        end, out_hvp)
+        return PDMPModel(d, FullGradient(grad_f!), hvp_f, false, false)
+    end
 
-    return PDMPModel(d, FullGradient(grad_f!), hvp_f, false, false)
+    return PDMPModel(d, FullGradient(grad_f!))
 end
 
 """

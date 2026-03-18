@@ -195,7 +195,7 @@ Created via the `AdaptiveBoomerang` convenience constructors.
 mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
     Γ::U
     μ::T
-    const λref::S
+    λref::S
     const ρ::S
     L::LT
     ΣL::LT

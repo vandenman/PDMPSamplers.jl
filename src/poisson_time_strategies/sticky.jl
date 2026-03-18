@@ -45,6 +45,8 @@ struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,Abs
     empty_∇ϕx::V
 end
 
+accept_reflection_event(alg::StickyLoopState, args...) = accept_reflection_event(alg.inner_alg_state, args...)
+
 # this could use less memory by looking at
 function _to_internal(strat::Sticky, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
 
@@ -329,4 +331,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         Δt = tᶠ - t
         return Δt, :sticky, CoordinateMeta(i)
     end
+end
+
+_reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)
+
+function _maybe_activate_constant_bound!(alg::StickyLoopState, stats::StatisticCounter)
+    _maybe_activate_constant_bound!(alg.inner_alg_state, stats)
 end

@@ -101,3 +101,25 @@ function next_event_time(::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::T
     @assert ispositive(τ) "$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event"
     return τ, nothing, CoordinateMeta(i₀)
 end
+
+function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta::BoundsMeta)
+
+    l = λ(ξ, ∇ϕx, flow)
+    l_bound = pos(meta.a + meta.b * dt)
+
+    # TODO: don't throw when adapting!
+    #l > l_bound && !(l <= 1e-6) && error("Tuning parameter `c` too small: l=$l, lb=$l_bound")
+    # for now, the bound should be way tighter
+    # l / l_bound < 0.6 && error("Tuning parameter `c` too large? dt = $dt, l=$l, lb=$l_bound, l / l_bound = $(l / l_bound)")
+
+    u = rand()
+    accept = u * l_bound <= l
+
+    if accept
+        l > l_bound && !(l <= 1e-6) && error("Tuning parameter `c` too small: l=$l, lb=$l_bound")
+    else
+        # @info "rejecting u * l_bound = $(u) * $(l_bound) = $(u * l_bound) <= l = $l where meta=$meta and dt=$dt"
+    end
+
+    return accept
+end

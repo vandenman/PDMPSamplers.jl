@@ -2,7 +2,7 @@ module PDMPSamplersDynamicPPLExt
 
 using PDMPSamplers
 using DynamicPPL
-import PDMPSamplers: PDMPModel, FullGradient
+import PDMPSamplers: PDMPModel, FullGradient, _make_vhv_from_logdensity, _make_joint_callable
 import DifferentiationInterface as DI
 import ADTypes
 
@@ -70,7 +70,19 @@ function PDMPModel(model::DynamicPPL.Model, backend::ADTypes.AbstractADType; nee
         nothing
     end
 
-    return PDMPModel(d, FullGradient(grad_f!), hvp_f, false, false)
+    vhv_f = if needs_hvp
+        _make_vhv_from_logdensity(f, d, backend)
+    else
+        nothing
+    end
+
+    joint_f = if needs_hvp
+        _make_joint_callable(f, d, backend)
+    else
+        nothing
+    end
+
+    return PDMPModel(d, FullGradient(grad_f!), hvp_f, vhv_f, false, false, joint_f)
 end
 
 end # module

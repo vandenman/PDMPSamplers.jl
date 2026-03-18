@@ -118,20 +118,21 @@ function _copy_model(model::PDMPModel)
     grad_new = copy(model.grad)
     hvp_new = model.hvp === nothing ? nothing : _copy_callable(model.hvp)
     vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
-    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false)
+    joint_new = model.joint === nothing ? nothing : _copy_callable(model.joint)
+    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
 end
 
 # the inner workhorse that runs a single chain
 function _step!(
     state::AbstractPDMPState,
     model_::PDMPModel,
-    flow::ContinuousDynamics,
+    flow::FL,
     alg_::PoissonTimeStrategy,
     cache::NamedTuple,
     stats::StatisticCounter,
     trace_manager::TraceManager;
     phase::Symbol
-)
+) where {FL<:ContinuousDynamics}
     τ, event_type, meta = next_event_time(model_, flow, alg_, state, cache, stats)
 
     @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
@@ -154,7 +155,7 @@ function _run_phase!(
     criterion::StoppingCriterion,
     state::AbstractPDMPState,
     model_::PDMPModel,
-    flow::ContinuousDynamics,
+    flow::FL,
     alg_::PoissonTimeStrategy,
     cache::NamedTuple,
     trace_manager::TraceManager,
@@ -167,7 +168,7 @@ function _run_phase!(
     tstop::Base.RefValue{Float64}=Ref(Inf),
     T::Float64=0.0,
     progress_stops::Int=300
-)
+) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
 
     while true
@@ -179,7 +180,7 @@ function _run_phase!(
         event_type = _step!(state, model_, flow, alg_, cache, stats, trace_manager; phase)
         update!(criterion, state, trace_manager, stats, event_type)
 
-        adapt!(adapter, state, flow, model_.grad, trace_manager; phase)
+        adapt!(adapter, state, flow, model_.grad, trace_manager; phase, stats)
         if did_dynamics_adapt(adapter)
             _reset_inner_grid!(alg_)
             if alg_ isa StickyLoopState
@@ -193,14 +194,14 @@ function _run_phase!(
 end
 
 function _pdmp_sample_single(
-    ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
+    ξ₀::SkeletonPoint, flow::FL, model::PDMPModel,
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
     progress::Bool=true,
     adapter::AbstractAdapter=NoAdaptation(),
     stop::Union{StoppingCriterion,Nothing}=nothing,
     warmup_stop::Union{StoppingCriterion,Nothing}=nothing
-)
+) where {FL<:ContinuousDynamics}
 
     # TODO: it's possible to sample to have t_warmup < T...
     # we should always sample T + t_warmup!
@@ -267,6 +268,8 @@ function _pdmp_sample_single(
         T=Float64(T),
         progress_stops
     )
+
+    _maybe_activate_constant_bound!(alg_, stats)
 
     _run_phase!(
         stop_criterion,
@@ -522,37 +525,3 @@ function handle_event!(τ::Real, gradient_strategy::CoordinateWiseGradient, flow
     return needs_saving, saving_args
 end
 
-
-# TODO: needs to move to the respective strategies!
-# ideally this function would not exist though... that is possible if thinning returns
-# "ghost events" as a type.
-# acceptance happens elsewhere
-accept_reflection_event(::GridAdaptiveState, args...) = true
-accept_reflection_event(::RootsPoissonTimeStrategy, args...) = true
-accept_reflection_event(alg::StickyLoopState, args...) = accept_reflection_event(alg.inner_alg_state, args...)
-# the only type for which we need this function!
-function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta::BoundsMeta)
-
-    l = λ(ξ, ∇ϕx, flow)
-    l_bound = pos(meta.a + meta.b * dt)
-
-    # TODO: don't throw when adapting!
-    #l > l_bound && !(l <= 1e-6) && error("Tuning parameter `c` too small: l=$l, lb=$l_bound")
-    # for now, the bound should be way tighter
-    # l / l_bound < 0.6 && error("Tuning parameter `c` too large? dt = $dt, l=$l, lb=$l_bound, l / l_bound = $(l / l_bound)")
-
-    u = rand()
-    accept = u * l_bound <= l
-
-    if accept
-        l > l_bound && !(l <= 1e-6) && error("Tuning parameter `c` too small: l=$l, lb=$l_bound")
-    else
-        # @info "rejecting u * l_bound = $(u) * $(l_bound) = $(u * l_bound) <= l = $l where meta=$meta and dt=$dt"
-    end
-
-    return accept
-end
-
-_reset_inner_grid!(::PoissonTimeStrategy) = nothing
-_reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
-_reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)

@@ -17,6 +17,8 @@ Base.@kwdef struct RootsPoissonTimeStrategy <: PoissonTimeStrategy
     atol::Float64 = sqrt(eps(Float64))#1e-12
 end
 
+accept_reflection_event(::RootsPoissonTimeStrategy, args...) = true
+
 mutable struct IntegralCache
     τL::Float64; IL::Float64   # left bracket
     τR::Float64; IR::Float64   # right bracket

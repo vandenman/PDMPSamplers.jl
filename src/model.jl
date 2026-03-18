@@ -33,12 +33,13 @@ Construct from a log-density `d`. Uses `ADTypes` backend to generate a `FullGrad
 
 Compatibility constructor. Wraps `f` in `FullGradient`.
 """
-struct PDMPModel{G<:GradientStrategy,H,V}
+struct PDMPModel{G<:GradientStrategy,H,V,J}
     d::Int
     grad::G
     hvp::H
     vhv::V
-    function PDMPModel(d::Integer, grad::GradientStrategy, hvp, vhv, grad_inplace::Bool, hvp_inplace::Bool)
+    joint::J
+    function PDMPModel(d::Integer, grad::GradientStrategy, hvp, vhv, grad_inplace::Bool, hvp_inplace::Bool, joint=nothing)
 
         hvp_new = if hvp === nothing
             nothing
@@ -49,7 +50,7 @@ struct PDMPModel{G<:GradientStrategy,H,V}
             hvp
         end
 
-        return new{typeof(grad),typeof(hvp_new),typeof(vhv)}(Int(d), grad, hvp_new, vhv)
+        return new{typeof(grad),typeof(hvp_new),typeof(vhv),typeof(joint)}(Int(d), grad, hvp_new, vhv, joint)
     end
 end
 
@@ -145,14 +146,21 @@ function PDMPModel(d::Integer, ldf::LogDensity, backend::ADTypes.AbstractADType=
         nothing
     end
 
-    return PDMPModel(d, FullGradient(grad_f), hvp_f, vhv_f, false, false)
+    joint_f = if needs_hvp
+        _make_joint_callable(ldf.f, d, backend)
+    else
+        nothing
+    end
+
+    return PDMPModel(d, FullGradient(grad_f), hvp_f, vhv_f, false, false, joint_f)
 end
 
 function with_stats(model::PDMPModel, stats::StatisticCounter)
     grad_new = with_stats(model.grad, stats)
     hvp_new = model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
     vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
-    PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false)
+    joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
+    PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
 end
 
 struct InplaceHVP{F, O<:AbstractVector} <: Function
@@ -176,6 +184,15 @@ end
 (ws::WithStatsVHV)(x::AbstractVector, v::AbstractVector, w::AbstractVector) = (ws.stats.∇²f_calls += 1; ws.f(x, v, w))
 (ws::WithStatsVHV)(args...) = (ws.stats.∇²f_calls += 1; ws.f(args...))
 
+struct WithStatsJoint{F,S} <: Function
+    f::F
+    stats::S
+end
+function (ws::WithStatsJoint)(x::AbstractVector, v::AbstractVector)
+    ws.stats.∇²f_calls += 1
+    ws.f(x, v)
+end
+
 """
     _make_vhv_from_grad(grad_f!, d, backend)
 
@@ -183,34 +200,38 @@ Build a scalar directional curvature callable `(x, v, w) -> w'H(x)v` from
 an in-place gradient `grad_f!(out, x)` using a JVP/pushforward.
 """
 function _make_vhv_from_grad(grad_f!, d::Integer, backend::ADTypes.AbstractADType)
-    x = zeros(d)
-    v = zeros(d)
-    w = zeros(d)
-    primal_buf = zeros(d)
-    g_scalar = (x, v, w) -> begin
-        buf = x isa AbstractVector{Float64} ? primal_buf : similar(x)
-        grad_f!(buf, x)
-        dot(w, buf)
+    x_buf = zeros(d)
+    v_buf = zeros(d)
+    w_buf = zeros(d)
+    phi = t -> begin
+        xt = x_buf .+ t .* v_buf
+        buf = similar(xt)
+        grad_f!(buf, xt)
+        dot(w_buf, buf)
     end
-    prep = DI.prepare_derivative(
-        Base.Fix2(Base.Fix2(g_scalar, w), v),
-        backend, zero(Float64)
-    )
-    return _VHVCallable(g_scalar, d, backend)
+    prep = DI.prepare_derivative(phi, backend, zero(Float64))
+    return _VHVCallable(grad_f!, phi, prep, backend, x_buf, v_buf, w_buf)
 end
 
-struct _VHVCallable{F,B<:ADTypes.AbstractADType}
-    g_scalar::F
-    d::Int
+struct _VHVCallable{G,F,P,B<:ADTypes.AbstractADType}
+    grad_f::G
+    phi::F
+    prep::P
     backend::B
+    x_buf::Vector{Float64}
+    v_buf::Vector{Float64}
+    w_buf::Vector{Float64}
 end
 
 function (c::_VHVCallable)(x::AbstractVector, v::AbstractVector, w::AbstractVector)
-    f_line = t -> begin
-        xt = x .+ t .* v
-        c.g_scalar(xt, v, w)
-    end
-    return DI.derivative(f_line, c.backend, zero(eltype(x)))
+    copyto!(c.x_buf, x)
+    copyto!(c.v_buf, v)
+    copyto!(c.w_buf, w)
+    return DI.derivative(c.phi, c.prep, c.backend, zero(eltype(x)))
+end
+
+function _copy_callable(c::_VHVCallable)
+    _make_vhv_from_grad(c.grad_f, length(c.x_buf), c.backend)
 end
 
 """
@@ -221,19 +242,63 @@ a log-density function using a JVP/pushforward. The sign is negated to match
 the potential convention `U = -log p`.
 """
 function _make_vhv_from_logdensity(logp, d::Integer, backend::ADTypes.AbstractADType)
-    return _VHVFromLogDensity(logp, backend)
+    x_buf = zeros(d)
+    v_buf = zeros(d)
+    w_buf = zeros(d)
+    phi = t -> begin
+        xt = x_buf .+ t .* v_buf
+        grad = DI.gradient(logp, backend, xt)
+        -dot(w_buf, grad)
+    end
+    prep = DI.prepare_derivative(phi, backend, zero(Float64))
+    return _VHVFromLogDensity(logp, phi, prep, backend, x_buf, v_buf, w_buf)
 end
 
-struct _VHVFromLogDensity{F,B<:ADTypes.AbstractADType}
-    logp::F
+struct _VHVFromLogDensity{L,F,P,B<:ADTypes.AbstractADType}
+    logp::L
+    phi::F
+    prep::P
     backend::B
+    x_buf::Vector{Float64}
+    v_buf::Vector{Float64}
+    w_buf::Vector{Float64}
 end
 
 function (c::_VHVFromLogDensity)(x::AbstractVector, v::AbstractVector, w::AbstractVector)
-    g_scalar = t -> begin
-        xt = x .+ t .* v
-        grad = DI.gradient(c.logp, c.backend, xt)
-        -dot(w, grad)
-    end
-    return DI.derivative(g_scalar, c.backend, zero(eltype(x)))
+    copyto!(c.x_buf, x)
+    copyto!(c.v_buf, v)
+    copyto!(c.w_buf, w)
+    return DI.derivative(c.phi, c.prep, c.backend, zero(eltype(x)))
+end
+
+function _copy_callable(c::_VHVFromLogDensity)
+    _make_vhv_from_logdensity(c.logp, length(c.x_buf), c.backend)
+end
+
+struct _JointCallable{L,F,P,B<:ADTypes.AbstractADType}
+    logp::L
+    phi::F
+    prep::P
+    backend::B
+    x_buf::Vector{Float64}
+    v_buf::Vector{Float64}
+end
+
+function _make_joint_callable(logp, d::Integer, backend::ADTypes.AbstractADType)
+    x_buf = zeros(d)
+    v_buf = zeros(d)
+    phi = t -> -logp(x_buf .+ t .* v_buf)
+    prep = DI.prepare_second_derivative(phi, backend, zero(Float64))
+    return _JointCallable(logp, phi, prep, backend, x_buf, v_buf)
+end
+
+function (c::_JointCallable)(x::AbstractVector, v::AbstractVector)
+    copyto!(c.x_buf, x)
+    copyto!(c.v_buf, v)
+    _, dphi, d2phi = DI.value_derivative_and_second_derivative(c.phi, c.prep, c.backend, zero(eltype(x)))
+    return dphi, d2phi
+end
+
+function _copy_callable(c::_JointCallable)
+    _make_joint_callable(c.logp, length(c.x_buf), c.backend)
 end

@@ -83,11 +83,12 @@ end
 
 
 
-function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics,
+function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::FL,
     grad_and_hess_or_grad_and_hvp::F, add_rate::Bool=true;
     cached_y0::Float64=NaN, cached_d0::Float64=NaN,
     early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing,
-    state_cache::Union{AbstractPDMPState,Nothing}=nothing) where {F}
+    state_cache::Union{AbstractPDMPState,Nothing}=nothing,
+    max_time::Float64=Inf) where {FL<:ContinuousDynamics, F}
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
@@ -109,6 +110,18 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     N_evaluated = N  # how many cells we actually computed
 
     for i in 2:N+1
+        # Horizon cap: skip evaluation beyond effective time horizon (Phase 1A)
+        if t_grid[i] > max_time
+            for j in (i-1):N
+                Λ_vals[j] = 0.0
+            end
+            N_evaluated = i - 2
+            if !isnothing(stats)
+                stats.grid_points_skipped += N - N_evaluated
+            end
+            break
+        end
+
         Δt = t_grid[i] - t_grid[i-1]
         move_forward_time!(state_t, Δt, flow)
         y_vals[i], d_vals[i] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
@@ -251,6 +264,10 @@ end
 
 # --- Grid parameter caps, dispatched on flow type ---
 
+_joint_compatible(::BouncyParticle) = true
+_joint_compatible(pd::PreconditionedDynamics) = _joint_compatible(pd.dynamics)
+_joint_compatible(::ContinuousDynamics) = false
+
 min_grid_cells(::ContinuousDynamics, N_min::Int, ::Int) = N_min
 min_grid_cells(::AnyBoomerang, N_min::Int, ::Int) = max(N_min, 5)
 min_grid_cells(pd::PreconditionedDynamics, N_min::Int, N::Int) = min_grid_cells(pd.dynamics, N_min, N)
@@ -279,27 +296,29 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
 end
 
-struct VHVProvider{G,V}
+struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}}
     grad::G
     vhv::V
+    w_buf::W
+end
+VHVProvider(grad, vhv) = VHVProvider(grad, vhv, nothing)
+
+function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ContinuousDynamics)
+    xt, vt = state.ξ.x, state.ξ.θ
+    return provider.vhv(xt, vt, vt)
 end
 
-function _compute_vhv_scalar(vhv_func, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ContinuousDynamics)
+function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ZigZag)
     xt, vt = state.ξ.x, state.ξ.θ
-    return vhv_func(xt, vt, vt)
-end
-
-function _compute_vhv_scalar(vhv_func, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ZigZag)
-    xt, vt = state.ξ.x, state.ξ.θ
-    w = similar(vt)
+    w = provider.w_buf === nothing ? similar(vt) : provider.w_buf
     for i in eachindex(vt)
         w[i] = ispositive(vt[i] * ∇U_xt[i]) ? vt[i] : zero(eltype(vt))
     end
-    return vhv_func(xt, vt, w)
+    return provider.vhv(xt, vt, w)
 end
 
-function _compute_vhv_scalar(vhv_func, state::AbstractPDMPState, ∇U_xt::AbstractVector, pd::PreconditionedDynamics)
-    return _compute_vhv_scalar(vhv_func, state, ∇U_xt, pd.dynamics)
+function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, pd::PreconditionedDynamics)
+    return _compute_vhv_scalar(provider, state, ∇U_xt, pd.dynamics)
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::VHVProvider, add_rate::Bool=true)
@@ -309,8 +328,25 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
     f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
 
-    curvature_scalar = _compute_vhv_scalar(provider.vhv, state, ∇U_xt, flow)
+    curvature_scalar = _compute_vhv_scalar(provider, state, ∇U_xt, flow)
     f_prime_t = ∂λ∂t(state, ∇U_xt, curvature_scalar, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+
+    return rate, rate_deriv
+end
+
+struct JointProvider{J}
+    joint::J
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::JointProvider, add_rate::Bool=true)
+    xt, vt = state.ξ.x, state.ξ.θ
+    dphi, d2phi = provider.joint(xt, vt)
+
+    f_t = pos(dphi) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = d2phi
 
     rate = pos(f_t)
     rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
@@ -347,6 +383,55 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
+struct FiniteDiffVHV{G}
+    grad::G
+    buf::Vector{Float64}
+    grad_buf::Vector{Float64}
+    w_buf::Union{Nothing,Vector{Float64}}
+end
+FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), nothing)
+FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), w_buf)
+
+function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
+    h = 1e-5 * max(1.0, norm(xt) / norm(vt))
+    fd.buf .= xt .+ h .* vt
+    ∇U_shifted = fd.grad(fd.buf)
+    return (dot(wt, ∇U_shifted) - dot(wt, fd.grad_buf)) / h
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffVHV, add_rate::Bool=true)
+    xt, vt = state.ξ.x, state.ξ.θ
+    ∇U_xt = fd.grad(xt)
+    copyto!(fd.grad_buf, ∇U_xt)
+
+    vhv_scalar = _fd_vhv_scalar(fd, xt, vt, vt)
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV, add_rate::Bool=true)
+    xt, vt = state.ξ.x, state.ξ.θ
+    ∇U_xt = fd.grad(xt)
+    copyto!(fd.grad_buf, ∇U_xt)
+
+    w = fd.w_buf === nothing ? similar(vt) : fd.w_buf
+    for i in eachindex(vt)
+        w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
+    end
+    whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
+
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = whv_scalar
 
     rate = pos(f_t)
     rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
@@ -397,6 +482,7 @@ Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     safety_limit::Int = 500
     early_stop_threshold::Float64 = 5.0
     use_fd_hvp::Bool = false
+    post_warmup_simplify::Bool = false
 end
 
 _default_early_stop(::ContinuousDynamics, est::Float64) = est
@@ -434,6 +520,9 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         similar(state.ξ.x, 0),
         strat.use_fd_hvp,
         similar(state.ξ.x),
+        Ref(NaN),
+        Ref(0.0),
+        strat.post_warmup_simplify,
     )
 end
 
@@ -452,7 +541,12 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     empty_∇ϕx::V
     use_fd_hvp::Bool
     fd_buf::Vector{Float64}
+    constant_bound_rate::Base.RefValue{Float64}
+    max_observed_rate::Base.RefValue{Float64}
+    post_warmup_simplify::Bool
 end
+
+accept_reflection_event(::GridAdaptiveState, args...) = true
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
 
@@ -462,9 +556,63 @@ function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     recompute_time_grid!(alg)
 end
 
+function _constant_bound_event_time(
+    model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+    alg::GridAdaptiveState, state::AbstractPDMPState, cache,
+    stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool
+)
+    λ_bound = alg.constant_bound_rate[]
+    λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
+    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+    default_return = GradientMeta(alg.empty_∇ϕx)
 
-function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
-    max_horizon::Float64=Inf, include_refresh::Bool=true)
+    state_ = alg.state_cache
+    copyto!(state_, state)
+    t_max = min(alg.t_max[], max_horizon)
+
+    cumulative_exp = 0.0
+    for _ in 1:alg.safety_limit
+        cumulative_exp += rand(Exponential())
+        τ_proposal = cumulative_exp / λ_bound
+
+        if τ_proposal >= t_max
+            if τ_refresh < t_max
+                return τ_refresh, :refresh, default_return
+            end
+            return t_max, :horizon_hit, default_return
+        end
+
+        if τ_refresh < τ_proposal
+            return τ_refresh, :refresh, default_return
+        end
+
+        copyto!(state_, state)
+        move_forward_time!(state_, τ_proposal, flow)
+        ∇ϕx = compute_gradient!(state_, model.grad, flow, cache)
+        l_actual = λ(state_.ξ, ∇ϕx, flow)
+
+        if l_actual > λ_bound
+            alg.constant_bound_rate[] = NaN
+            return next_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        end
+
+        if rand() * λ_bound <= l_actual
+            alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
+            return τ_proposal, :reflect, GradientMeta(∇ϕx)
+        end
+    end
+
+    alg.constant_bound_rate[] = NaN
+    return next_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+end
+
+
+function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    max_horizon::Float64=Inf, include_refresh::Bool=true) where {FL<:ContinuousDynamics}
+
+    if isfinite(alg.constant_bound_rate[])
+        return _constant_bound_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+    end
 
     pcb = alg.pcb
     state_ = alg.state_cache
@@ -475,10 +623,13 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     grad_func = make_grad_U_func(state_, flow, model.grad, cache)
     hvp_func = model.hvp
     vhv_func = model.vhv
-    grad_and_hvp = if vhv_func !== nothing
-        VHVProvider(grad_func, vhv_func)
+    joint_func = model.joint
+    grad_and_hvp = if joint_func !== nothing && _joint_compatible(flow)
+        JointProvider(joint_func)
+    elseif vhv_func !== nothing
+        VHVProvider(grad_func, vhv_func, alg.fd_buf)
     elseif hvp_func === nothing && alg.use_fd_hvp
-        FiniteDiffHVP(grad_func, alg.fd_buf)
+        FiniteDiffVHV(grad_func, alg.fd_buf)
     else
         (grad_func, hvp_func)
     end
@@ -487,13 +638,15 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
 
     default_return = GradientMeta(alg.empty_∇ϕx)
 
-    # Build grid once for this event
-    construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
-        early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_)
-    stats.grid_N_current = alg.N[]
-
-    # Draw refresh time once (separate Poisson process)
+    # Draw refresh time FIRST so we can cap grid construction (Phase 1A)
     τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+    effective_horizon = min(alg.t_max[], τ_refresh, max_horizon)
+
+    # Build grid once for this event, capped at effective horizon
+    construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
+        early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
+        max_time=effective_horizon)
+    stats.grid_N_current = alg.N[]
 
     # Cumulative exponential sum for correct sequential thinning.
     # After rejection at time τ_k, the next proposal continues from τ_k
@@ -510,9 +663,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         cumulative_exp += rand(Exponential())
         τ_reflection, lb_reflection = propose_event_time(pcb, cumulative_exp)
 
-        if τ_reflection >= alg.t_max[]
+        if τ_reflection >= effective_horizon
 
-            if τ_refresh < alg.t_max[]
+            if effective_horizon < alg.t_max[]
+                # Grid was capped by refresh or max_horizon: return refresh
                 return τ_refresh, :refresh, default_return
             end
 
@@ -542,6 +696,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
             _adapt_grid_N!(alg, tightness)
             _adapt_grid_t_max!(alg, τ_reflection)
             stats.grid_N_current = alg.N[]
+            alg.max_observed_rate[] = max(alg.max_observed_rate[], l_reflection)
             return τ_reflection, :reflect, GradientMeta(∇ϕx)
         end
 
@@ -562,8 +717,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
                 recompute_time_grid!(alg)
             end
 
+            effective_horizon = min(alg.t_max[], τ_refresh, max_horizon)
             construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
-                early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_)
+                early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
+                max_time=effective_horizon)
             cumulative_exp = 0.0
             rejection_count = 0
             max_rejections = min(max_rejections * 2, alg.safety_limit)
@@ -607,4 +764,18 @@ function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64)
             recompute_time_grid!(alg)
         end
     end
+end
+
+_reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
+
+function _maybe_activate_constant_bound!(alg::GridAdaptiveState, stats::StatisticCounter)
+    alg.post_warmup_simplify || return nothing
+    total_events = stats.reflections_accepted + stats.refreshment_events
+    total_events < 10 && return nothing
+    reflection_ratio = stats.reflections_accepted / total_events
+    reflection_ratio > 0.3 && return nothing
+    max_rate = alg.max_observed_rate[]
+    max_rate <= 0.0 && return nothing
+    alg.constant_bound_rate[] = max_rate * 2.0
+    return nothing
 end
