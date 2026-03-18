@@ -101,6 +101,12 @@ function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, preco
     return SequenceAdapter((adpt_flow, adpt_grad))
 end
 
+function default_adapter(flow::MutableBoomerang, grad::SubsampledGradient, precond_dt=10.0, t_warmup=100.0, t0=0.0)
+    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, 0.0)
+    adpt_grad = default_gradient_adapter(grad, t_warmup, t0)
+    return SequenceAdapter((adpt_flow, adpt_grad))
+end
+
 
 # --- 5. Boomerang Adaptation (Phase 1: diagonal) ---
 
@@ -472,6 +478,7 @@ Recomputes Cholesky factors `L` and `ΣL` without explicit matrix inverse.
 function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:diagonal})
     _has_data(stats) || return flow
 
+    # TODO: these allocate, but can be solved using the buffers mentioned in Val{:full}
     μ_est = stats_mean(stats)
     σ2_est = stats_var(stats)
 
@@ -488,6 +495,8 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
 
     # Recompute factors directly from diagonal entries (O(d), no dense allocation)
     γ = flow.Γ.diag
+    # TODO: these allocate but there is really no need for that, could just do in-place stuff...
+    # that would also make L and ΣL const in the struct definition?
     flow.L = Diagonal(sqrt.(γ))
     flow.ΣL = Diagonal(1.0 ./ sqrt.(γ))
     flow.eigen_cache = nothing
@@ -512,12 +521,14 @@ Cholesky factors `L` and `ΣL`. Falls back to diagonal update on factorization f
 function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:fullrank})
     _has_data(stats) || return flow
 
+    # TODO: reduce the allocations by reusing buffers and in-place operations?
+    # we could add the buffers to AnyBoomerangStats and require some API with _get_mean_buffer(), _get_cov_buffer(), etc. to avoid exposing the internal structure
     d = length(flow.μ)
     μ_est = stats_mean(stats)
     Σ_est = stats_cov(stats)
 
     # Diagonal fallback target (also used as shrinkage anchor)
-    σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
+    σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2) # TODO: also allocates.
     Σ0 = Diagonal(σ2_diag)
 
     # Shrinkage toward diagonal: strong initially, decays with observation count/time.
@@ -527,6 +538,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
         α = 0.0
     end
 
+    # TODO: also allocates!
     Σ_reg = (1.0 - α) .* Σ_est .+ α .* Matrix(Σ0)
 
     # Enforce symmetry and diagonal floor
@@ -535,6 +547,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
         Σ_sym.data[i, i] = max(Σ_sym[i, i], BOOM_DIAG_FLOOR^2)
     end
 
+    # TODO: also allocates! We could do an in-place Cholesky on a copy of Σ_sym?
     # Attempt Cholesky factorization of Σ
     Σ_chol = try
         cholesky(Σ_sym)
@@ -559,6 +572,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
         end
     end
 
+    # TODO: these also allocate a TON!
     # Compute Γ = Σ⁻¹ and its Cholesky
     Γ_new = inv(Σ_chol)
     Γ_sym = Symmetric(Γ_new)

@@ -169,7 +169,7 @@
         boom = Boomerang(3)
 
         @test PDMPSamplers.min_grid_cells(zz, 5, 20) == 5
-        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 10
+        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 5
         @test PDMPSamplers.min_grid_cells(boom, 15, 20) == 15
 
         @test PDMPSamplers.max_grid_horizon(zz) == 1e10
@@ -182,7 +182,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(20), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[], Ref(NaN), Ref(0.0), false
         )
 
         # Tight bound → shrink N
@@ -215,7 +215,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(16), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[], Ref(NaN), Ref(0.0), false
         )
 
         PDMPSamplers._increase_grid_N!(alg)
@@ -232,7 +232,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(10), Ref(5.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[], Ref(NaN), Ref(0.0), false
         )
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)

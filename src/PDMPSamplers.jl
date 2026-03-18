@@ -60,7 +60,7 @@ include("poisson_time_strategies/sticky.jl")
 include("poisson_time_strategies/rootspoissontime.jl")
 include("poisson_time_strategies/adaptivethinning.jl")
 include("poisson_time_strategies/exact.jl")
-include("poisson_time_strategies/optimistic_failsafe.jl")
+# include("poisson_time_strategies/optimistic_failsafe.jl") # needs work!
 
 
 include("trace.jl")

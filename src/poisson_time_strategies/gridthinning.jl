@@ -500,8 +500,14 @@ function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, mod
         N_min = max(N_min, 15)
     end
     est = _default_early_stop(flow, strat.early_stop_threshold)
+    est = _adjust_early_stop(model.grad, est)
     _build_grid_adaptive_state(strat, state, N_base, N_min, est)
 end
+
+_adjust_early_stop(::GradientStrategy, est::Float64) = est
+_adjust_early_stop(::SubsampledGradient, ::Float64) = Inf
+
+_effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64) = min(t_max, τ_refresh, max_horizon)
 
 function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
     T = typeof(strat.t_max)
@@ -640,7 +646,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, a
 
     # Draw refresh time FIRST so we can cap grid construction (Phase 1A)
     τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
-    effective_horizon = min(alg.t_max[], τ_refresh, max_horizon)
+    effective_horizon = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon)
 
     # Build grid once for this event, capped at effective horizon
     construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
@@ -694,7 +700,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, a
         if rand() * lb_reflection <= l_reflection
             tightness = l_reflection / lb_reflection
             _adapt_grid_N!(alg, tightness)
-            _adapt_grid_t_max!(alg, τ_reflection)
+            _adapt_grid_t_max!(alg, τ_reflection, model.grad)
             stats.grid_N_current = alg.N[]
             alg.max_observed_rate[] = max(alg.max_observed_rate[], l_reflection)
             return τ_reflection, :reflect, GradientMeta(∇ϕx)
@@ -711,13 +717,9 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, a
 
             # Also shrink t_max when the grid integral greatly exceeds
             # cumulative_exp, indicating most of the domain has zero rate.
-            total_integral = sum(i -> pos(pcb.Λ_vals[i]) * (pcb.t_grid[i+1] - pcb.t_grid[i]), 1:alg.N[])
-            if total_integral > 0 && cumulative_exp < 0.1 * total_integral
-                alg.t_max[] = max(alg.t_max[] * alg.α⁻, 0.1)
-                recompute_time_grid!(alg)
-            end
+            _shrink_t_max_on_rejection!(alg, pcb, cumulative_exp, model.grad)
 
-            effective_horizon = min(alg.t_max[], τ_refresh, max_horizon)
+            effective_horizon = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon)
             construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
                 early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
                 max_time=effective_horizon)
@@ -755,7 +757,7 @@ function _increase_grid_N!(alg::GridAdaptiveState)
     end
 end
 
-function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64)
+function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::GradientStrategy)
     t_max = alg.t_max[]
     if τ_accepted < 0.25 * t_max
         new_t_max = max(4.0 * τ_accepted, 0.1)
@@ -765,6 +767,25 @@ function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64)
         end
     end
 end
+function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::SubsampledGradient)
+    t_max = alg.t_max[]
+    if τ_accepted < 0.05 * t_max
+        new_t_max = max(20.0 * τ_accepted, 0.5)
+        if new_t_max < t_max
+            alg.t_max[] = new_t_max
+            recompute_time_grid!(alg)
+        end
+    end
+end
+
+function _shrink_t_max_on_rejection!(alg::GridAdaptiveState, pcb::PiecewiseConstantBound, cumulative_exp::Float64, ::GradientStrategy)
+    total_integral = sum(i -> pos(pcb.Λ_vals[i]) * (pcb.t_grid[i+1] - pcb.t_grid[i]), 1:alg.N[])
+    if total_integral > 0 && cumulative_exp < 0.1 * total_integral
+        alg.t_max[] = max(alg.t_max[] * alg.α⁻, 0.1)
+        recompute_time_grid!(alg)
+    end
+end
+_shrink_t_max_on_rejection!(::GridAdaptiveState, ::PiecewiseConstantBound, ::Float64, ::SubsampledGradient) = nothing
 
 _reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
 

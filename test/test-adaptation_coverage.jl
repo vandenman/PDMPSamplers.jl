@@ -289,7 +289,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
 
         m = mean(trace)
         @test m ≈ μ_true atol = 0.5
@@ -307,7 +307,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
 
         m = mean(trace)
         @test m ≈ μ_true atol = 0.5
@@ -325,7 +325,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
 
         m = mean(trace)
         @test m ≈ μ_true atol = 1.25
