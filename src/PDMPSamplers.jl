@@ -135,7 +135,7 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
-    OptimisticStrategy,
+    # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
     RootsPoissonTimeStrategy,
     Sticky,
     ExactStrategy,
