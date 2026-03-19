@@ -84,11 +84,11 @@ end
 
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::FL,
-    grad_and_hess_or_grad_and_hvp::F, add_rate::Bool=true;
+    grad_and_hess_or_grad_and_hvp, add_rate::Bool=true;
     cached_y0::Float64=NaN, cached_d0::Float64=NaN,
     early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing,
     state_cache::Union{AbstractPDMPState,Nothing}=nothing,
-    max_time::Float64=Inf) where {FL<:ContinuousDynamics, F}
+    max_time::Float64=Inf) where {FL<:ContinuousDynamics}
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals

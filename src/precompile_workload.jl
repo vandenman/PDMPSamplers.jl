@@ -29,6 +29,30 @@ PrecompileTools.@compile_workload begin
     chains_boom = pdmp_sample(x0, flow_boom, model_global, alg, 0.0, T)
     mean(chains_boom)
 
+    # ── 3b. Matrix{Float64} variants (matching R/JuliaCall interface types) ─
+    prec_mat = Matrix{Float64}(I(d))
+    flow_zz_mat = ZigZag(prec_mat, zeros(d))
+    chains_zz_mat = pdmp_sample(x0, flow_zz_mat, model_global, alg, 0.0, T)
+    mean(chains_zz_mat)
+
+    flow_boom_mat = Boomerang(prec_mat, zeros(d))
+    chains_boom_mat = pdmp_sample(x0, flow_boom_mat, model_global, alg, 0.0, T)
+    mean(chains_boom_mat)
+
+    flow_bps_mat = BouncyParticle(prec_mat, zeros(d))
+    pdmp_sample(x0, flow_bps_mat, model_global, alg, 0.0, T)
+
+    # ── 3c. Diagonal variants (R default identity path) ─────────────────────
+    prec_diag = Diagonal(ones(d))
+    flow_zz_diag = ZigZag(prec_diag, zeros(d))
+    pdmp_sample(x0, flow_zz_diag, model_global, alg, 0.0, T)
+
+    flow_boom_diag = Boomerang(prec_diag, zeros(d))
+    pdmp_sample(x0, flow_boom_diag, model_global, alg, 0.0, T)
+
+    flow_bps_diag = BouncyParticle(prec_diag, zeros(d))
+    pdmp_sample(x0, flow_bps_diag, model_global, alg, 0.0, T)
+
     # ── 4. AdaptiveBoomerang (MutableBoomerang with BoomerangAdapter) ────────
     # Adaptive / preconditioned flows can error on trivial targets (safety limits,
     # empty trace during warmup). Compilation still happens before any error.
