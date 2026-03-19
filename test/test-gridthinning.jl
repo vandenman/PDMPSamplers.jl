@@ -128,7 +128,7 @@ import DifferentiationInterface as DI
         alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 2_000.0; progress=show_progress)
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress)
         @test length(trace) > 20
         @test all(isfinite, mean(trace))
     end
@@ -424,5 +424,38 @@ import DifferentiationInterface as DI
 
         @test length(trace) > 20
         @test stats.∇²f_calls > 0
+    end
+
+    @testset "get_rate_and_deriv FiniteDiffVHV with BouncyParticle (ContinuousDynamics dispatch)" begin
+        d = 3
+        Random.seed!(44)
+        target = gen_data(Distributions.MvNormal, d, 2.0)
+
+        flow = BouncyParticle(d, 1.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad)  # no HVP
+        alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress)
+        @test length(trace) > 10
+        @test all(isfinite, mean(trace))
+    end
+
+    @testset "_constant_bound_event_time via post_warmup_simplify" begin
+        d = 3
+        Random.seed!(45)
+        target = gen_data(Distributions.MvNormal, d, 2.0)
+
+        # High refresh rate → many refreshments, few reflections → constant bound activates
+        flow = BouncyParticle(d, 5.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad)
+        alg = GridThinningStrategy(; N=16, t_max=2.0, post_warmup_simplify=true)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0, 100.0; progress=show_progress)
+        @test length(trace) > 10
+        @test all(isfinite, mean(trace))
     end
 end

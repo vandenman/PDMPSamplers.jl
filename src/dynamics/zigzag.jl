@@ -44,6 +44,21 @@ end
 λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag)   = sum(i->λ_i(i, ξ, ∇ϕ[i], flow), eachindex(ξ.θ))
 λ_i(i::Integer, ξ::SkeletonPoint, ∇ϕ_i::Real, ::ZigZag) = pos(ξ.θ[i] * ∇ϕ_i)
 
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input::AbstractVector, ::ZigZag)
+    vt = state.ξ.θ
+    f_prime_t = zero(eltype(vt))
+    for i in eachindex(∇U_xt)
+        if ispositive(vt[i] * ∇U_xt[i])
+            f_prime_t += vt[i] * curvature_input[i]
+        end
+    end
+    return f_prime_t
+end
+
+function ∂λ∂t(state::AbstractPDMPState, ::AbstractVector, curvature_input::Real, ::ZigZag)
+    return curvature_input
+end
+
 
 function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::ZigZag)
     state.t[] += τ
