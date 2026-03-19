@@ -382,6 +382,74 @@ function stats_cov(ws::WelfordBoomerangStats)
 end
 
 
+# --- In-place mean/var/cov (allocation-free) ---
+
+_coord_time(stats::WelfordBoomerangStats, ::Int) = stats.total_time
+_coord_time(stats::BoomerangWarmupStats, i::Int) = stats.coord_time[i]
+
+function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
+    T = stats.total_time
+    if T > 0
+        @inbounds for i in eachindex(μ)
+            μ[i] = stats.sum_x_lin[i] / T
+        end
+    else
+        fill!(μ, 0.0)
+    end
+    return μ
+end
+
+function stats_mean!(μ::AbstractVector, stats::BoomerangWarmupStats)
+    @inbounds for i in eachindex(μ)
+        T = stats.coord_time[i]
+        μ[i] = T > 0 ? stats.sum_x_lin[i] / T : 0.0
+    end
+    return μ
+end
+
+function stats_cov!(C::AbstractMatrix, stats::WelfordBoomerangStats)
+    d = size(C, 1)
+    sum_xy = stats.sum_xy::Matrix{Float64}
+    T = stats.total_time
+    if T <= 0
+        fill!(C, 0.0)
+        @inbounds for i in 1:d; C[i, i] = 1.0; end
+        return C
+    end
+    @inbounds for j in 1:d
+        μj = stats.sum_x[j] / T
+        for i in j:d
+            μi = stats.sum_x[i] / T
+            cij = sum_xy[i, j] / T - μi * μj
+            C[i, j] = cij
+            C[j, i] = cij
+        end
+    end
+    return C
+end
+
+function stats_cov!(C::AbstractMatrix, stats::BoomerangWarmupStats)
+    d = size(C, 1)
+    sum_xy = stats.sum_xy
+    sum_xy === nothing && error("BoomerangWarmupStats was not initialized for fullrank (no sum_xy)")
+    @inbounds for j in 1:d
+        μj = stats.coord_time[j] > 0 ? stats.sum_x[j] / stats.coord_time[j] : 0.0
+        for i in j:d
+            t_pair = min(stats.coord_time[i], stats.coord_time[j])
+            μi = stats.coord_time[i] > 0 ? stats.sum_x[i] / stats.coord_time[i] : 0.0
+            if t_pair > 0
+                cij = sum_xy[i, j] / t_pair - μi * μj
+            else
+                cij = i == j ? 1.0 : 0.0
+            end
+            C[i, j] = cij
+            C[j, i] = cij
+        end
+    end
+    return C
+end
+
+
 """
     adapt_interval(no_updates_done::Int, base_dt::Float64)
 
@@ -393,27 +461,38 @@ function adapt_interval(no_updates_done::Int, base_dt::Float64)
     return base_dt * factor
 end
 
+struct FullrankWorkspace
+    vec_d::Vector{Float64}
+    mat_dd::Matrix{Float64}
+end
+FullrankWorkspace(d::Int) = FullrankWorkspace(Vector{Float64}(undef, d), Matrix{Float64}(undef, d, d))
+
 """
-    BoomerangAdapter{S} <: AbstractAdapter
+    BoomerangAdapter{S, W} <: AbstractAdapter
 
 Adapter for `MutableBoomerang` that learns μ and Γ during warmup.
 Supports `:diagonal` (Phase 1) and `:fullrank` (Phase 2) schemes.
 
 Parameterized on the stats accumulator type `S`, which defaults to
 `WelfordBoomerangStats` for numerically stable per-event updates.
+`W` is the workspace type (`Nothing` for diagonal, `FullrankWorkspace`
+for fullrank/lowrank).
 """
-mutable struct BoomerangAdapter{S} <: AbstractAdapter
+mutable struct BoomerangAdapter{S, W} <: AbstractAdapter
     const base_dt::Float64
     last_update::Float64
     no_updates_done::Int
     const scheme::Symbol
     stats::S
     did_update::Bool
+    const workspace::W
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
     stats = WelfordBoomerangStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
-    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false)
+    needs_ws = scheme == :fullrank || scheme == :lowrank
+    ws = needs_ws ? FullrankWorkspace(d) : nothing
+    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false, ws)
 end
 
 function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
@@ -425,7 +504,7 @@ function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::Muta
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
-        update_boomerang!(flow, ad.stats, Val(ad.scheme))
+        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace)
         refresh_velocity!(state, flow)
         # After flow.μ changes, reset prev_x so next segment starts fresh
         ad.stats.prev_x .= state.ξ.x
@@ -442,7 +521,7 @@ function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::Mutab
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
-        update_boomerang!(flow, ad.stats, Val(ad.scheme))
+        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace)
         refresh_velocity!(state, flow)
         ad.last_update = state.t[]
         ad.no_updates_done += 1
@@ -470,37 +549,30 @@ _shrinkage_time(stats::BoomerangWarmupStats) = maximum(stats.coord_time)
 _shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
 
 """
-    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:diagonal})
+    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:diagonal}, ::Nothing)
 
 Update `flow.μ` and diagonal `flow.Γ` from online sufficient statistics.
-Recomputes Cholesky factors `L` and `ΣL` without explicit matrix inverse.
+Zero-allocation: computes mean, variance, and Cholesky factors in a single pass.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:diagonal})
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:diagonal}, ::Nothing)
     _has_data(stats) || return flow
-
-    # TODO: these allocate, but can be solved using the buffers mentioned in Val{:full}
-    μ_est = stats_mean(stats)
-    σ2_est = stats_var(stats)
-
-    d = length(μ_est)
-
-    # Update μ
-    copyto!(flow.μ, μ_est)
-
-    # Update diagonal Γ = diag(1/σ²), with floor on σ
-    for i in 1:d
-        σ2 = max(σ2_est[i], BOOM_DIAG_FLOOR^2)
-        flow.Γ[i, i] = 1.0 / σ2
+    d = length(flow.μ)
+    stats_mean!(flow.μ, stats)
+    @inbounds for i in 1:d
+        T = _coord_time(stats, i)
+        if T > 0
+            μi = stats.sum_x[i] / T
+            σ2 = max(stats.sum_x2[i] / T - μi * μi, BOOM_DIAG_FLOOR^2)
+        else
+            σ2 = 1.0
+        end
+        γ = 1.0 / σ2
+        flow.Γ[i, i] = γ
+        s = sqrt(γ)
+        flow.L[i, i] = s
+        flow.ΣL[i, i] = 1.0 / s
     end
-
-    # Recompute factors directly from diagonal entries (O(d), no dense allocation)
-    γ = flow.Γ.diag
-    # TODO: these allocate but there is really no need for that, could just do in-place stuff...
-    # that would also make L and ΣL const in the struct definition?
-    flow.L = Diagonal(sqrt.(γ))
-    flow.ΣL = Diagonal(1.0 ./ sqrt.(γ))
     flow.eigen_cache = nothing
-
     return flow
 end
 
@@ -512,24 +584,29 @@ const BOOM_SHRINKAGE_BASE = 0.5
 const BOOM_SHRINKAGE_DROP_TIME = 200.0
 
 """
-    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:fullrank})
+    update_boomerang!(flow::MutableBoomerang, stats, ::Val{:fullrank}, ws)
 
 Update `flow.μ` and dense `flow.Γ` from online sufficient statistics.
 Estimates full covariance, applies shrinkage regularization, and recomputes
 Cholesky factors `L` and `ΣL`. Falls back to diagonal update on factorization failure.
+
+Uses preallocated workspace `ws` for all intermediate computations.
+Explicit symmetrization `(M + M')/2` is unnecessary since `stats_cov!` produces
+symmetric output and shrinkage preserves it; `Symmetric()` wrappers suffice.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:fullrank})
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:fullrank}, ws::FullrankWorkspace)
     _has_data(stats) || return flow
-
-    # TODO: reduce the allocations by reusing buffers and in-place operations?
-    # we could add the buffers to AnyBoomerangStats and require some API with _get_mean_buffer(), _get_cov_buffer(), etc. to avoid exposing the internal structure
     d = length(flow.μ)
-    μ_est = stats_mean(stats)
-    Σ_est = stats_cov(stats)
+    vec_d = ws.vec_d
+    work = ws.mat_dd
 
-    # Diagonal fallback target (also used as shrinkage anchor)
-    σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2) # TODO: also allocates.
-    Σ0 = Diagonal(σ2_diag)
+    stats_mean!(flow.μ, stats)
+    stats_cov!(work, stats)
+
+    # Store diagonal for shrinkage anchor and fallback
+    @inbounds for i in 1:d
+        vec_d[i] = max(work[i, i], BOOM_DIAG_FLOOR^2)
+    end
 
     # Shrinkage toward diagonal: strong initially, decays with observation count/time.
     total_time = _shrinkage_time(stats)
@@ -537,58 +614,74 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
     if total_time > BOOM_SHRINKAGE_DROP_TIME
         α = 0.0
     end
-
-    # TODO: also allocates!
-    Σ_reg = (1.0 - α) .* Σ_est .+ α .* Matrix(Σ0)
-
-    # Enforce symmetry and diagonal floor
-    Σ_sym = Symmetric((Σ_reg + Σ_reg') / 2)
-    for i in 1:d
-        Σ_sym.data[i, i] = max(Σ_sym[i, i], BOOM_DIAG_FLOOR^2)
+    if α > 0
+        onemα = 1.0 - α
+        @inbounds for j in 1:d, i in 1:d
+            if i == j
+                work[i, j] = onemα * work[i, j] + α * vec_d[i]
+            else
+                work[i, j] *= onemα
+            end
+        end
     end
 
-    # TODO: also allocates! We could do an in-place Cholesky on a copy of Σ_sym?
-    # Attempt Cholesky factorization of Σ
+    # Enforce diagonal floor
+    @inbounds for i in 1:d
+        work[i, i] = max(work[i, i], BOOM_DIAG_FLOOR^2)
+    end
+
+    # Cholesky of Σ → store L_Σ in flow.ΣL (in-place)
+    copyto!(flow.ΣL.data, work)
     Σ_chol = try
-        cholesky(Σ_sym)
+        cholesky!(Symmetric(flow.ΣL.data, :L))
     catch e
         e isa PosDefException || rethrow()
-        _fullrank_diagonal_fallback!(flow, μ_est, σ2_diag)
+        _fullrank_diagonal_fallback!(flow, vec_d)
         return flow
     end
 
-    # Condition check via Cholesky diagonal
-    L_diag = diag(Σ_chol.L)
-    κ_approx = (maximum(L_diag) / max(minimum(L_diag), BOOM_DIAG_FLOOR))^2
+    # Condition check (allocation-free)
+    L_max = -Inf
+    L_min = Inf
+    @inbounds for i in 1:d
+        l = flow.ΣL.data[i, i]
+        L_max = max(L_max, l)
+        L_min = min(L_min, l)
+    end
+    κ_approx = (L_max / max(L_min, BOOM_DIAG_FLOOR))^2
     if κ_approx > BOOM_COND_MAX
-        # Increase shrinkage and retry
-        Σ_sym = Symmetric(0.5 .* Σ_sym .+ 0.5 .* Matrix(Σ0))
+        # Extra shrinkage on work (still intact) and retry
+        @inbounds for j in 1:d, i in 1:d
+            if i == j
+                work[i, j] = 0.5 * work[i, j] + 0.5 * vec_d[i]
+            else
+                work[i, j] *= 0.5
+            end
+        end
+        copyto!(flow.ΣL.data, work)
         Σ_chol = try
-            cholesky(Σ_sym)
+            cholesky!(Symmetric(flow.ΣL.data, :L))
         catch e
             e isa PosDefException || rethrow()
-            _fullrank_diagonal_fallback!(flow, μ_est, σ2_diag)
+            _fullrank_diagonal_fallback!(flow, vec_d)
             return flow
         end
     end
 
-    # TODO: these also allocate a TON!
-    # Compute Γ = Σ⁻¹ and its Cholesky
-    Γ_new = inv(Σ_chol)
-    Γ_sym = Symmetric(Γ_new)
-    Γ_chol = cholesky(Γ_sym)
+    # Compute Γ = Σ⁻¹ in-place via Cholesky solve: Σ Γ = I
+    fill!(flow.Γ.data, 0.0)
+    @inbounds for i in 1:d; flow.Γ.data[i, i] = 1.0; end
+    ldiv!(Σ_chol, flow.Γ.data)
 
-    # Update flow in-place
-    copyto!(flow.μ, μ_est)
-    flow.Γ.data .= Γ_sym
-    flow.L.data .= Γ_chol.L
-    flow.ΣL.data .= Σ_chol.L
+    # Cholesky of Γ → L_Γ in flow.L (in-place)
+    copyto!(flow.L.data, flow.Γ.data)
+    cholesky!(Symmetric(flow.L.data, :L))
+
     return flow
 end
 
-function _fullrank_diagonal_fallback!(flow::MutableBoomerang, μ_est, σ2_diag)
-    copyto!(flow.μ, μ_est)
-    d = length(μ_est)
+function _fullrank_diagonal_fallback!(flow::MutableBoomerang, σ2_diag::AbstractVector)
+    d = length(flow.μ)
 
     fill!(flow.Γ.data, 0.0)
     fill!(flow.L.data, 0.0)
@@ -607,18 +700,17 @@ end
 
 # --- Low-rank adaptation ---
 
-function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:lowrank})
+function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:lowrank}, ws::FullrankWorkspace)
     _has_data(stats) || return flow
 
     lrp = flow.Γ::LowRankPrecision
     d = length(flow.μ)
     r = length(lrp.Λ)
+    work = ws.mat_dd
+    vec_d = ws.vec_d
 
-    μ_est = stats_mean(stats)
-    Σ_est = stats_cov(stats)
-
-    σ2_diag = max.(diag(Σ_est), BOOM_DIAG_FLOOR^2)
-    Σ0 = Diagonal(σ2_diag)
+    stats_mean!(flow.μ, stats)
+    stats_cov!(work, stats)
 
     # Shrinkage schedule (same as fullrank)
     total_time = _shrinkage_time(stats)
@@ -626,15 +718,28 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
     if total_time > BOOM_SHRINKAGE_DROP_TIME
         α = 0.0
     end
-
-    Σ_reg = (1.0 - α) .* Σ_est .+ α .* Matrix(Σ0)
-    Σ_sym = Symmetric((Σ_reg + Σ_reg') / 2)
-    for i in 1:d
-        Σ_sym.data[i, i] = max(Σ_sym[i, i], BOOM_DIAG_FLOOR^2)
+    if α > 0
+        onemα = 1.0 - α
+        @inbounds for j in 1:d, i in 1:d
+            if i == j
+                σ2_anchor = max(work[i, i], BOOM_DIAG_FLOOR^2)
+                work[i, j] = onemα * work[i, j] + α * σ2_anchor
+            else
+                work[i, j] *= onemα
+            end
+        end
+    end
+    @inbounds for i in 1:d
+        work[i, i] = max(work[i, i], BOOM_DIAG_FLOOR^2)
     end
 
-    # Eigendecomposition (O(d³)); eigenvalues ascending for Symmetric in Julia
-    F = eigen(Σ_sym)
+    # Save Σ diagonal before eigen! destroys work
+    @inbounds for i in 1:d
+        vec_d[i] = work[i, i]
+    end
+
+    # In-place eigendecomposition (O(d³)); eigenvalues ascending for Symmetric in Julia
+    F = eigen!(Symmetric(work, :L))
 
     # Top-r eigenpairs are the last r entries
     for k in 1:r
@@ -651,11 +756,10 @@ function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::V
         for k in 1:r
             diag_vlv += lrp.V[i, k]^2 * lrp.Λ[k]
         end
-        lrp.D[i] = max(Σ_sym[i, i] - diag_vlv, BOOM_DIAG_FLOOR^2)
+        lrp.D[i] = max(vec_d[i] - diag_vlv, BOOM_DIAG_FLOOR^2)
     end
 
     lowrank_precompute!(lrp)
-    copyto!(flow.μ, μ_est)
     return flow
 end
 
