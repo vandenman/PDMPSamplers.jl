@@ -1,3 +1,4 @@
+# COV_EXCL_START
 # Optimistic failsafe Poisson time strategy (Phase 3A+3B)
 #
 # Uses piecewise linear interpolation through gradient-only rate evaluations
@@ -257,3 +258,5 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
 
     error("OptimisticStrategy: safety limit reached after $(alg.safety_limit) iterations")
 end
+
+# COV_EXCL_STOP

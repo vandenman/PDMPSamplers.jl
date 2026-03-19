@@ -1,6 +1,6 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-@testset "Adaptation coverage" begin
+@testset "Adaptation" begin
 
     @testset "WelfordBoomerangStats basic" begin
         d = 3
@@ -119,7 +119,7 @@
         ws = PDMPSamplers.WelfordBoomerangStats(d)
 
         # No data → no-op
-        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing)
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal))
         @test all(flow.μ .== 0.0)
 
         # Feed data
@@ -131,7 +131,7 @@
             PDMPSamplers.welford_update!(ws, x, t)
         end
 
-        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing)
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal))
         @test flow.μ ≈ [1.0, 2.0, 3.0, 4.0] atol = 0.5
         @test all(diag(flow.Γ) .> 0)
     end
@@ -150,7 +150,7 @@
             PDMPSamplers.welford_update!(ws, x, t)
         end
 
-        PDMPSamplers.update_boomerang!(flow, ws, Val(:fullrank), PDMPSamplers.FullrankWorkspace(d))
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:fullrank))
         @test flow.μ ≈ μ_true atol = 0.5
         @test all(diag(Matrix(flow.Γ)) .> 0)
     end
@@ -168,7 +168,7 @@
             PDMPSamplers.welford_update!(ws, x, t)
         end
 
-        PDMPSamplers.update_boomerang!(flow, ws, Val(:lowrank), PDMPSamplers.FullrankWorkspace(d))
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:lowrank))
         lrp = flow.Γ::PDMPSamplers.LowRankPrecision
         @test all(lrp.Λ .> 0)
         @test all(lrp.D .> 0)
@@ -180,8 +180,7 @@
         μ_est = [1.0, 2.0, 3.0]
         σ2_diag = [0.5, 1.0, 2.0]
 
-        copyto!(flow.μ, μ_est)
-        PDMPSamplers._fullrank_diagonal_fallback!(flow, σ2_diag)
+        PDMPSamplers._fullrank_diagonal_fallback!(flow, μ_est, σ2_diag)
         @test flow.μ ≈ μ_est
         for i in 1:d
             @test flow.Γ[i, i] ≈ 1.0 / σ2_diag[i]
@@ -234,6 +233,30 @@
         @test result isa PDMPSamplers.NoAdaptation
     end
 
+    @testset "default_adapter for MutableBoomerang + SubsampledGradient" begin
+        d = 3
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        grad_sub = SubsampledGradient(
+            (out, x) -> (out .= x),
+            n -> nothing,
+            tr -> nothing,
+            (out, x) -> (out .= x),
+            5,
+            2,
+            false;
+            resample_dt=0.25,
+        )
+
+        adapter = PDMPSamplers.default_adapter(flow, grad_sub, 6.0, 40.0, 1.5)
+        @test adapter isa PDMPSamplers.SequenceAdapter
+
+        ad_flow, ad_grad = adapter.adapters
+        @test ad_flow isa PDMPSamplers.BoomerangAdapter
+        @test ad_flow.base_dt == 6.0
+        @test ad_flow.last_update == 1.5
+        @test ad_grad isa PDMPSamplers.SequenceAdapter
+    end
+
     @testset "default_dynamics_adapter for PreconditionedDynamics" begin
         zz = ZigZag(3)
         precond = PDMPSamplers.PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), zz)
@@ -268,6 +291,32 @@
         @test ad.stats.sum_xy !== nothing
     end
 
+    @testset "Allocation-free stats helpers" begin
+        d = 3
+
+        ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
+        μ = zeros(d)
+        C = zeros(d, d)
+        PDMPSamplers.stats_mean!(μ, ws)
+        PDMPSamplers.stats_cov!(C, ws)
+
+        alloc_mean_welford = @allocated PDMPSamplers.stats_mean!(μ, ws)
+        alloc_cov_welford = @allocated PDMPSamplers.stats_cov!(C, ws)
+        @test alloc_mean_welford == 0
+        @test alloc_cov_welford == 0
+
+        warm = PDMPSamplers.BoomerangWarmupStats(d; fullrank=true)
+        μ2 = zeros(d)
+        C2 = zeros(d, d)
+        PDMPSamplers.stats_mean!(μ2, warm)
+        PDMPSamplers.stats_cov!(C2, warm)
+
+        alloc_mean_warm = @allocated PDMPSamplers.stats_mean!(μ2, warm)
+        alloc_cov_warm = @allocated PDMPSamplers.stats_cov!(C2, warm)
+        @test alloc_mean_warm == 0
+        @test alloc_cov_warm == 0
+    end
+
     @testset "BoomerangAdapter fallback for non-MutableBoomerang" begin
         d = 3
         ba = PDMPSamplers.BoomerangAdapter(1.0, 0.0, d)
@@ -290,7 +339,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
 
         m = mean(trace)
         @test m ≈ μ_true atol = 0.5
@@ -308,7 +357,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
 
         m = mean(trace)
         @test m ≈ μ_true atol = 0.5
@@ -326,7 +375,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
 
         m = mean(trace)
         @test m ≈ μ_true atol = 1.25

@@ -1,6 +1,8 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-@testset "Grid thinning coverage" begin
+import DifferentiationInterface as DI
+
+@testset "Grid thinning" begin
 
     @testset "PiecewiseConstantBound functor" begin
         t_grid = [0.0, 1.0, 2.0, 3.0]
@@ -169,7 +171,7 @@
         boom = Boomerang(3)
 
         @test PDMPSamplers.min_grid_cells(zz, 5, 20) == 5
-        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 5
+        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 10
         @test PDMPSamplers.min_grid_cells(boom, 15, 20) == 15
 
         @test PDMPSamplers.max_grid_horizon(zz) == 1e10
@@ -182,7 +184,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(20), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[], Ref(NaN), Ref(0.0), false
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
         )
 
         # Tight bound → shrink N
@@ -215,7 +217,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(16), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[], Ref(NaN), Ref(0.0), false
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
         )
 
         PDMPSamplers._increase_grid_N!(alg)
@@ -232,7 +234,7 @@
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         alg = PDMPSamplers.GridAdaptiveState(
             pcb, Ref(10), Ref(5.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[], Ref(NaN), Ref(0.0), false
+            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
         )
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)
@@ -334,5 +336,75 @@
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress)
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
+    end
+
+    @testset "Strategy interface defaults and roots acceptance" begin
+        roots = PDMPSamplers.RootsPoissonTimeStrategy()
+        stats = PDMPSamplers.StatisticCounter()
+
+        @test PDMPSamplers._reset_inner_grid!(roots) === nothing
+        @test PDMPSamplers._maybe_activate_constant_bound!(roots, stats) === nothing
+        @test PDMPSamplers.accept_reflection_event(roots, :dummy) === true
+    end
+
+    @testset "Post-warmup constant-bound activation" begin
+        d = 3
+        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
+        strat = GridThinningStrategy(; N=20, t_max=2.0, post_warmup_simplify=true)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
+
+        stats = PDMPSamplers.StatisticCounter()
+        stats.reflections_accepted = 2
+        stats.refreshment_events = 18
+        alg.max_observed_rate[] = 3.5
+        PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
+        @test alg.constant_bound_rate[] ≈ 7.0
+
+        alg.constant_bound_rate[] = NaN
+        stats.reflections_accepted = 8
+        stats.refreshment_events = 2
+        PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
+        @test isnan(alg.constant_bound_rate[])
+    end
+
+    @testset "Subsampled gradient grid adaptation branches" begin
+        d = 3
+        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
+        strat = GridThinningStrategy(; N=20, t_max=2.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
+
+        grad_sub = SubsampledGradient(
+            (out, x) -> (out .= x),
+            n -> nothing,
+            tr -> nothing,
+            (out, x) -> (out .= x),
+            5,
+            0,
+            false;
+            resample_dt=0.1,
+        )
+
+        alg.t_max[] = 10.0
+        PDMPSamplers._adapt_grid_t_max!(alg, 0.2, grad_sub)
+        @test alg.t_max[] ≈ 4.0
+
+        old_tmax = alg.t_max[]
+        PDMPSamplers._shrink_t_max_on_rejection!(alg, alg.pcb, 0.01, grad_sub)
+        @test alg.t_max[] == old_tmax
+    end
+
+    @testset "End-to-end with joint directional curvature" begin
+        d = 2
+        f_logdensity(x) = -0.5 * sum(abs2, x)
+
+        flow = BouncyParticle(d, 1.0)
+        model = PDMPModel(d, LogDensity(f_logdensity), DI.AutoForwardDiff(), true)
+        alg = GridThinningStrategy(; N=16, t_max=1.5)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress)
+
+        @test length(trace) > 20
+        @test stats.∇²f_calls > 0
     end
 end

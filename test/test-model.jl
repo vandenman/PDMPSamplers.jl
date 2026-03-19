@@ -56,6 +56,26 @@ import ForwardDiff
         @test model_ld_hvp.hvp isa Function
     end
 
+    @testset "LogDensity + joint directional derivatives" begin
+        ld = LogDensity(f_logdensity)
+        backend = DI.AutoForwardDiff()
+        model_joint = PDMPModel(d, ld, backend, true)
+        @test model_joint.joint !== nothing
+
+        x = [1.0, -2.0]
+        v = [0.5, 0.25]
+        dphi, d2phi = model_joint.joint(x, v)
+        @test dphi ≈ dot(x, v)
+        @test d2phi ≈ dot(v, v)
+
+        stats = PDMPSamplers.StatisticCounter()
+        model_stats = PDMPSamplers.with_stats(model_joint, stats)
+        dphi2, d2phi2 = model_stats.joint(x, v)
+        @test dphi2 ≈ dphi
+        @test d2phi2 ≈ d2phi
+        @test stats.∇²f_calls == 1
+    end
+
     @testset "SkeletonPoint copyto!" begin
         x1 = [1.0, 2.0]
         θ1 = [3.0, 4.0]
