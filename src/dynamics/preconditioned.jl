@@ -265,3 +265,7 @@ end
 function DensePreconditionedBPS(Γ::AbstractMatrix, μ::AbstractVector; refresh_rate::Real=1.0)
     PreconditionedDynamics(DensePreconditioner(length(μ)), BouncyParticle(Γ, μ, refresh_rate))
 end
+
+function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, pd::PreconditionedDynamics)
+    return ∂λ∂t(state, ∇U_xt, curvature_input, pd.dynamics)
+end

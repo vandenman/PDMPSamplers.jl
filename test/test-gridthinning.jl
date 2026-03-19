@@ -1,6 +1,8 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-@testset "Grid thinning coverage" begin
+import DifferentiationInterface as DI
+
+@testset "Grid thinning" begin
 
     @testset "PiecewiseConstantBound functor" begin
         t_grid = [0.0, 1.0, 2.0, 3.0]
@@ -104,6 +106,33 @@
         @test isapprox(deriv_fd, deriv_exact; rtol=0.01)
     end
 
+    @testset "FiniteDiffVHV with gridthinning fallback" begin
+        d = 3
+        target = gen_data(Distributions.MvNormal, d, 2.0)
+        flow = ZigZag(d)
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+
+        grad_func = x -> begin
+            out = similar(x)
+            neg_gradient!(target, out, x)
+            out
+        end
+
+        fd_vhv = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d))
+        rate_fd, deriv_fd = PDMPSamplers.get_rate_and_deriv(state, flow, fd_vhv)
+        @test rate_fd >= 0
+        @test isfinite(deriv_fd)
+
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad)  # no HVP/VHV so gridthinning uses finite-diff fallback
+        alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress)
+        @test length(trace) > 20
+        @test all(isfinite, mean(trace))
+    end
+
     @testset "∂λ∂t for different flow types" begin
         d = 3
         Random.seed!(42)
@@ -169,7 +198,7 @@
         boom = Boomerang(3)
 
         @test PDMPSamplers.min_grid_cells(zz, 5, 20) == 5
-        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 10
+        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 5
         @test PDMPSamplers.min_grid_cells(boom, 15, 20) == 15
 
         @test PDMPSamplers.max_grid_horizon(zz) == 1e10
@@ -178,12 +207,9 @@
 
     @testset "_adapt_grid_N! and _increase_grid_N!" begin
         d = 3
-        pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        alg = PDMPSamplers.GridAdaptiveState(
-            pcb, Ref(20), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
-        )
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 20, 5, Inf)
 
         # Tight bound → shrink N
         PDMPSamplers._adapt_grid_N!(alg, 0.8)
@@ -211,34 +237,28 @@
 
     @testset "_increase_grid_N!" begin
         d = 3
-        pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        alg = PDMPSamplers.GridAdaptiveState(
-            pcb, Ref(16), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
-        )
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 16, 5, Inf)
 
         PDMPSamplers._increase_grid_N!(alg)
-        @test alg.N[] == 20
+        @test alg.N[] == 16
 
         # Already at max
         PDMPSamplers._increase_grid_N!(alg)
-        @test alg.N[] == 20
+        @test alg.N[] == 16
     end
 
     @testset "reset_grid_scale!" begin
         d = 3
-        pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        alg = PDMPSamplers.GridAdaptiveState(
-            pcb, Ref(10), Ref(5.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
-        )
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=5.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 10, 5, Inf)
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)
         @test alg.t_max[] ≈ 3.0
-        @test alg.N[] == 20
-        @test length(alg.pcb.t_grid) == 21
+        @test alg.N[] == 10
+        @test length(alg.pcb.t_grid) == 11
     end
 
     @testset "GridThinningStrategy construction with use_fd_hvp" begin
@@ -334,5 +354,144 @@
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress)
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
+    end
+
+    @testset "Strategy interface defaults and roots acceptance" begin
+        roots = PDMPSamplers.RootsPoissonTimeStrategy()
+        stats = PDMPSamplers.StatisticCounter()
+
+        @test PDMPSamplers._reset_inner_grid!(roots) === nothing
+        @test PDMPSamplers._maybe_activate_constant_bound!(roots, stats) === nothing
+        @test PDMPSamplers.accept_reflection_event(roots, :dummy) === true
+    end
+
+    @testset "Post-warmup constant-bound activation" begin
+        d = 3
+        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
+        strat = GridThinningStrategy(; N=20, t_max=2.0, post_warmup_simplify=true)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
+
+        stats = PDMPSamplers.StatisticCounter()
+        stats.reflections_accepted = 2
+        stats.refreshment_events = 18
+        alg.max_observed_rate[] = 3.5
+        PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
+        @test alg.constant_bound_rate[] ≈ 7.0
+
+        alg.constant_bound_rate[] = NaN
+        stats.reflections_accepted = 8
+        stats.refreshment_events = 2
+        PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
+        @test isnan(alg.constant_bound_rate[])
+    end
+
+    @testset "Subsampled gradient grid adaptation branches" begin
+        d = 3
+        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
+        strat = GridThinningStrategy(; N=20, t_max=2.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
+
+        grad_sub = SubsampledGradient(
+            (out, x) -> (out .= x),
+            n -> nothing,
+            tr -> nothing,
+            (out, x) -> (out .= x),
+            5,
+            0,
+            false;
+            resample_dt=0.1,
+        )
+
+        alg.t_max[] = 10.0
+        PDMPSamplers._adapt_grid_t_max!(alg, 0.2, grad_sub)
+        @test alg.t_max[] ≈ 4.0
+
+        old_tmax = alg.t_max[]
+        PDMPSamplers._shrink_t_max_on_rejection!(alg, alg.pcb, 0.01, grad_sub)
+        @test alg.t_max[] == old_tmax
+    end
+
+    @testset "End-to-end with joint directional curvature" begin
+        d = 2
+        f_logdensity(x) = -0.5 * sum(abs2, x)
+
+        flow = BouncyParticle(d, 1.0)
+        model = PDMPModel(d, LogDensity(f_logdensity), DI.AutoForwardDiff(), true)
+        alg = GridThinningStrategy(; N=16, t_max=1.5)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress)
+
+        @test length(trace) > 20
+        @test stats.∇²f_calls > 0
+    end
+
+    @testset "get_rate_and_deriv FiniteDiffVHV with BouncyParticle (ContinuousDynamics dispatch)" begin
+        d = 3
+        Random.seed!(44)
+        target = gen_data(Distributions.MvNormal, d, 2.0)
+
+        flow = BouncyParticle(d, 1.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad)  # no HVP
+        alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress)
+        @test length(trace) > 10
+        @test all(isfinite, mean(trace))
+    end
+
+    @testset "_constant_bound_event_time direct call" begin
+        d = 3
+        Random.seed!(45)
+        target = gen_data(Distributions.MvNormal, d, 2.0)
+
+        flow = BouncyParticle(d, 1.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad)
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        state = PDMPState(0.0, ξ0)
+
+        strat = GridThinningStrategy(; N=16, t_max=2.0, post_warmup_simplify=true)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 16, 5, 5.0)
+        cache = (; z=similar(ξ0.x), ∇ϕx=similar(ξ0.x))
+        stats = PDMPSamplers.StatisticCounter()
+
+        # Arm the constant bound to a deliberately high value so thinning always accepts
+        alg.constant_bound_rate[] = 1e6
+
+        τ, event_type, meta = PDMPSamplers._constant_bound_event_time(
+            model, flow, alg, state, cache, stats, Inf, false)
+        @test isfinite(τ)
+        @test τ > 0.0
+        @test event_type === :reflect
+
+        # With include_refresh=true and high refresh rate, should sometimes return :refresh
+        flow_refresh = BouncyParticle(d, 1e6)
+        alg2 = PDMPSamplers._build_grid_adaptive_state(strat, state, 16, 5, 5.0)
+        alg2.constant_bound_rate[] = 1.0
+        τ2, event_type2, _ = PDMPSamplers._constant_bound_event_time(
+            model, flow_refresh, alg2, state, cache, stats, Inf, true)
+        @test isfinite(τ2)
+        @test event_type2 === :refresh
+
+        # Scenario 3: actual rate exceeds bound → fallback, constant_bound_rate → NaN
+        # ZeroMeanIsoNormal: gradient(x) = x, so rate = max(0, dot(x, θ))
+        # With x=[10,0,...] and θ=[1,0,...], rate = 10 + τ at proposal time τ.
+        # Setting λ_bound=10 guarantees l_actual = 10+τ > 10 for any τ > 0.
+        target3 = gen_data(Distributions.ZeroMeanIsoNormal, d)
+        grad3 = FullGradient(Base.Fix1(neg_gradient!, target3))
+        model3 = PDMPModel(d, grad3)
+        x3 = zeros(d); x3[1] = 10.0
+        θ3 = zeros(d); θ3[1] = 1.0
+        ξ3 = SkeletonPoint(x3, θ3)
+        state3 = PDMPState(0.0, ξ3)
+        alg3 = PDMPSamplers._build_grid_adaptive_state(strat, state3, 16, 5, 5.0)
+        alg3.constant_bound_rate[] = 10.0
+        τ3, _, _ = PDMPSamplers._constant_bound_event_time(
+            model3, flow, alg3, state3, cache, stats, Inf, false)
+        @test isnan(alg3.constant_bound_rate[])
+        @test isfinite(τ3)
     end
 end

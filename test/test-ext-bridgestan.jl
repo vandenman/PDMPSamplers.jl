@@ -74,11 +74,33 @@ import JSON
         @test norm(sample_mean - μ) < 0.5  # Within 0.5 of true mean
         @test norm(sample_cov - Σ) < 0.75   # Within 0.75 of true cov
 
-        # Note: This test requires a compiled Stan model
-        # In practice, you would compile the model beforehand
-        # For now, we skip if the model isn't compiled
-        # @info "BridgeStan test requires pre-compiled Stan model, skipping automatic compilation"
-        # @test_skip true  # Skip until we have a pre-compiled model in CI
+        # the same tests but with HVP disabled (should still work, just less efficiently)
+        model = PDMPModel(stan_file, data_file; hvp=false)
+
+        flow = ZigZag(d)
+        x0 = randn(d)
+        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        ξ0 = SkeletonPoint(x0, θ0)
+
+        T = 500.0
+
+        # Run sampler
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
+
+        # Basic checks
+        @test length(trace) > 10
+        @test stats.∇f_calls > 0
+        @test stats.reflections_accepted > 0
+        @test stats.reflections_accepted / stats.reflections_events > 0.1
+
+        # Check that samples are approximately correct
+        sample_mean = mean(trace)
+        sample_cov = cov(trace)
+
+        # Very loose checks (just that it's working)
+        @test norm(sample_mean - μ) < 0.5  # Within 0.5 of true mean
+        @test norm(sample_cov - Σ) < 0.75   # Within 0.75 of true cov
+
 
     finally
         rm(model_dir, recursive=true, force=true)

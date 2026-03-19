@@ -39,6 +39,9 @@ include("gradient_strategies.jl")
 include("model.jl")
 
 # PDMP types
+# could do
+# dynamics/interface # as well?
+# dynamics/linearinterface?
 include("dynamics/continuousdynamics.jl")
 include("dynamics/zigzag.jl")
 include("dynamics/bouncyparticle.jl")
@@ -49,13 +52,15 @@ include("dynamics/preconditioned.jl")
 # include("gradient_strategies.jl") # This line was moved up
 
 # Algorithms
+include("poisson_time_strategies/interface.jl")
 include("poisson_time_strategies/gridthinning.jl")
-include("poisson_time_strategies/rootspoissontime.jl")
 include("poisson_time_strategies/thinning.jl")
 include("poisson_time_strategies/sticky.jl")
 # these need to be implemented/ fixed
+include("poisson_time_strategies/rootspoissontime.jl")
 include("poisson_time_strategies/adaptivethinning.jl")
 include("poisson_time_strategies/exact.jl")
+# include("poisson_time_strategies/optimistic_failsafe.jl") # needs work!
 
 
 include("trace.jl")
@@ -130,6 +135,7 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
+    # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
     RootsPoissonTimeStrategy,
     Sticky,
     ExactStrategy,

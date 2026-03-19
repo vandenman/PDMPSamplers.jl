@@ -195,7 +195,7 @@ Created via the `AdaptiveBoomerang` convenience constructors.
 mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
     Γ::U
     μ::T
-    const λref::S
+    λref::S
     const ρ::S
     L::LT
     ΣL::LT
@@ -493,4 +493,48 @@ function correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractV
     z .= x .- flow.μ
     lowrank_mul!(∇ϕ, flow.Γ, z, -one(eltype(∇ϕ)), one(eltype(∇ϕ)))
     return ∇ϕ
+end
+
+function ∂λ∂t(state::PDMPState, ∇U_xt::AbstractVector, curvature_input, flow::AnyBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = extract_vhv(vt, curvature_input)
+    f_prime_t -= dot(vt, flow.Γ, vt)
+    for i in eachindex(xt)
+        f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
+    end
+    return f_prime_t
+end
+
+function ∂λ∂t(state::StickyPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::AnyBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = extract_vhv(vt, curvature_input)
+    f_prime_t -= dot(vt, flow.Γ, vt)
+    for i in eachindex(xt)
+        state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
+    end
+    return f_prime_t
+end
+
+function ∂λ∂t(state::PDMPState, ∇U_xt::AbstractVector, curvature_input, flow::LowRankMutableBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = extract_vhv(vt, curvature_input)
+    f_prime_t -= lowrank_quadform(flow.Γ, vt)
+    for i in eachindex(xt)
+        f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i]
+    end
+    return f_prime_t
+end
+
+function ∂λ∂t(state::StickyPDMPState, ∇U_xt::AbstractVector, curvature_input, flow::LowRankMutableBoomerang)
+    vt = state.ξ.θ
+    xt = state.ξ.x
+    f_prime_t = extract_vhv(vt, curvature_input)
+    f_prime_t -= lowrank_quadform(flow.Γ, vt)
+    for i in eachindex(xt)
+        state.free[i] && (f_prime_t += (flow.μ[i] - xt[i]) * ∇U_xt[i])
+    end
+    return f_prime_t
 end

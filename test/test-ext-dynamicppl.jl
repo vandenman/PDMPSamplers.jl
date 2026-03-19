@@ -68,4 +68,37 @@ import ForwardDiff
         @test norm(sample_mean - μ) < 1.0  # Within 1.0 of true mean
         @test norm(sample_cov - Σ) < 2.0   # Within 2.0 of true cov
     end
+
+    @testset "GridThinningStrategy with needs_hvp=true" begin
+        Random.seed!(789)
+
+        dpppl_model = mvnormal_model(d)
+        backend = ADTypes.AutoForwardDiff()
+        model = PDMPModel(dpppl_model, backend; needs_hvp=true)
+
+        @test model.vhv !== nothing
+        @test model.joint !== nothing
+
+        μ = zeros(d)
+        Σ = Matrix(1.0I(d))
+
+        for FlowType in (ZigZag, BouncyParticle)
+            flow = FlowType == ZigZag ? ZigZag(inv(Σ), μ) : BouncyParticle(inv(Σ), μ)
+            alg = GridThinningStrategy()
+
+            x0 = randn(d)
+            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            ξ0 = SkeletonPoint(x0, θ0)
+
+            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 1000.0; progress=false)
+
+            @test length(trace) > 10
+            @test stats.∇f_calls > 0
+            @test stats.∇²f_calls > 0
+
+            samples = Matrix(PDMPDiscretize(trace, 1.0))
+            sample_mean = vec(mean(samples, dims=1))
+            @test norm(sample_mean - μ) < 1.0
+        end
+    end
 end
