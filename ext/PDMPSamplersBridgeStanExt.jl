@@ -86,9 +86,9 @@ using PDMPSamplers
 pdmp_model = PDMPModel("model.stan", "data.json")
 ```
 """
-function PDMPModel(model_path::String, data_path::String=""; kwargs...)
+function PDMPModel(model_path::String, data_path::String=""; hvp::Bool=true, kwargs...)
     sm = BridgeStan.StanModel(model_path, data_path; kwargs...)
-    return PDMPModel(sm)
+    return PDMPModel(sm; hvp=hvp)
 end
 
 # Precompile entry-point signatures.

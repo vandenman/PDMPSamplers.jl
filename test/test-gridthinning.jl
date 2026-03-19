@@ -106,6 +106,33 @@ import DifferentiationInterface as DI
         @test isapprox(deriv_fd, deriv_exact; rtol=0.01)
     end
 
+    @testset "FiniteDiffVHV with gridthinning fallback" begin
+        d = 3
+        target = gen_data(Distributions.MvNormal, d, 2.0)
+        flow = ZigZag(d)
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+
+        grad_func = x -> begin
+            out = similar(x)
+            neg_gradient!(target, out, x)
+            out
+        end
+
+        fd_vhv = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d))
+        rate_fd, deriv_fd = PDMPSamplers.get_rate_and_deriv(state, flow, fd_vhv)
+        @test rate_fd >= 0
+        @test isfinite(deriv_fd)
+
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad)  # no HVP/VHV so gridthinning uses finite-diff fallback
+        alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
+
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 2_000.0; progress=show_progress)
+        @test length(trace) > 20
+        @test all(isfinite, mean(trace))
+    end
+
     @testset "∂λ∂t for different flow types" begin
         d = 3
         Random.seed!(42)
