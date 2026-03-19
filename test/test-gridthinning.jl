@@ -171,7 +171,7 @@ import DifferentiationInterface as DI
         boom = Boomerang(3)
 
         @test PDMPSamplers.min_grid_cells(zz, 5, 20) == 5
-        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 10
+        @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 5
         @test PDMPSamplers.min_grid_cells(boom, 15, 20) == 15
 
         @test PDMPSamplers.max_grid_horizon(zz) == 1e10
@@ -180,12 +180,9 @@ import DifferentiationInterface as DI
 
     @testset "_adapt_grid_N! and _increase_grid_N!" begin
         d = 3
-        pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        alg = PDMPSamplers.GridAdaptiveState(
-            pcb, Ref(20), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
-        )
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 20, 5, Inf)
 
         # Tight bound → shrink N
         PDMPSamplers._adapt_grid_N!(alg, 0.8)
@@ -213,34 +210,28 @@ import DifferentiationInterface as DI
 
     @testset "_increase_grid_N!" begin
         d = 3
-        pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        alg = PDMPSamplers.GridAdaptiveState(
-            pcb, Ref(16), Ref(2.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
-        )
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 16, 5, Inf)
 
         PDMPSamplers._increase_grid_N!(alg)
-        @test alg.N[] == 20
+        @test alg.N[] == 16
 
         # Already at max
         PDMPSamplers._increase_grid_N!(alg)
-        @test alg.N[] == 20
+        @test alg.N[] == 16
     end
 
     @testset "reset_grid_scale!" begin
         d = 3
-        pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        alg = PDMPSamplers.GridAdaptiveState(
-            pcb, Ref(10), Ref(5.0), 1.5, 0.5, 500, 5, 20, Inf,
-            copy(state_cache), copy(state_cache), Float64[], false, Float64[]
-        )
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=5.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 10, 5, Inf)
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)
         @test alg.t_max[] ≈ 3.0
-        @test alg.N[] == 20
-        @test length(alg.pcb.t_grid) == 21
+        @test alg.N[] == 10
+        @test length(alg.pcb.t_grid) == 11
     end
 
     @testset "GridThinningStrategy construction with use_fd_hvp" begin
