@@ -83,6 +83,8 @@ export
     PDMPTrace,
     PDMPChains,
     PDMPDiscretize,
+    adaptive_dt,
+    adaptive_discretize,
     PDMPModel,
     GlobalGradientModel,
     CoordinateWiseGradientModel,

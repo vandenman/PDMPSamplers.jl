@@ -37,6 +37,47 @@ inclusion_probs(chains::PDMPChains; chain::Integer=1)          = inclusion_probs
 
 PDMPDiscretize(chains::PDMPChains, dt; chain::Integer=1) = PDMPDiscretize(chains.traces[chain], dt)
 
+"""
+    adaptive_dt(trace::AbstractPDMPTrace; n_batches=0) -> (dt, n_disc, ct_ess_min)
+
+Compute the adaptive discretization step size for a PDMP trace. Uses the
+continuous-time ESS to set `n_disc = ceil(min(ct_ESS))`, then returns
+`dt = total_time / n_disc`.
+"""
+function adaptive_dt(trace::AbstractPDMPTrace; n_batches::Integer=0)
+    ct_ess_vals = n_batches > 0 ? ess(trace; n_batches) : ess(trace)
+    ct_ess_min = minimum(ct_ess_vals)
+    n_disc = max(ceil(Int, ct_ess_min), 10)
+    t_start = first_event_time(trace)
+    t_end = last_event_time(trace)
+    dt = (t_end - t_start) / n_disc
+    return dt, n_disc, ct_ess_min
+end
+
+function adaptive_dt(chains::PDMPChains; chain::Integer=1, kwargs...)
+    adaptive_dt(chains.traces[chain]; kwargs...)
+end
+
+"""
+    adaptive_discretize(trace::AbstractPDMPTrace; kwargs...)
+    adaptive_discretize(chains::PDMPChains; chain=1, kwargs...)
+
+Discretize a PDMP trace using an adaptive number of points determined by
+the continuous-time ESS. Sets `n_disc = ceil(min(ct_ESS))` so that the
+discretized samples preserve the information content of the continuous trace.
+
+Returns `(matrix, n_disc, ct_ess_min)` where `matrix` is `n_disc × d`.
+"""
+function adaptive_discretize(trace::AbstractPDMPTrace; kwargs...)
+    dt, n_disc, ct_ess_min = adaptive_dt(trace; kwargs...)
+    mat = Matrix(PDMPDiscretize(trace, dt))
+    return mat, n_disc, ct_ess_min
+end
+
+function adaptive_discretize(chains::PDMPChains; chain::Integer=1, kwargs...)
+    adaptive_discretize(chains.traces[chain]; kwargs...)
+end
+
 function Base.show(io::IO, chains::PDMPChains)
     nc = n_chains(chains)
     n_events = [length(chains.traces[i]) for i in 1:nc]

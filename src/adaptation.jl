@@ -49,12 +49,19 @@ end
 mutable struct AnchorUpdater <: AbstractAdapter
     dt::Float64
     last_update::Float64
+    warmup_only::Bool
 end
+AnchorUpdater(dt::Float64, last_update::Float64) = AnchorUpdater(dt, last_update, true)
 
 function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
-        grad.update_anchor!(get_warmup_trace(trace_mgr))
-        ad.last_update = state.t[]
+    if (state.t[] - ad.last_update >= ad.dt)
+        if phase === :warmup
+            grad.update_anchor!(get_warmup_trace(trace_mgr))
+            ad.last_update = state.t[]
+        elseif !ad.warmup_only
+            grad.update_anchor!(get_main_trace(trace_mgr))
+            ad.last_update = state.t[]
+        end
     end
 end
 
