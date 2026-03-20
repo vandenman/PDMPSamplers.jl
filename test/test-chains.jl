@@ -126,6 +126,38 @@
         @test occursin("1 chain", String(take!(buf)))
     end
 
+    @testset "adaptive_dt and adaptive_discretize" begin
+        Random.seed!(123)
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; progress=false)
+        trace = chains.traces[1]
+
+        # adaptive_dt returns (dt, n_disc, ct_ess_min)
+        dt_val, n_disc, ct_ess_min = adaptive_dt(trace)
+        @test dt_val > 0
+        @test n_disc >= 10
+        @test n_disc == max(ceil(Int, ct_ess_min), 10)
+        t_start = PDMPSamplers.first_event_time(trace)
+        t_end = PDMPSamplers.last_event_time(trace)
+        @test dt_val ≈ (t_end - t_start) / n_disc
+
+        # chains method delegates correctly
+        dt_ch, n_ch, ess_ch = adaptive_dt(chains; chain=1)
+        @test dt_ch == dt_val
+        @test n_ch == n_disc
+        @test ess_ch == ct_ess_min
+
+        # adaptive_discretize returns (matrix, n_disc, ct_ess_min)
+        mat, nd, ess_val = adaptive_discretize(trace)
+        @test size(mat, 2) == d
+        @test nd == n_disc
+        @test ess_val == ct_ess_min
+
+        # chains method
+        mat2, nd2, ess2 = adaptive_discretize(chains; chain=1)
+        @test mat2 == mat
+    end
+
     @testset "inclusion_probs on chains" begin
         Random.seed!(42)
         d_sticky = 3
