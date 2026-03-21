@@ -40,7 +40,7 @@ function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, 
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan gradient failed (code $rc)")
+        error("BridgeStan gradient failed (code $rc)") # COV_EXCL_LINE
     end
     return out
 end
@@ -55,7 +55,7 @@ function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Ve
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan HVP failed (code $rc)")
+        error("BridgeStan HVP failed (code $rc)") # COV_EXCL_LINE
     end
     return out
 end
