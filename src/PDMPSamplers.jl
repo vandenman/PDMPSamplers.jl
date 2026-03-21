@@ -67,6 +67,8 @@ include("trace.jl")
 include("transforms.jl")
 include("estimators.jl")
 include("transformed_estimators.jl")
+include("hcv.jl")
+include("anchor_bank.jl")
 include("adaptation.jl")
 include("stopping_criteria.jl")
 
@@ -126,6 +128,26 @@ export
     SubsampledGradient,
     CoordinateWiseGradient,
     compute_gradient!,
+
+    # Hessian control variate
+    HCVState,
+    apply_hcv_correction!,
+    update_hcv!,
+
+    # Anchor bank
+    AnchorEntry,
+    AnchorBank,
+    has_active_anchor,
+    active_entry,
+    select_nearest!,
+    add_anchor!,
+
+    # Adaptation
+    AbstractAdapter,
+    NoAdaptation,
+    SequenceAdapter,
+    GradientResampler,
+    AnchorBankAdapter,
 
     # Event metadata
     PDMPEventMeta,

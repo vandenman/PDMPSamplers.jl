@@ -65,6 +65,30 @@ function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:
     end
 end
 
+# D. Anchor Bank (spatial cache of anchors with nearest-neighbor selection)
+mutable struct AnchorBankAdapter{F1, F2} <: AbstractAdapter
+    select_fn!::F1
+    update_fn!::F2
+    update_dt::Float64
+    last_update::Float64
+    warmup_only::Bool
+end
+
+function adapt!(ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
+                phase::Symbol=:warmup, kwargs...)
+    ad.select_fn!(state.ξ.x)
+
+    if state.t[] - ad.last_update >= ad.update_dt
+        if phase === :warmup
+            ad.update_fn!(get_warmup_trace(trace_mgr))
+            ad.last_update = state.t[]
+        elseif !ad.warmup_only
+            ad.update_fn!(get_main_trace(trace_mgr))
+            ad.last_update = state.t[]
+        end
+    end
+end
+
 
 # --- 3. The Factory Functions (Positional Args) ---
 
@@ -108,10 +132,30 @@ function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, preco
     return SequenceAdapter((adpt_flow, adpt_grad))
 end
 
+function default_adapter(flow::ContinuousDynamics, grad::SubsampledGradient,
+                         bank_adapter::AnchorBankAdapter,
+                         precond_dt=10.0, t_warmup=100.0, t0=0.0)
+    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, t_warmup)
+    resampler = GradientResampler(grad.resample_dt, t0)
+    bank_adapter.update_dt = grad.no_anchor_updates > 0 ? t_warmup / grad.no_anchor_updates : 0.0
+    bank_adapter.last_update = t0
+    return SequenceAdapter((adpt_flow, resampler, bank_adapter))
+end
+
 function default_adapter(flow::MutableBoomerang, grad::SubsampledGradient, precond_dt=10.0, t_warmup=100.0, t0=0.0)
     adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, 0.0)
     adpt_grad = default_gradient_adapter(grad, t_warmup, t0)
     return SequenceAdapter((adpt_flow, adpt_grad))
+end
+
+function default_adapter(flow::MutableBoomerang, grad::SubsampledGradient,
+                         bank_adapter::AnchorBankAdapter,
+                         precond_dt=10.0, t_warmup=100.0, t0=0.0)
+    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, 0.0)
+    resampler = GradientResampler(grad.resample_dt, t0)
+    bank_adapter.update_dt = grad.no_anchor_updates > 0 ? t_warmup / grad.no_anchor_updates : 0.0
+    bank_adapter.last_update = t0
+    return SequenceAdapter((adpt_flow, resampler, bank_adapter))
 end
 
 

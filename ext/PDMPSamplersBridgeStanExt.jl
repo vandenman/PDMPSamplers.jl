@@ -2,7 +2,65 @@ module PDMPSamplersBridgeStanExt
 
 using PDMPSamplers
 using BridgeStan
+using Base.Libc.Libdl: dlsym
 import PDMPSamplers: PDMPModel, FullGradient
+
+# ── FastBridgeStanModel ──────────────────────────────────────────────────────
+# Eliminates per-call overhead from BridgeStan: caches dlsym function pointers
+# and pre-allocates Ref{Float64}/Ref{Cstring} buffers that are reused across
+# millions of gradient/HVP evaluations.
+
+struct FastBridgeStanModel
+    # all the pointers are "owned" by the StanModel, so we keep it here to avoid it from going out of scope
+    owner::BridgeStan.StanModel
+    lib::Ptr{Nothing}
+    stanmodel::Ptr{BridgeStan.StanModelStruct}
+    grad_fn::Ptr{Nothing}
+    hvp_fn::Ptr{Nothing}
+    lp::Base.RefValue{Float64}
+    err::Base.RefValue{Cstring}
+    d::Int
+end
+
+function FastBridgeStanModel(sm::BridgeStan.StanModel)
+    d = BridgeStan.param_unc_num(sm)
+    grad_fn = dlsym(sm.lib, :bs_log_density_gradient)
+    hvp_fn = dlsym(sm.lib, :bs_log_density_hessian_vector_product)
+    lp = Ref(0.0)
+    err = Ref{Cstring}()
+    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, grad_fn, hvp_fn, lp, err, d)
+end
+
+function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, out::Vector{Float64})
+    m.lp[] = 0.0
+    rc = @ccall $(m.grad_fn)(
+        m.stanmodel::Ptr{BridgeStan.StanModelStruct},
+        true::Bool, true::Bool,
+        q::Ref{Cdouble}, m.lp::Ref{Cdouble}, out::Ref{Cdouble},
+        m.err::Ref{Cstring},
+    )::Cint
+    if rc != 0
+        error("BridgeStan gradient failed (code $rc)")
+    end
+    return out
+end
+
+function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Vector{Float64}, out::Vector{Float64})
+    m.lp[] = 0.0
+    rc = @ccall $(m.hvp_fn)(
+        m.stanmodel::Ptr{BridgeStan.StanModelStruct},
+        true::Bool, true::Bool,
+        q::Ref{Cdouble}, v::Ref{Cdouble},
+        m.lp::Ref{Cdouble}, out::Ref{Cdouble},
+        m.err::Ref{Cstring},
+    )::Cint
+    if rc != 0
+        error("BridgeStan HVP failed (code $rc)")
+    end
+    return out
+end
+
+# ── PDMPModel constructors ───────────────────────────────────────────────────
 
 """
     PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
@@ -11,6 +69,9 @@ Construct a `PDMPModel` from a BridgeStan StanModel.
 
 BridgeStan provides compiled Stan models with efficient gradient computations.
 This constructor wraps the model's log density gradient function for use with PDMP samplers.
+
+Uses `FastBridgeStanModel` internally to cache function pointers and pre-allocate
+buffers, eliminating per-call dlsym/allocation overhead.
 
 When `hvp=false`, directional curvature is computed via scalar finite
 differences (`FiniteDiffVHV`), which reuses the base gradient from the rate computation
@@ -42,12 +103,11 @@ trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
 """
 function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
 
-    d = BridgeStan.param_unc_num(sm)
-    out = zeros(d)
+    fsm = FastBridgeStanModel(sm)
+    d = fsm.d
 
-    # Create gradient function that calls Stan's log_density_gradient
     grad_f! = (out, x) -> begin
-        BridgeStan.log_density_gradient!(sm, x, out)
+        fast_log_density_gradient!(fsm, x, out)
         out .= .-out
         return out
     end
@@ -55,7 +115,7 @@ function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
     if hvp
         out_hvp = zeros(d)
         hvp_f = Base.Fix1((out, x, v) -> begin
-            BridgeStan.log_density_hessian_vector_product!(sm, x, v, out)
+            fast_log_density_hvp!(fsm, x, v, out)
             out .= .-out
             return out
         end, out_hvp)

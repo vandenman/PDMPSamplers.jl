@@ -541,6 +541,22 @@ function _constant_bound_event_time(
 end
 
 
+function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState)
+    joint_func = model.joint
+    if joint_func !== nothing && _joint_compatible(flow)
+        return JointProvider(joint_func)
+    end
+    vhv_func = model.vhv
+    if vhv_func !== nothing
+        return VHVProvider(grad_func, vhv_func, alg.fd_buf)
+    end
+    hvp_func = model.hvp
+    if hvp_func === nothing && alg.use_fd_hvp
+        return FiniteDiffVHV(grad_func, alg.fd_buf)
+    end
+    return (grad_func, hvp_func)
+end
+
 function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64=Inf, include_refresh::Bool=true) where {FL<:ContinuousDynamics}
 
@@ -548,25 +564,25 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, a
         return _constant_bound_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
     end
 
+    state_ = alg.state_cache
+    copyto!(state_, state)
+
+    grad_func = make_grad_U_func(state_, flow, model.grad, cache)
+    grad_and_hvp = _make_grad_provider(grad_func, model, flow, alg)
+
+    # Function barrier: _next_event_time_grid! is specialized on the concrete type of grad_and_hvp
+    return _next_event_time_grid!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+end
+
+function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+    alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    max_horizon::Float64, include_refresh::Bool) where {P, FL<:ContinuousDynamics}
+
     pcb = alg.pcb
     state_ = alg.state_cache
     state2_ = alg.state_cache2
     copyto!(state_, state)
     copyto!(state2_, state)
-
-    grad_func = make_grad_U_func(state_, flow, model.grad, cache)
-    hvp_func = model.hvp
-    vhv_func = model.vhv
-    joint_func = model.joint
-    grad_and_hvp = if joint_func !== nothing && _joint_compatible(flow)
-        JointProvider(joint_func)
-    elseif vhv_func !== nothing
-        VHVProvider(grad_func, vhv_func, alg.fd_buf)
-    elseif hvp_func === nothing && alg.use_fd_hvp
-        FiniteDiffVHV(grad_func, alg.fd_buf)
-    else
-        (grad_func, hvp_func)
-    end
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
