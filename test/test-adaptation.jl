@@ -385,4 +385,110 @@
         seq = PDMPSamplers.SequenceAdapter((na1, na2))
         PDMPSamplers.adapt!(seq, nothing, nothing, nothing, nothing)
     end
+
+    @testset "AnchorBankAdapter adapt! — warmup phase triggers update" begin
+        d = 3
+        x = [1.0, 2.0, 3.0]
+        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
+
+        select_called = Ref(0)
+        update_trace = Ref{Any}(nothing)
+        ad = AnchorBankAdapter(
+            _ -> (select_called[] += 1),
+            tr -> (update_trace[] = tr),
+            5.0, 0.0, true,
+        )
+
+        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:warmup)
+
+        @test select_called[] == 1
+        @test update_trace[] === nothing   # get_warmup_trace returns nothing
+        @test ad.last_update == 10.0
+    end
+
+    @testset "AnchorBankAdapter adapt! — main phase with warmup_only=false triggers update" begin
+        d = 3
+        x = [1.0, 2.0, 3.0]
+        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
+
+        update_called = Ref(0)
+        ad = AnchorBankAdapter(
+            _ -> nothing,
+            _ -> (update_called[] += 1),
+            5.0, 0.0, false,
+        )
+
+        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
+
+        @test update_called[] == 1
+        @test ad.last_update == 10.0
+    end
+
+    @testset "AnchorBankAdapter adapt! — main phase with warmup_only=true skips update" begin
+        d = 3
+        x = [1.0, 2.0, 3.0]
+        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
+
+        update_called = Ref(0)
+        ad = AnchorBankAdapter(
+            _ -> nothing,
+            _ -> (update_called[] += 1),
+            5.0, 0.0, true,
+        )
+
+        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
+
+        @test update_called[] == 0
+        @test ad.last_update == 0.0
+    end
+
+    @testset "AnchorBankAdapter adapt! — update not triggered when interval not elapsed" begin
+        d = 3
+        x = [1.0, 2.0, 3.0]
+        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
+
+        select_called = Ref(0)
+        update_called = Ref(0)
+        ad = AnchorBankAdapter(
+            _ -> (select_called[] += 1),
+            _ -> (update_called[] += 1),
+            5.0, 8.0, true,   # 10.0 - 8.0 = 2.0 < 5.0
+        )
+
+        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:warmup)
+
+        @test select_called[] == 1   # select always runs
+        @test update_called[] == 0   # update not triggered
+        @test ad.last_update == 8.0  # unchanged
+    end
+
+    @testset "default_adapter for MutableBoomerang + SubsampledGradient + AnchorBankAdapter" begin
+        d = 3
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        grad_sub = SubsampledGradient(
+            (out, x) -> (out .= x),
+            n -> nothing,
+            tr -> nothing,
+            (out, x) -> (out .= x),
+            5,
+            2,
+            false;
+            resample_dt=0.25,
+        )
+        bank_adapter = AnchorBankAdapter(_ -> nothing, _ -> nothing, 0.0, 0.0, true)
+
+        adapter = PDMPSamplers.default_adapter(flow, grad_sub, bank_adapter, 6.0, 40.0, 1.5)
+
+        @test adapter isa PDMPSamplers.SequenceAdapter
+        ad_flow, ad_resampler, ad_bank = adapter.adapters
+        @test ad_flow isa PDMPSamplers.BoomerangAdapter
+        @test ad_resampler isa PDMPSamplers.GradientResampler
+        @test ad_bank === bank_adapter
+        @test bank_adapter.update_dt ≈ 40.0 / 2   # t_warmup / no_anchor_updates
+        @test bank_adapter.last_update == 1.5
+    end
 end
