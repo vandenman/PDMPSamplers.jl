@@ -370,9 +370,9 @@ struct FiniteDiffVHV{G}
     grad::G
     buf::Vector{Float64}
     grad_buf::Vector{Float64}
-    w_buf::Union{Nothing,Vector{Float64}}
+    w_buf::Vector{Float64}
 end
-FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), nothing)
+FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), similar(buf))
 FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), w_buf)
 
 function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
@@ -415,7 +415,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDi
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
-    w = fd.w_buf === nothing ? similar(vt) : fd.w_buf
+    w = fd.w_buf
     for i in eachindex(vt)
         w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
     end
@@ -434,7 +434,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDi
     copyto!(fd.grad_buf, cached_gradient)
 
     vt = state.ξ.θ
-    w = fd.w_buf === nothing ? similar(vt) : fd.w_buf
+    w = fd.w_buf
     for i in eachindex(vt)
         w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
     end
@@ -532,6 +532,8 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         similar(state.ξ.x, 0),
         strat.use_fd_hvp,
         similar(state.ξ.x),
+        similar(state.ξ.x),
+        similar(state.ξ.x),
         Ref(NaN),
         Ref(0.0),
         strat.post_warmup_simplify,
@@ -556,6 +558,8 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     empty_∇ϕx::V
     use_fd_hvp::Bool
     fd_buf::Vector{Float64}
+    fd_grad_buf::Vector{Float64}
+    fd_w_buf::Vector{Float64}
     constant_bound_rate::Base.RefValue{Float64}
     max_observed_rate::Base.RefValue{Float64}
     post_warmup_simplify::Bool
@@ -638,7 +642,7 @@ function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynami
     if hvp_func === nothing
         # Always fall back to finite-diff curvature when no HVP is available.
         # This gives much tighter bounds than gradient-only mode.
-        return FiniteDiffVHV(grad_func, alg.fd_buf)
+        return FiniteDiffVHV(grad_func, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf)
     end
     return (grad_func, hvp_func)
 end
