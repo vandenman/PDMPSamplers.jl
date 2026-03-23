@@ -671,6 +671,12 @@ function _integrate_segment(::typeof(Statistics.var), ::Union{ZigZag, BouncyPart
     return @. dt * (y0^2 + y0 * θ0 * dt + (θ0^2 * dt^2) / 3)
 end
 
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.var), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
+    dt = t1 - t0
+    @. buf += dt * ((x0 - μ)^2 + (x0 - μ) * θ0 * dt + (θ0^2 * dt^2) / 3)
+    return buf
+end
+
 function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
     d = length(x0)
     segment_integral = zeros(d, d)
