@@ -4,8 +4,7 @@ function Statistics.mean!(out::AbstractVector, trace::AbstractPDMPTrace)
 end
 
 function Statistics.mean(trace::AbstractPDMPTrace)
-    out = similar(first(trace).position)
-    return Statistics.mean!(out, trace)
+    return _integrate(trace, Statistics.mean)
 end
 Statistics.var( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.var, Statistics.mean(trace))
 Statistics.std( trace::AbstractPDMPTrace) = sqrt.(Statistics.var(trace))
