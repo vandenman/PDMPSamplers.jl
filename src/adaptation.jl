@@ -53,14 +53,29 @@ mutable struct AnchorUpdater <: AbstractAdapter
 end
 AnchorUpdater(dt::Float64, last_update::Float64) = AnchorUpdater(dt, last_update, true)
 
+_has_integrable_segment(::Nothing) = false
+
+function _has_integrable_segment(trace)
+    first_event = iterate(trace)
+    first_event === nothing && return false
+    second_event = iterate(trace, first_event[2])
+    return second_event !== nothing
+end
+
 function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     if (state.t[] - ad.last_update >= ad.dt)
         if phase === :warmup
-            grad.update_anchor!(get_warmup_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_warmup_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                grad.update_anchor!(trace)
+                ad.last_update = state.t[]
+            end
         elseif !ad.warmup_only
-            grad.update_anchor!(get_main_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_main_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                grad.update_anchor!(trace)
+                ad.last_update = state.t[]
+            end
         end
     end
 end
@@ -80,11 +95,17 @@ function adapt!(ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
 
     if state.t[] - ad.last_update >= ad.update_dt
         if phase === :warmup
-            ad.update_fn!(get_warmup_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_warmup_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                ad.update_fn!(trace)
+                ad.last_update = state.t[]
+            end
         elseif !ad.warmup_only
-            ad.update_fn!(get_main_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_main_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                ad.update_fn!(trace)
+                ad.last_update = state.t[]
+            end
         end
     end
 end

@@ -404,7 +404,7 @@
 
         @test select_called[] == 1
         @test update_trace[] === nothing   # get_warmup_trace returns nothing
-        @test ad.last_update == 10.0
+        @test ad.last_update == 0.0
     end
 
     @testset "AnchorBankAdapter adapt! — main phase with warmup_only=false triggers update" begin
@@ -422,8 +422,8 @@
 
         PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
 
-        @test update_called[] == 1
-        @test ad.last_update == 10.0
+        @test update_called[] == 0
+        @test ad.last_update == 0.0
     end
 
     @testset "AnchorBankAdapter adapt! — main phase with warmup_only=true skips update" begin
