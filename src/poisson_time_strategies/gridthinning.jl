@@ -153,10 +153,10 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
 end
 
 function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d_vals::Vector, i::Int)
-    tᵢ, tᵢ₊₁ = t_grid[i], t_grid[i+1]
-    yᵢ, yᵢ₊₁ = y_vals[i], y_vals[i+1]
-    dᵢ, dᵢ₊₁ = d_vals[i], d_vals[i+1]
+    Λ_vals[i] = _tangent_intersection_bound(t_grid[i], t_grid[i+1], y_vals[i], y_vals[i+1], d_vals[i], d_vals[i+1])
+end
 
+function _tangent_intersection_bound(tᵢ::Float64, tᵢ₊₁::Float64, yᵢ::Float64, yᵢ₊₁::Float64, dᵢ::Float64, dᵢ₊₁::Float64)
     if abs(dᵢ - dᵢ₊₁) < 1e-9
         mᵢ = yᵢ
     else
@@ -164,8 +164,7 @@ function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d
         x_clipped = clamp(x_intersect, tᵢ, tᵢ₊₁)
         mᵢ = dᵢ * x_clipped + yᵢ - dᵢ * tᵢ
     end
-
-    Λ_vals[i] = max(yᵢ, yᵢ₊₁, mᵢ)
+    return max(yᵢ, yᵢ₊₁, mᵢ)
 end
 
 function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool=true)
@@ -205,6 +204,10 @@ max_grid_horizon(::AnyBoomerang) = 8π
 max_grid_horizon(pd::PreconditionedDynamics) = max_grid_horizon(pd.dynamics)
 
 # --- helper functions for λ(t) and λ'(t) ---
+# Generic fallback: ignore cached gradient for providers that don't support it
+get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider, add_rate::Bool, ::AbstractVector) =
+    get_rate_and_deriv(state, flow, provider, add_rate)
+
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H}, add_rate::Bool=true) where {G,H}
 
     xt, vt = state.ξ.x, state.ξ.θ  # state already moved to time t
@@ -222,6 +225,17 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
     return rate, rate_deriv
 
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H},
+    add_rate::Bool, cached_gradient::AbstractVector) where {G,H}
+    xt, vt = state.ξ.x, state.ξ.θ
+    Hxt_vt = hvp(xt, vt)
+    f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = ∂λ∂t(state, cached_gradient, Hxt_vt, flow)
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
 end
 
 struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}}
@@ -265,6 +279,16 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, rate_deriv
 end
 
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::VHVProvider,
+    add_rate::Bool, cached_gradient::AbstractVector)
+    f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    curvature_scalar = _compute_vhv_scalar(provider, state, cached_gradient, flow)
+    f_prime_t = ∂λ∂t(state, cached_gradient, curvature_scalar, flow)
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
 struct JointProvider{J}
     joint::J
 end
@@ -287,6 +311,13 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     xt = state.ξ.x
     ∇U_xt = grad(xt)
     f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    return rate, zero(rate)
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, grad_and_nothing::Tuple{G,Nothing},
+    add_rate::Bool, cached_gradient::AbstractVector) where {G}
+    f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     rate = pos(f_t)
     return rate, zero(rate)
 end
@@ -317,13 +348,31 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, rate_deriv
 end
 
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP,
+    add_rate::Bool, cached_gradient::AbstractVector)
+    copyto!(fd.grad_buf, cached_gradient)
+
+    xt, vt = state.ξ.x, state.ξ.θ
+    h = 1e-5 * max(1.0, norm(xt) / norm(vt))
+    fd.buf .= xt .+ h .* vt
+    ∇U_shifted = fd.grad(fd.buf)
+    fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
+
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
 struct FiniteDiffVHV{G}
     grad::G
     buf::Vector{Float64}
     grad_buf::Vector{Float64}
-    w_buf::Union{Nothing,Vector{Float64}}
+    w_buf::Vector{Float64}
 end
-FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), nothing)
+FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), similar(buf))
 FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), w_buf)
 
 function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
@@ -347,15 +396,49 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, rate_deriv
 end
 
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffVHV,
+    add_rate::Bool, cached_gradient::AbstractVector)
+    copyto!(fd.grad_buf, cached_gradient)
+
+    xt, vt = state.ξ.x, state.ξ.θ
+    vhv_scalar = _fd_vhv_scalar(fd, xt, vt, vt)
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV, add_rate::Bool=true)
     xt, vt = state.ξ.x, state.ξ.θ
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
-    w = fd.w_buf === nothing ? similar(vt) : fd.w_buf
+    w = fd.w_buf
     for i in eachindex(vt)
         w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
     end
+    whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
+
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    f_prime_t = whv_scalar
+
+    rate = pos(f_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    return rate, rate_deriv
+end
+
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV,
+    add_rate::Bool, cached_gradient::AbstractVector)
+    copyto!(fd.grad_buf, cached_gradient)
+
+    vt = state.ξ.θ
+    w = fd.w_buf
+    for i in eachindex(vt)
+        w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
+    end
+    xt = state.ξ.x
     whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
 
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
@@ -411,6 +494,7 @@ Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     early_stop_threshold::Float64 = 5.0
     use_fd_hvp::Bool = false
     post_warmup_simplify::Bool = false
+    lazy::Bool = true
 end
 
 _default_early_stop(::ContinuousDynamics, est::Float64) = est
@@ -418,15 +502,9 @@ _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_s
 
 function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     T = typeof(strat.t_max)
-    # When no HVP is available and FD-HVP is not used, the grid bound is looser
-    # (no derivative info), so increase grid resolution to compensate.
-    has_deriv_info = model.hvp !== nothing || strat.use_fd_hvp
-    grad_only = !has_deriv_info
-    N_base = grad_only ? strat.N * 2 : strat.N
+    # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
+    N_base = strat.N
     N_min = min_grid_cells(flow, strat.N_min, N_base)
-    if grad_only
-        N_min = max(N_min, 15)
-    end
     est = _default_early_stop(flow, strat.early_stop_threshold)
     est = _adjust_early_stop(model.grad, est)
     _build_grid_adaptive_state(strat, state, N_base, N_min, est)
@@ -454,9 +532,14 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         similar(state.ξ.x, 0),
         strat.use_fd_hvp,
         similar(state.ξ.x),
+        similar(state.ξ.x),
+        similar(state.ξ.x),
         Ref(NaN),
         Ref(0.0),
         strat.post_warmup_simplify,
+        strat.lazy,
+        similar(state.ξ.x),
+        Ref(false),
     )
 end
 
@@ -475,9 +558,14 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     empty_∇ϕx::V
     use_fd_hvp::Bool
     fd_buf::Vector{Float64}
+    fd_grad_buf::Vector{Float64}
+    fd_w_buf::Vector{Float64}
     constant_bound_rate::Base.RefValue{Float64}
     max_observed_rate::Base.RefValue{Float64}
     post_warmup_simplify::Bool
+    lazy::Bool
+    cached_gradient::Vector{Float64}
+    has_cached_gradient::Base.RefValue{Bool}
 end
 
 accept_reflection_event(::GridAdaptiveState, args...) = true
@@ -551,8 +639,10 @@ function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynami
         return VHVProvider(grad_func, vhv_func, alg.fd_buf)
     end
     hvp_func = model.hvp
-    if hvp_func === nothing && alg.use_fd_hvp
-        return FiniteDiffVHV(grad_func, alg.fd_buf)
+    if hvp_func === nothing
+        # Always fall back to finite-diff curvature when no HVP is available.
+        # This gives much tighter bounds than gradient-only mode.
+        return FiniteDiffVHV(grad_func, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf)
     end
     return (grad_func, hvp_func)
 end
@@ -570,7 +660,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, a
     grad_func = make_grad_U_func(state_, flow, model.grad, cache)
     grad_and_hvp = _make_grad_provider(grad_func, model, flow, alg)
 
-    # Function barrier: _next_event_time_grid! is specialized on the concrete type of grad_and_hvp
+    # Function barrier: specialized on the concrete type of grad_and_hvp
+    if alg.lazy
+        return _next_event_time_lazy!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+    end
     return _next_event_time_grid!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
 end
 
@@ -593,7 +686,14 @@ function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
     effective_horizon = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon)
 
     # Build grid once for this event, capped at effective horizon
+    if alg.has_cached_gradient[]
+        cached_y0, cached_d0 = get_rate_and_deriv(state_, flow, grad_and_hvp, false, alg.cached_gradient)
+        alg.has_cached_gradient[] = false
+    else
+        cached_y0, cached_d0 = NaN, NaN
+    end
     construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
+        cached_y0, cached_d0,
         early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
         max_time=effective_horizon)
     stats.grid_N_current = alg.N[]
@@ -647,6 +747,8 @@ function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
             _adapt_grid_t_max!(alg, τ_reflection, model.grad)
             stats.grid_N_current = alg.N[]
             alg.max_observed_rate[] = max(alg.max_observed_rate[], l_reflection)
+            copyto!(alg.cached_gradient, ∇ϕx)
+            alg.has_cached_gradient[] = true
             return τ_reflection, :reflect, GradientMeta(∇ϕx)
         end
 
@@ -676,6 +778,149 @@ function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
     end
 
     error("Safety limit reached")
+end
+
+# ── Lazy grid evaluation (Phase 2) ──────────────────────────────────────────
+# Interleaves grid point evaluation with proposal generation so that for
+# well-adapted samplers only the first few intervals are evaluated.
+
+function _next_event_time_lazy!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+    alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    max_horizon::Float64, include_refresh::Bool) where {P, FL<:ContinuousDynamics}
+
+    state_ = alg.state_cache
+    state2_ = alg.state_cache2
+    copyto!(state_, state)
+    copyto!(state2_, state)
+
+    λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
+    default_return = GradientMeta(alg.empty_∇ϕx)
+
+    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+
+    N = alg.N[]
+    t_max = alg.t_max[]
+    effective_horizon = _effective_grid_horizon(model.grad, t_max, τ_refresh, max_horizon)
+    Δt = effective_horizon / N
+    max_t_max = max_grid_horizon(flow)
+
+    # Evaluate initial grid point (k=0)
+    if alg.has_cached_gradient[]
+        # Reuse cached gradient from previous event (2C): skip one gradient call.
+        y_left, d_left = get_rate_and_deriv(state_, flow, grad_and_hvp, false, alg.cached_gradient)
+        alg.has_cached_gradient[] = false
+    else
+        y_left, d_left = get_rate_and_deriv(state_, flow, grad_and_hvp, false)
+    end
+    t_left = 0.0
+
+    cumulative_area = 0.0
+    exp_target = rand(Exponential())
+    safety_limit = alg.safety_limit
+
+    stats.grid_builds += 1
+    stats.grid_points_evaluated += 1
+
+    while safety_limit > 0
+        safety_limit -= 1
+
+        # Advance state to next grid point
+        t_right = t_left + Δt
+        if t_right > effective_horizon
+            t_right = effective_horizon
+        end
+        Δt_cell = t_right - t_left
+
+        if Δt_cell <= 0.0
+            # Reached the horizon
+            if effective_horizon < t_max
+                return τ_refresh, :refresh, default_return
+            end
+            alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
+            recompute_time_grid!(alg)
+            stats.grid_grows += 1
+            return t_max, :horizon_hit, default_return
+        end
+
+        # Move state_cache forward by Δt_cell to evaluate the right endpoint
+        move_forward_time!(state_, Δt_cell, flow)
+        y_right, d_right = get_rate_and_deriv(state_, flow, grad_and_hvp, false)
+        stats.grid_points_evaluated += 1
+
+        # Compute piecewise constant bound for this interval
+        Λ_cell = _tangent_intersection_bound(t_left, t_right, y_left, y_right, d_left, d_right)
+        area_cell = pos(Λ_cell) * Δt_cell
+
+        if cumulative_area + area_cell < exp_target
+            # No event in this interval — advance
+            cumulative_area += area_cell
+            t_left = t_right
+            y_left = y_right
+            d_left = d_right
+
+            # Check if we've exhausted the horizon
+            if t_right >= effective_horizon
+                if effective_horizon < t_max
+                    return τ_refresh, :refresh, default_return
+                end
+                alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
+                recompute_time_grid!(alg)
+                stats.grid_grows += 1
+                return t_max, :horizon_hit, default_return
+            end
+            continue
+        end
+
+        # Event is in this interval — propose time via inverse CDF
+        u_remaining = exp_target - cumulative_area
+        time_in_cell = u_remaining / pos(Λ_cell)
+        τ_proposal = t_left + time_in_cell
+
+        # Check refresh
+        if τ_refresh < τ_proposal
+            return τ_refresh, :refresh, default_return
+        end
+
+        # Acceptance test: move from original state to proposed time
+        state2_.t[] = state.t[]
+        copyto!(state2_.ξ, state.ξ)
+        move_forward_time!(state2_, τ_proposal, flow)
+        ∇ϕx = compute_gradient!(state2_, model.grad, flow, cache)
+
+        l_actual = λ(state2_.ξ, ∇ϕx, flow)
+
+        if l_actual > pos(Λ_cell)
+            # Safety violation — fall back to eager grid with finer N
+            alg.has_cached_gradient[] = false
+            _increase_grid_N!(alg)
+            recompute_time_grid!(alg)
+            return _next_event_time_grid!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        end
+
+        if rand() * pos(Λ_cell) <= l_actual
+            # Accepted — cache gradient for next call (2C)
+            copyto!(alg.cached_gradient, ∇ϕx)
+            alg.has_cached_gradient[] = true
+
+            tightness = l_actual / pos(Λ_cell)
+            _adapt_grid_N!(alg, tightness)
+            _adapt_grid_t_max!(alg, τ_proposal, model.grad)
+            stats.grid_N_current = alg.N[]
+            alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
+            return τ_proposal, :reflect, GradientMeta(∇ϕx)
+        end
+
+        # Rejected — recycle gradient (2B).
+        # The gradient ∇ϕx from compute_gradient! is still valid at τ_proposal.
+        # Use it as cached gradient to save one gradient call in get_rate_and_deriv.
+        copyto!(state_, state2_)
+        y_left, d_left = get_rate_and_deriv(state_, flow, grad_and_hvp, false, ∇ϕx)
+        t_left = τ_proposal
+        cumulative_area = 0.0
+        exp_target = rand(Exponential())
+    end
+
+    error("Safety limit reached in lazy grid")
 end
 
 function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)
@@ -735,6 +980,7 @@ _reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
 
 function _maybe_activate_constant_bound!(alg::GridAdaptiveState, stats::StatisticCounter)
     alg.post_warmup_simplify || return nothing
+    isfinite(alg.constant_bound_rate[]) && return nothing
     total_events = stats.reflections_accepted + stats.refreshment_events
     total_events < 10 && return nothing
     reflection_ratio = stats.reflections_accepted / total_events

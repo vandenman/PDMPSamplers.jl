@@ -67,41 +67,27 @@
         @test_throws ErrorException PDMPSamplers.stats_cov(ws)
     end
 
-    @testset "BoomerangWarmupStats basic" begin
+    @testset "WelfordBoomerangStats stats_std" begin
         d = 3
-        stats = PDMPSamplers.BoomerangWarmupStats(d)
-        @test length(stats.coord_time) == d
-        @test stats.cursor == 0
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        @test all(PDMPSamplers.stats_std(ws) .== 1.0)
 
-        μ = PDMPSamplers.stats_mean(stats)
-        @test all(μ .== 0.0)
-
-        v = PDMPSamplers.stats_var(stats)
-        @test all(v .== 1.0)
-
-        σ = PDMPSamplers.stats_std(stats)
-        @test all(σ .== 1.0)
+        PDMPSamplers.welford_update!(ws, [2.0, 4.0, 6.0], 0.0)
+        PDMPSamplers.welford_update!(ws, [2.0, 4.0, 6.0], 1.0)
+        σ = PDMPSamplers.stats_std(ws)
+        @test all(σ .>= 0)
+        @test σ ≈ sqrt.(PDMPSamplers.stats_var(ws))
     end
 
-    @testset "BoomerangWarmupStats fullrank stats_cov" begin
+    @testset "_coord_time for WelfordBoomerangStats" begin
         d = 3
-        stats = PDMPSamplers.BoomerangWarmupStats(d; fullrank=true)
-        @test stats.sum_xy !== nothing
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        @test PDMPSamplers._coord_time(ws, 1) == 0.0
 
-        # Simulate some data
-        stats.coord_time .= 10.0
-        stats.sum_x .= [5.0, 10.0, 15.0]
-        stats.sum_x2 .= [30.0, 110.0, 230.0]
-        stats.sum_xy .= [30.0 55.0 80.0; 55.0 110.0 165.0; 80.0 165.0 230.0]
-
-        C = PDMPSamplers.stats_cov(stats)
-        @test size(C) == (d, d)
-        @test issymmetric(C)
-    end
-
-    @testset "BoomerangWarmupStats stats_cov errors without fullrank" begin
-        stats = PDMPSamplers.BoomerangWarmupStats(3)
-        @test_throws ErrorException PDMPSamplers.stats_cov(stats)
+        PDMPSamplers.welford_update!(ws, ones(d), 0.0)
+        PDMPSamplers.welford_update!(ws, ones(d), 5.0)
+        @test PDMPSamplers._coord_time(ws, 1) == 5.0
+        @test PDMPSamplers._coord_time(ws, 2) == 5.0
     end
 
     @testset "adapt_interval geometric growth" begin
@@ -194,14 +180,6 @@
         PDMPSamplers.welford_update!(ws, [1.0, 2.0, 3.0], 1.0)
         @test PDMPSamplers._has_data(ws)
         @test PDMPSamplers._shrinkage_time(ws) == 1.0
-
-        bws = PDMPSamplers.BoomerangWarmupStats(3)
-        @test !PDMPSamplers._has_data(bws)
-        @test PDMPSamplers._shrinkage_time(bws) == 0.0
-
-        bws.coord_time .= [1.0, 2.0, 3.0]
-        @test PDMPSamplers._has_data(bws)
-        @test PDMPSamplers._shrinkage_time(bws) == 3.0
     end
 
     @testset "did_dynamics_adapt" begin
@@ -295,24 +273,15 @@
         ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
         μ = zeros(d)
         C = zeros(d, d)
-        PDMPSamplers.stats_mean!(μ, ws)
-        PDMPSamplers.stats_cov!(C, ws)
+        for _ in 1:5
+            PDMPSamplers.stats_mean!(μ, ws)
+            PDMPSamplers.stats_cov!(C, ws)
+        end
 
-        alloc_mean_welford = @allocated PDMPSamplers.stats_mean!(μ, ws)
-        alloc_cov_welford = @allocated PDMPSamplers.stats_cov!(C, ws)
-        @test alloc_mean_welford == 0
-        @test alloc_cov_welford == 0
-
-        warm = PDMPSamplers.BoomerangWarmupStats(d; fullrank=true)
-        μ2 = zeros(d)
-        C2 = zeros(d, d)
-        PDMPSamplers.stats_mean!(μ2, warm)
-        PDMPSamplers.stats_cov!(C2, warm)
-
-        alloc_mean_warm = @allocated PDMPSamplers.stats_mean!(μ2, warm)
-        alloc_cov_warm = @allocated PDMPSamplers.stats_cov!(C2, warm)
-        @test alloc_mean_warm == 0
-        @test alloc_cov_warm == 0
+        alloc_mean = minimum((@allocated PDMPSamplers.stats_mean!(μ, ws)) for _ in 1:10)
+        alloc_cov = minimum((@allocated PDMPSamplers.stats_cov!(C, ws)) for _ in 1:10)
+        @test alloc_mean == 0
+        @test alloc_cov == 0
     end
 
     @testset "BoomerangAdapter fallback for non-MutableBoomerang" begin
@@ -404,7 +373,7 @@
 
         @test select_called[] == 1
         @test update_trace[] === nothing   # get_warmup_trace returns nothing
-        @test ad.last_update == 10.0
+        @test ad.last_update == 0.0
     end
 
     @testset "AnchorBankAdapter adapt! — main phase with warmup_only=false triggers update" begin
@@ -422,8 +391,8 @@
 
         PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
 
-        @test update_called[] == 1
-        @test ad.last_update == 10.0
+        @test update_called[] == 0
+        @test ad.last_update == 0.0
     end
 
     @testset "AnchorBankAdapter adapt! — main phase with warmup_only=true skips update" begin
@@ -464,6 +433,66 @@
         @test select_called[] == 1   # select always runs
         @test update_called[] == 0   # update not triggered
         @test ad.last_update == 8.0  # unchanged
+    end
+
+    @testset "AnchorUpdater adapt! — warmup triggers update_anchor!" begin
+        d = 3
+        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
+        fake_trace = [1, 2]  # iterable with ≥2 elements
+        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
+
+        anchor_called = Ref(0)
+        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
+        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0)
+
+        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:warmup)
+        @test anchor_called[] == 1
+        @test ad.last_update == 10.0
+    end
+
+    @testset "AnchorUpdater adapt! — not triggered when interval not elapsed" begin
+        d = 3
+        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
+        fake_trace = [1, 2]
+        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
+
+        anchor_called = Ref(0)
+        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
+        ad = PDMPSamplers.AnchorUpdater(5.0, 8.0)  # 10.0 - 8.0 = 2.0 < 5.0
+
+        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:warmup)
+        @test anchor_called[] == 0
+        @test ad.last_update == 8.0
+    end
+
+    @testset "AnchorUpdater adapt! — main phase with warmup_only=false" begin
+        d = 3
+        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
+        fake_trace = [1, 2]
+        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
+
+        anchor_called = Ref(0)
+        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
+        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0, false)
+
+        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
+        @test anchor_called[] == 1
+        @test ad.last_update == 10.0
+    end
+
+    @testset "AnchorUpdater adapt! — main phase skipped when warmup_only=true" begin
+        d = 3
+        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
+        fake_trace = [1, 2]
+        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
+
+        anchor_called = Ref(0)
+        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
+        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0, true)
+
+        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
+        @test anchor_called[] == 0
+        @test ad.last_update == 0.0
     end
 
     @testset "default_adapter for MutableBoomerang + SubsampledGradient + AnchorBankAdapter" begin

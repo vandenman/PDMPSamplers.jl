@@ -40,17 +40,38 @@ PDMPDiscretize(chains::PDMPChains, dt; chain::Integer=1) = PDMPDiscretize(chains
 """
     adaptive_dt(trace::AbstractPDMPTrace; n_batches=0) -> (dt, n_disc, ct_ess_min)
 
-Compute the adaptive discretization step size for a PDMP trace. Uses the
-continuous-time ESS to set `n_disc = ceil(min(ct_ESS))`, then returns
-`dt = total_time / n_disc`.
+Compute the adaptive discretization step size for a PDMP trace.
+
+The continuous-time ESS (ct-ESS) measures the efficiency of the time-average
+estimator `(1/T)∫f(X_t)dt`, which benefits from cancellation of oscillations in
+the autocorrelation function, especially for Boomerang dynamics.  Discrete
+snapshots at spacing `Δt` do not benefit from this cancellation: consecutive
+samples remain positively correlated (discrete IACT `τ_disc > 1`), giving
+`disc-ESS = n_disc / τ_disc < ct-ESS` when `n_disc = ct-ESS`.
+
+This function corrects for that bias via a two-pass approach:
+1. Trial: discretize with `n_disc_trial = ceil(ct_ess_min)` and estimate
+   `τ_disc = n_disc_trial / disc_ess_trial` from the resulting matrix.
+2. Correction: set `n_disc = ceil(ct_ess_min × τ_disc)`, capped at
+   `10 × n_disc_trial` to bound memory use.
+
+For typical PDMPs `τ_disc ≈ 2–4`, so `n_disc ≈ 2–4 × ct-ESS` and
+`disc-ESS ≈ ct-ESS` after correction.
 """
 function adaptive_dt(trace::AbstractPDMPTrace; n_batches::Integer=0)
     ct_ess_vals = n_batches > 0 ? ess(trace; n_batches) : ess(trace)
     ct_ess_min = minimum(ct_ess_vals)
-    n_disc = max(ceil(Int, ct_ess_min), 10)
     t_start = first_event_time(trace)
     t_end = last_event_time(trace)
-    dt = (t_end - t_start) / n_disc
+    total_time = t_end - t_start
+
+    n_disc_trial = max(ceil(Int, ct_ess_min), 10)
+    mat_trial = Matrix(PDMPDiscretize(trace, total_time / n_disc_trial))
+    disc_ess_trial = _disc_ess_min(mat_trial)
+
+    tau_disc = clamp(n_disc_trial / disc_ess_trial, 1.0, 10.0)
+    n_disc = max(ceil(Int, ct_ess_min * tau_disc), n_disc_trial)
+    dt = total_time / n_disc
     return dt, n_disc, ct_ess_min
 end
 

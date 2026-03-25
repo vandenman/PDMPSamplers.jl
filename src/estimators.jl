@@ -1,4 +1,11 @@
-Statistics.mean(trace::AbstractPDMPTrace) = _integrate(trace, Statistics.mean)
+function Statistics.mean!(out::AbstractVector, trace::AbstractPDMPTrace)
+    _integrate!(out, trace, Statistics.mean)
+    return out
+end
+
+function Statistics.mean(trace::AbstractPDMPTrace)
+    return _integrate(trace, Statistics.mean)
+end
 Statistics.var( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.var, Statistics.mean(trace))
 Statistics.std( trace::AbstractPDMPTrace) = sqrt.(Statistics.var(trace))
 Statistics.cov( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.cov, Statistics.mean(trace))
@@ -558,6 +565,27 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
     return result
 end
 
+# Batch-means ESS for a single discrete column vector.
+function _col_batch_ess(col::AbstractVector)
+    n = length(col)
+    n < 10 && return float(n)
+    nb = max(10, isqrt(n))
+    bs = div(n, nb)
+    nb = div(n, bs)
+    n2 = nb * bs
+    ov = var(view(col, 1:n2))
+    ov > 0 || return float(nb)
+    bm = [mean(view(col, (k-1)*bs+1:k*bs)) for k in 1:nb]
+    bv = var(bm)
+    bv > 0 || return float(nb)
+    return nb * ov / bv
+end
+
+# Minimum batch-means ESS across all columns of a discretized sample matrix.
+function _disc_ess_min(mat::AbstractMatrix)
+    return minimum(_col_batch_ess(view(mat, :, i)) for i in axes(mat, 2))
+end
+
 """
     inclusion_probs(trace::AbstractPDMPTrace)
 
@@ -578,6 +606,7 @@ inclusion_probs(trace::AbstractPDMPTrace) = _integrate(trace, inclusion_probs)
 
 # TODO: this should actually use the flows M matrix!
 _integrate_segment(f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment(f, flow.dynamics, args...)
+_integrate_segment!(buf, f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment!(buf, f, flow.dynamics, args...)
 
 function _integrate_segment(::typeof(inclusion_probs), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1)
 
@@ -616,6 +645,13 @@ _integrate_segment(::typeof(Statistics.mean), ::ZigZag,         x0, x1, θ0, θ1
 _integrate_segment(::typeof(Statistics.mean), ::BouncyParticle, x0, x1, θ0, θ1, t0, t1) = x0 * (t1 - t0) + θ0 * (t1 - t0)^2 / 2
 # _integrate_segment(::typeof(Statistics.mean), ::Boomerang,      x0, x1, θ0, θ1, t0, t1) = x0 * (t1 - t0) + θ0 * (t1 - t0)^2 / 2
 
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), ::Union{ZigZag, BouncyParticle},
+    x0, x1, θ0, θ1, t0, t1)
+    dt = t1 - t0
+    @. buf += x0 * dt + θ0 * dt^2 / 2
+    return buf
+end
+
 # _integrate_segment(::typeof(Statistics.var), ::ZigZag,         x0, x1, θ0, θ1, t0, t1, μ) = (-(x0 .- μ) .^ 3 + (-t0 .* θ0 .+ t1 .* θ0 .+ x0 .- μ) .^ 3) ./ (3. * θ0)
 # _integrate_segment(::typeof(Statistics.var), ::BouncyParticle, x0, x1, θ0, θ1, t0, t1, μ) = (-(x0 .- μ) .^ 3 + (-t0 .* θ0 .+ t1 .* θ0 .+ x0 .- μ) .^ 3) ./ (3. * θ0)#(t0 * θ0 - t1 * θ0 - 2 * x0 + 2 * μ) * (t0 - t1) / 2
 function _integrate_segment(::typeof(Statistics.var), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
@@ -632,6 +668,12 @@ function _integrate_segment(::typeof(Statistics.var), ::Union{ZigZag, BouncyPart
     # Note: We factor out 'dt' to keep coefficients simple
 
     return @. dt * (y0^2 + y0 * θ0 * dt + (θ0^2 * dt^2) / 3)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.var), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
+    dt = t1 - t0
+    @. buf += dt * ((x0 - μ)^2 + (x0 - μ) * θ0 * dt + (θ0^2 * dt^2) / 3)
+    return buf
 end
 
 function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1, μ)
@@ -676,6 +718,14 @@ function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang, x0, x1, 
     return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
 end
 
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    μ = flow.μ
+    @. buf += (x0 - μ) * s + θ0 * (1 - c) + μ * dt
+    return buf
+end
+
 # For the MutableBoomerang (adaptive), use the trapezoidal rule (x₀ + x₁)/2 · dt.
 # The sinusoidal formula converges to μ_ref (not μ_true) when μ_ref ≠ μ_true,
 # because the trajectory oscillates around μ_ref and the ∫sin(dt)/dt correction
@@ -684,6 +734,12 @@ end
 function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
     return @. (x0 + x1) / 2 * dt
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
+    dt = t1 - t0
+    @. buf += (x0 + x1) / 2 * dt
+    return buf
 end
 
 function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
@@ -1017,4 +1073,60 @@ function _integrate(trace::AbstractPDMPTrace, f, args...)
     total_time = end_time - start_time
 
     return integral / total_time
+end
+
+function _integrate!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...)
+
+    flow = trace.flow
+
+    iter = trace
+    next = iterate(iter)
+    isnothing(next) && error("Cannot compute statistics on an empty trace")
+
+    t₀, x_state, θ_state, _ = next[2]
+    xt₀ = copy(x_state)
+    θt₀ = copy(θ_state)
+
+    start_time = t₀
+    next = iterate(iter, next[2])
+    isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
+
+    fill!(out, 0)
+
+    t₁, x_state, θ_state, _ = next[2]
+    xt₁ = copy(x_state)
+    θt₁ = copy(θ_state)
+
+    has_inplace = hasmethod(_integrate_segment!, Tuple{typeof(out), typeof(f), typeof(flow), typeof(xt₀), typeof(xt₁), typeof(θt₀), typeof(θt₁), typeof(t₀), typeof(t₁), map(typeof, args)...})
+
+    if has_inplace
+        _integrate_segment!(out, f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
+    else
+        out .+= _integrate_segment(f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
+    end
+
+    t₀ = t₁
+    copyto!(xt₀, xt₁)
+    copyto!(θt₀, θt₁)
+
+    next = iterate(iter, next[2])
+    while next !== nothing
+        t₁, x_state, θ_state, _ = next[2]
+        copyto!(xt₁, x_state)
+        copyto!(θt₁, θ_state)
+        if has_inplace
+            _integrate_segment!(out, f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
+        else
+            out .+= _integrate_segment(f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
+        end
+        t₀ = t₁
+        copyto!(xt₀, xt₁)
+        copyto!(θt₀, θt₁)
+        next = iterate(iter, next[2])
+    end
+
+    end_time = t₁
+    total_time = end_time - start_time
+    out ./= total_time
+    return out
 end

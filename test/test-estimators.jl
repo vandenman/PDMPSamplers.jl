@@ -34,11 +34,17 @@
         rtol = max(0.1, se_factor * 0.5)
         atol = max(0.1, se_factor * 0.1)
 
-        @test vec(mean(samples, dims=1)) ≈ mean(trace) rtol = rtol atol = atol
+        mean_ct = mean(trace)
+        @test vec(mean(samples, dims=1)) ≈ mean_ct rtol = rtol atol = atol
         @test vec(std(samples, dims=1)) ≈ std(trace) rtol = rtol atol = atol
         @test vec(var(samples, dims=1)) ≈ var(trace) rtol = rtol atol = atol
         @test cov(samples) ≈ cov(trace) rtol = rtol atol = atol
         @test cor(samples) ≈ cor(trace) rtol = rtol atol = atol
+
+        # test in place versions of estimators
+        mean_ct2 = similar(mean_ct)
+        mean_ct = mean!(mean_ct2, trace)
+        @test mean_ct ≈ mean_ct2
 
         # --- ESS ---
         e = ess(trace)

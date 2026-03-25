@@ -73,15 +73,15 @@ This constructor wraps the model's log density gradient function for use with PD
 Uses `FastBridgeStanModel` internally to cache function pointers and pre-allocate
 buffers, eliminating per-call dlsym/allocation overhead.
 
-When `hvp=false`, directional curvature is computed via scalar finite
+When `hvp=false` (default), directional curvature is computed via scalar finite
 differences (`FiniteDiffVHV`), which reuses the base gradient from the rate computation
-and adds only one extra gradient call per grid point. When `hvp=true` (default), Stan's compiled
+and adds only one extra gradient call per grid point. When `hvp=true`, Stan's compiled
 Hessian-vector product is used instead, giving exact curvature at the cost of a full
-d-vector HVP per grid point.
+d-vector HVP per grid point (2-3x a gradient call).
 
 # Arguments
 - `sm::BridgeStan.StanModel`: A compiled Stan model
-- `hvp::Bool=true`: Whether to use Stan's compiled HVP for curvature
+- `hvp::Bool=false`: Whether to use Stan's compiled HVP for curvature
 
 # Example
 ```julia
@@ -101,7 +101,7 @@ trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
 - The model automatically handles the appropriate transformations
 - Gradients are computed efficiently through Stan's autodiff system
 """
-function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
+function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=false)
 
     fsm = FastBridgeStanModel(sm)
     d = fsm.d
@@ -131,8 +131,8 @@ end
 Construct a `PDMPModel` by loading a Stan model from file paths.
 
 This is a convenience constructor that first creates a BridgeStan.StanModel
-and then constructs the PDMPModel from it. HVP is always enabled since
-BridgeStan provides compiled HVP functions.
+and then constructs the PDMPModel from it. HVP is disabled by default since
+finite-difference curvature is faster for BridgeStan models.
 
 # Arguments
 - `model_path::String`: Path to the compiled Stan model (.so file)
@@ -146,7 +146,7 @@ using PDMPSamplers
 pdmp_model = PDMPModel("model.stan", "data.json")
 ```
 """
-function PDMPModel(model_path::String, data_path::String=""; hvp::Bool=true, kwargs...)
+function PDMPModel(model_path::String, data_path::String=""; hvp::Bool=false, kwargs...)
     sm = BridgeStan.StanModel(model_path, data_path; kwargs...)
     return PDMPModel(sm; hvp=hvp)
 end

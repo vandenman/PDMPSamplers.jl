@@ -171,6 +171,8 @@ function _run_phase!(
 ) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
 
+    _maybe_simplify_counter = 0
+
     while true
         if is_satisfied(criterion, state, trace_manager, stats)
             stats.stop_reason = stop_reason(criterion, state, trace_manager, stats)
@@ -185,6 +187,14 @@ function _run_phase!(
             _reset_inner_grid!(alg_)
             if alg_ isa StickyLoopState
                 update_all_stick_times!(alg_, state, flow)
+            end
+        end
+
+        if phase === :main
+            _maybe_simplify_counter += 1
+            if _maybe_simplify_counter >= 100
+                _maybe_activate_constant_bound!(alg_, stats)
+                _maybe_simplify_counter = 0
             end
         end
 

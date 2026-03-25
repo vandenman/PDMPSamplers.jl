@@ -136,7 +136,7 @@
         dt_val, n_disc, ct_ess_min = adaptive_dt(trace)
         @test dt_val > 0
         @test n_disc >= 10
-        @test n_disc == max(ceil(Int, ct_ess_min), 10)
+        @test n_disc >= max(ceil(Int, ct_ess_min), 10)
         t_start = PDMPSamplers.first_event_time(trace)
         t_end = PDMPSamplers.last_event_time(trace)
         @test dt_val ≈ (t_end - t_start) / n_disc

@@ -53,14 +53,29 @@ mutable struct AnchorUpdater <: AbstractAdapter
 end
 AnchorUpdater(dt::Float64, last_update::Float64) = AnchorUpdater(dt, last_update, true)
 
+_has_integrable_segment(::Nothing) = false
+
+function _has_integrable_segment(trace)
+    first_event = iterate(trace)
+    first_event === nothing && return false
+    second_event = iterate(trace, first_event[2])
+    return second_event !== nothing
+end
+
 function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     if (state.t[] - ad.last_update >= ad.dt)
         if phase === :warmup
-            grad.update_anchor!(get_warmup_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_warmup_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                grad.update_anchor!(trace)
+                ad.last_update = state.t[]
+            end
         elseif !ad.warmup_only
-            grad.update_anchor!(get_main_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_main_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                grad.update_anchor!(trace)
+                ad.last_update = state.t[]
+            end
         end
     end
 end
@@ -80,11 +95,17 @@ function adapt!(ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
 
     if state.t[] - ad.last_update >= ad.update_dt
         if phase === :warmup
-            ad.update_fn!(get_warmup_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_warmup_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                ad.update_fn!(trace)
+                ad.last_update = state.t[]
+            end
         elseif !ad.warmup_only
-            ad.update_fn!(get_main_trace(trace_mgr))
-            ad.last_update = state.t[]
+            trace = get_main_trace(trace_mgr)
+            if _has_integrable_segment(trace)
+                ad.update_fn!(trace)
+                ad.last_update = state.t[]
+            end
         end
     end
 end
@@ -159,178 +180,15 @@ function default_adapter(flow::MutableBoomerang, grad::SubsampledGradient,
 end
 
 
-# --- 5. Boomerang Adaptation (Phase 1: diagonal) ---
-
-"""
-    BoomerangWarmupStats
-
-Online sufficient statistics for Boomerang adaptation, accumulated
-incrementally from warmup trace segments.
-
-Uses a hybrid integration strategy:
-- Linear integrals (`sum_x_lin`) for mean estimation (μ-independent, unbiased)
-- Sinusoidal integrals (`sum_x`, `sum_x2`, `sum_xy`) for variance/covariance
-  estimation (exact for bounded oscillatory Boomerang trajectory)
-"""
-mutable struct BoomerangWarmupStats
-    coord_time::Vector{Float64}   # per-coordinate integrated free time
-    sum_x_lin::Vector{Float64}    # ∑ ∫ x_i(t) dt LINEAR (for mean, μ-independent)
-    sum_x::Vector{Float64}        # ∑ ∫ x_i(t) dt SINUSOIDAL (for var/cov consistency)
-    sum_x2::Vector{Float64}       # ∑ ∫ x_i²(t) dt SINUSOIDAL
-    sum_xy::Union{Nothing, Matrix{Float64}}  # ∑ ∫ x_i x_j dt SINUSOIDAL (fullrank only)
-    cursor::Int                   # index of last processed event in warmup trace
-end
-
-function BoomerangWarmupStats(d::Integer; fullrank::Bool=false)
-    BoomerangWarmupStats(zeros(d), zeros(d), zeros(d), zeros(d), fullrank ? zeros(d, d) : nothing, 0)
-end
-
-"""
-    stats_mean(stats::BoomerangWarmupStats)
-
-Return the time-averaged mean from online stats.
-"""
-function stats_mean(stats::BoomerangWarmupStats)
-    d = length(stats.sum_x_lin)
-    μ = zeros(d)
-    for i in 1:d
-        μ[i] = stats.coord_time[i] > 0 ? stats.sum_x_lin[i] / stats.coord_time[i] : 0.0
-    end
-    return μ
-end
-
-"""
-    stats_var(stats::BoomerangWarmupStats)
-
-Return the time-averaged variance from online stats (using E[X²] - E[X]²).
-"""
-function stats_var(stats::BoomerangWarmupStats)
-    d = length(stats.sum_x)
-    v = ones(d)
-    for i in 1:d
-        if stats.coord_time[i] > 0
-            μi = stats.sum_x[i] / stats.coord_time[i]
-            v[i] = max(stats.sum_x2[i] / stats.coord_time[i] - μi^2, 0.0)
-        end
-    end
-    return v
-end
-
-"""
-    stats_std(stats::BoomerangWarmupStats)
-
-Return the time-averaged standard deviation from online stats.
-"""
-stats_std(stats::BoomerangWarmupStats) = sqrt.(stats_var(stats))
-
-"""
-    stats_cov(stats::BoomerangWarmupStats)
-
-Return the time-averaged covariance matrix from online stats.
-Requires `sum_xy` (fullrank mode). Uses `sum_x` (not `sum_x_lin`)
-to stay internally consistent with the piecewise-constant `sum_xy`.
-"""
-function stats_cov(stats::BoomerangWarmupStats)
-    d = length(stats.sum_x)
-    sum_xy = stats.sum_xy
-    sum_xy === nothing && error("BoomerangWarmupStats was not initialized for fullrank (no sum_xy)")
-
-    # Use piecewise-constant mean (from sum_x) to match sum_xy, not sum_x_lin
-    μ = zeros(d)
-    for i in 1:d
-        μ[i] = stats.coord_time[i] > 0 ? stats.sum_x[i] / stats.coord_time[i] : 0.0
-    end
-    C = zeros(d, d)
-
-    for j in 1:d, i in j:d
-        t_pair = min(stats.coord_time[i], stats.coord_time[j])
-        if t_pair > 0
-            C[i, j] = sum_xy[i, j] / t_pair - μ[i] * μ[j]
-        else
-            C[i, j] = i == j ? 1.0 : 0.0
-        end
-        C[j, i] = C[i, j]
-    end
-
-    return C
-end
-
-"""
-    update_stats!(stats::BoomerangWarmupStats, trace_mgr)
-
-Incrementally accumulate mean and second-moment estimates from new
-warmup trace segments (since last cursor position).
-
-Uses a hybrid integration strategy:
-- TRAPEZOIDAL rule for `sum_x_lin`: (x₀ + x₁)/2 · dt gives an accurate,
-  μ-independent mean estimate with O(dt³) per-segment error → used for
-  updating flow.μ.
-- PIECEWISE-CONSTANT for `sum_x`, `sum_x2`, `sum_xy`: weights event
-  positions by segment duration (left Riemann sum). These are μ-independent
-  and internally consistent, so Var = E[x²] - E[x]² is robust even when
-  flow.μ is far from the true mean → used for updating flow.Γ.
-"""
-function update_stats!(stats::BoomerangWarmupStats, trace_mgr)
-    trace = get_warmup_trace(trace_mgr)
-
-    n = length(trace.times)
-    n < 2 && return stats
-
-    if stats.cursor == 0
-        stats.cursor = 1
-    end
-
-    has_xy = stats.sum_xy !== nothing
-
-    d = size(trace.positions, 1)
-
-    @inbounds for k in stats.cursor:(n - 1)
-        dt = trace.times[k + 1] - trace.times[k]
-        dt <= 0 && continue
-
-        for i in 1:d
-            xi = trace.positions[i, k]
-            xi_next = trace.positions[i, k + 1]
-
-            # Always accumulate observation time (denominator must include all segments)
-            stats.coord_time[i] += dt
-
-            # TRAPEZOIDAL mean integral (μ-independent, O(dt³) per segment)
-            stats.sum_x_lin[i] += (xi + xi_next) / 2 * dt
-
-            # PIECEWISE-CONSTANT (left Riemann sum, μ-independent, for variance)
-            stats.sum_x[i] += xi * dt
-            stats.sum_x2[i] += xi^2 * dt
-        end
-
-        if has_xy
-            for j in 1:d
-                xj = trace.positions[j, k]
-                for i in j:d
-                    xi = trace.positions[i, k]
-                    val = xi * xj * dt
-                    stats.sum_xy[i, j] += val
-                    i != j && (stats.sum_xy[j, i] += val)
-                end
-            end
-        end
-    end
-
-    stats.cursor = n
-    return stats
-end
-
-
-# --- 5b. Streaming time-weighted adaptation ---
+# --- 5. Boomerang Adaptation ---
 
 """
     WelfordBoomerangStats
 
 Streaming time-weighted statistics accumulator for Boomerang adaptation.
-Computes the same integrals as `BoomerangWarmupStats` (trapezoidal mean,
-left-Riemann variance) but operates per-event without needing the trace
-buffer. Stores previous-event state so each `welford_update!` integrates
-exactly one trajectory segment.
+Uses trapezoidal mean and left-Riemann variance, operating per-event
+without needing the trace buffer. Stores previous-event state so each
+`welford_update!` integrates exactly one trajectory segment.
 """
 mutable struct WelfordBoomerangStats
     total_time::Float64
@@ -436,7 +294,6 @@ end
 # --- In-place mean/var/cov (allocation-free) ---
 
 _coord_time(stats::WelfordBoomerangStats, ::Int) = stats.total_time
-_coord_time(stats::BoomerangWarmupStats, i::Int) = stats.coord_time[i]
 
 function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
     T = stats.total_time
@@ -450,27 +307,25 @@ function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
     return μ
 end
 
-function stats_mean!(μ::AbstractVector, stats::BoomerangWarmupStats)
-    @inbounds for i in eachindex(μ)
-        T = stats.coord_time[i]
-        μ[i] = T > 0 ? stats.sum_x_lin[i] / T : 0.0
-    end
-    return μ
-end
+
 
 function stats_cov!(C::AbstractMatrix, stats::WelfordBoomerangStats)
+    sum_xy = stats.sum_xy
+    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy)")
+    _stats_cov_inner!(C, stats.sum_x, sum_xy, stats.total_time)
+end
+
+function _stats_cov_inner!(C::AbstractMatrix, sum_x::Vector{Float64}, sum_xy::Matrix{Float64}, T::Float64)
     d = size(C, 1)
-    sum_xy = stats.sum_xy::Matrix{Float64}
-    T = stats.total_time
     if T <= 0
         fill!(C, 0.0)
         @inbounds for i in 1:d; C[i, i] = 1.0; end
         return C
     end
     @inbounds for j in 1:d
-        μj = stats.sum_x[j] / T
+        μj = sum_x[j] / T
         for i in j:d
-            μi = stats.sum_x[i] / T
+            μi = sum_x[i] / T
             cij = sum_xy[i, j] / T - μi * μj
             C[i, j] = cij
             C[j, i] = cij
@@ -479,26 +334,7 @@ function stats_cov!(C::AbstractMatrix, stats::WelfordBoomerangStats)
     return C
 end
 
-function stats_cov!(C::AbstractMatrix, stats::BoomerangWarmupStats)
-    d = size(C, 1)
-    sum_xy = stats.sum_xy
-    sum_xy === nothing && error("BoomerangWarmupStats was not initialized for fullrank (no sum_xy)")
-    @inbounds for j in 1:d
-        μj = stats.coord_time[j] > 0 ? stats.sum_x[j] / stats.coord_time[j] : 0.0
-        for i in j:d
-            t_pair = min(stats.coord_time[i], stats.coord_time[j])
-            μi = stats.coord_time[i] > 0 ? stats.sum_x[i] / stats.coord_time[i] : 0.0
-            if t_pair > 0
-                cij = sum_xy[i, j] / t_pair - μi * μj
-            else
-                cij = i == j ? 1.0 : 0.0
-            end
-            C[i, j] = cij
-            C[j, i] = cij
-        end
-    end
-    return C
-end
+
 
 
 """
@@ -566,20 +402,6 @@ function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::Muta
     end
 end
 
-function adapt!(ad::BoomerangAdapter{<:BoomerangWarmupStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    update_stats!(ad.stats, trace_mgr)
-    ad.did_update = false
-
-    dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
-    if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
-        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace)
-        refresh_velocity!(state, flow)
-        ad.last_update = state.t[]
-        ad.no_updates_done += 1
-        ad.did_update = true
-    end
-end
-
 # Fallback: if the flow is not MutableBoomerang, do nothing
 adapt!(::BoomerangAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
 
@@ -593,10 +415,7 @@ did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 
 const BOOM_DIAG_FLOOR = 1e-8
 
-const AnyBoomerangStats = Union{BoomerangWarmupStats, WelfordBoomerangStats}
-_has_data(stats::BoomerangWarmupStats) = !all(iszero, stats.coord_time)
 _has_data(stats::WelfordBoomerangStats) = stats.total_time > 0
-_shrinkage_time(stats::BoomerangWarmupStats) = maximum(stats.coord_time)
 _shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
 
 """
@@ -605,7 +424,7 @@ _shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
 Update `flow.μ` and diagonal `flow.Γ` from online sufficient statistics.
 Zero-allocation: computes mean, variance, and Cholesky factors in a single pass.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:diagonal}, ::Nothing)
+function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:diagonal}, ::Nothing)
     _has_data(stats) || return flow
     d = length(flow.μ)
     stats_mean!(flow.μ, stats)
@@ -645,7 +464,7 @@ Uses preallocated workspace `ws` for all intermediate computations.
 Explicit symmetrization `(M + M')/2` is unnecessary since `stats_cov!` produces
 symmetric output and shrinkage preserves it; `Symmetric()` wrappers suffice.
 """
-function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:fullrank}, ws::FullrankWorkspace)
+function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:fullrank}, ws::FullrankWorkspace)
     _has_data(stats) || return flow
     d = length(flow.μ)
     vec_d = ws.vec_d
@@ -751,7 +570,7 @@ end
 
 # --- Low-rank adaptation ---
 
-function update_boomerang!(flow::MutableBoomerang, stats::AnyBoomerangStats, ::Val{:lowrank}, ws::FullrankWorkspace)
+function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:lowrank}, ws::FullrankWorkspace)
     _has_data(stats) || return flow
 
     lrp = flow.Γ::LowRankPrecision

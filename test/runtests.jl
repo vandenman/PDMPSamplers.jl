@@ -3,10 +3,6 @@ include("testsetup.jl")
 import DifferentiationInterface as DI
 import ForwardDiff
 
-# TODO: formalize this idea a little bit
-# could be a shell script for speed?
-# alternatively, try to do all package loading after the argument parsing and whatnot?
-
 function skip_test(test_name::String)
     key = "skip_$test_name"
     get(ENV, key, "") == "true"
