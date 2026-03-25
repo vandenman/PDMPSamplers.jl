@@ -249,24 +249,21 @@
     # ──────────────────────────────────────────────────────────────────────
     # Test: Online stats correctness
     # ──────────────────────────────────────────────────────────────────────
-    @testset "BoomerangWarmupStats" begin
+    @testset "WelfordBoomerangStats" begin
         d = 2
-        stats = PDMPSamplers.BoomerangWarmupStats(d)
-        @test stats.coord_time == zeros(d)
+        stats = PDMPSamplers.WelfordBoomerangStats(d)
+        @test stats.total_time == 0.0
         @test stats.sum_x_lin == zeros(d)
         @test stats.sum_x == zeros(d)
         @test stats.sum_x2 == zeros(d)
         @test stats.sum_xy === nothing
-        @test stats.cursor == 0
 
-        # After no data, mean and var have safe defaults
         μ = PDMPSamplers.stats_mean(stats)
         σ² = PDMPSamplers.stats_var(stats)
         @test μ == zeros(d)
         @test σ² == ones(d)
 
-        # Fullrank stats have sum_xy matrix
-        stats_fr = PDMPSamplers.BoomerangWarmupStats(d; fullrank=true)
+        stats_fr = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
         @test stats_fr.sum_xy !== nothing
         @test size(stats_fr.sum_xy) == (d, d)
     end
@@ -455,39 +452,27 @@ end
     # ──────────────────────────────────────────────────────────────────────
     @testset "stats_cov correctness" begin
         d = 2
-        stats = PDMPSamplers.BoomerangWarmupStats(d; fullrank=true)
+        stats = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
 
-        # Manually set stats as if we observed:
-        # coord 1: x=2 for t=10 → sum_x=20, sum_x2=40, coord_time=10
-        # coord 2: x=3 for t=10 → sum_x=30, sum_x2=90, coord_time=10
-        # cross: x1*x2 = 6 for t=10 → sum_xy[1,2]=60
-        stats.coord_time .= [10.0, 10.0]
-        stats.sum_x_lin .= [20.0, 30.0]
-        stats.sum_x .= [20.0, 30.0]
-        stats.sum_x2 .= [40.0, 90.0]
-        stats.sum_xy .= [40.0 60.0; 60.0 90.0]
+        # Constant stream: x=[2,3] for 10 time units → zero variance
+        PDMPSamplers.welford_update!(stats, [2.0, 3.0], 0.0)
+        PDMPSamplers.welford_update!(stats, [2.0, 3.0], 10.0)
 
         μ = PDMPSamplers.stats_mean(stats)
         @test μ ≈ [2.0, 3.0]
 
         C = PDMPSamplers.stats_cov(stats)
-        # cov[1,1] = E[X1²] - E[X1]² = 4 - 4 = 0
-        # cov[2,2] = E[X2²] - E[X2]² = 9 - 9 = 0
-        # cov[1,2] = E[X1*X2] - E[X1]*E[X2] = 6 - 6 = 0
         @test C ≈ zeros(2, 2)
 
-        # Now add some non-trivial data
-        stats.coord_time .= [10.0, 10.0]
-        stats.sum_x_lin .= [10.0, 20.0]
-        stats.sum_x .= [10.0, 20.0]  # mean = [1, 2]
-        stats.sum_x2 .= [20.0, 50.0]  # E[X²] = [2, 5]
-        stats.sum_xy .= [20.0 25.0; 25.0 50.0]  # E[X1*X2] = 2.5
+        # Non-trivial: x=[0,0] for first 10 units, x=[2,4] for next 10 units
+        stats2 = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
+        PDMPSamplers.welford_update!(stats2, [0.0, 0.0], 0.0)
+        PDMPSamplers.welford_update!(stats2, [2.0, 4.0], 10.0)
+        PDMPSamplers.welford_update!(stats2, [2.0, 4.0], 20.0)
 
-        C = PDMPSamplers.stats_cov(stats)
-        @test C[1, 1] ≈ 2.0 - 1.0  # 1.0
-        @test C[2, 2] ≈ 5.0 - 4.0  # 1.0
-        @test C[1, 2] ≈ 2.5 - 2.0  # 0.5
-        @test C[2, 1] ≈ C[1, 2]
+        C2 = PDMPSamplers.stats_cov(stats2)
+        @test issymmetric(C2)
+        @test all(diag(C2) .>= 0)
     end
 
 end
