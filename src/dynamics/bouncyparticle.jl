@@ -41,12 +41,13 @@ function move_forward_time!(state::StickyPDMPState, τ::Real, flow::BouncyPartic
     state
 end
 
-initialize_velocity(::BouncyParticle, d::Integer) = randn(d)
-refresh_velocity!(ξ::SkeletonPoint, ::BouncyParticle) = randn!(ξ.θ)
+initialize_velocity(rng::Random.AbstractRNG, ::BouncyParticle, d::Integer) = randn(rng, d)
+refresh_velocity!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ::BouncyParticle) = randn!(rng, ξ.θ)
 refresh_rate(flow::BouncyParticle) = flow.λref
 
 
 # BPS reflection: bounce against the gradient hyperplane
+reflect!(::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::BouncyParticle, cache) = reflect!(ξ, ∇ϕ, flow, cache)
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, ::BouncyParticle, cache)
     θ = ξ.θ
 
@@ -59,6 +60,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, ::BouncyParticle, ca
     return nothing
 end
 
+reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache) = reflect!(state, ∇ϕ, flow, cache)
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache)
     # this does not work in general! we'd need some kind of sub-cache here as well...
     subcache = (; z = view(cache.z, 1:sum(state.free)))

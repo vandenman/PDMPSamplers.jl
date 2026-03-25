@@ -17,6 +17,7 @@ Base.@kwdef struct RootsPoissonTimeStrategy <: PoissonTimeStrategy
     atol::Float64 = sqrt(eps(Float64))#1e-12
 end
 
+accept_reflection_event(::Random.AbstractRNG, ::RootsPoissonTimeStrategy, args...) = true
 accept_reflection_event(::RootsPoissonTimeStrategy, args...) = true
 
 mutable struct IntegralCache
@@ -98,13 +99,13 @@ Compute next event time using root finding. Samples R ~ Exp(1) and solves
 ∫₀^τ λ(x(s), v) ds = R for τ using numerical integration (QuadGK) and
 root finding (Roots.jl).
 """
-function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
                         alg::RootsPoissonTimeStrategy, state::AbstractPDMPState,
                         cache, stats::StatisticCounter)
 
     grad = model.grad
     # Compare with refresh time --  TODO: we can always use this as an upper bound for the root finding?
-    τ_refresh = rand_refresh_time(flow)
+    τ_refresh = rand_refresh_time(rng, flow)
 
     mustwork = isinf(τ_refresh)
     # if refresh time is Inf, this MUST work
@@ -114,7 +115,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
     while outer_iterations < max_outer_iterations
 
         # Sample the exponential random variable
-        R = rand(Exponential())
+        R = rand(rng, Exponential())
 
         integral_minus_R = integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=alg.rtol, atol=alg.atol)
 

@@ -449,7 +449,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDi
     return rate, rate_deriv
 end
 
-function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponential()), refresh_rate::Real=0.0)
+function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound, u::Real=rand(rng, Exponential()), refresh_rate::Real=0.0)
 
     area_before = zero(eltype(pcb.Λ_vals))
     segment_idx = 0
@@ -483,6 +483,7 @@ function propose_event_time(pcb::PiecewiseConstantBound, u::Real=rand(Exponentia
 
 end
 
+propose_event_time(pcb::PiecewiseConstantBound, u::Real, refresh_rate::Real=0.0) = propose_event_time(Random.default_rng(), pcb, u, refresh_rate)
 
 Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     N::Int = 20
@@ -500,7 +501,7 @@ end
 _default_early_stop(::ContinuousDynamics, est::Float64) = est
 _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_stop(pd.dynamics, est)
 
-function _to_internal(strat::GridThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     T = typeof(strat.t_max)
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
     N_base = strat.N
@@ -568,6 +569,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     has_cached_gradient::Base.RefValue{Bool}
 end
 
+accept_reflection_event(::Random.AbstractRNG, ::GridAdaptiveState, args...) = true
 accept_reflection_event(::GridAdaptiveState, args...) = true
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
@@ -579,13 +581,13 @@ function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
 end
 
 function _constant_bound_event_time(
-    model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+    rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache,
     stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool
 )
     λ_bound = alg.constant_bound_rate[]
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
     default_return = GradientMeta(alg.empty_∇ϕx)
 
     state_ = alg.state_cache
@@ -594,7 +596,7 @@ function _constant_bound_event_time(
 
     cumulative_exp = 0.0
     for _ in 1:alg.safety_limit
-        cumulative_exp += rand(Exponential())
+        cumulative_exp += rand(rng, Exponential())
         τ_proposal = cumulative_exp / λ_bound
 
         if τ_proposal >= t_max
@@ -615,17 +617,21 @@ function _constant_bound_event_time(
 
         if l_actual > λ_bound
             alg.constant_bound_rate[] = NaN
-            return next_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+            return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
         end
 
-        if rand() * λ_bound <= l_actual
+        if rand(rng) * λ_bound <= l_actual
             alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
             return τ_proposal, :reflect, GradientMeta(∇ϕx)
         end
     end
 
     alg.constant_bound_rate[] = NaN
-    return next_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+    return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+end
+
+function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool)
+    return _constant_bound_event_time(Random.default_rng(), model, flow, alg, state, cache, stats, max_horizon, include_refresh)
 end
 
 
@@ -647,11 +653,11 @@ function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynami
     return (grad_func, hvp_func)
 end
 
-function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64=Inf, include_refresh::Bool=true) where {FL<:ContinuousDynamics}
 
     if isfinite(alg.constant_bound_rate[])
-        return _constant_bound_event_time(model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        return _constant_bound_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
     end
 
     state_ = alg.state_cache
@@ -662,12 +668,12 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, a
 
     # Function barrier: specialized on the concrete type of grad_and_hvp
     if alg.lazy
-        return _next_event_time_lazy!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
     end
-    return _next_event_time_grid!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+    return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
 end
 
-function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64, include_refresh::Bool) where {P, FL<:ContinuousDynamics}
 
@@ -682,7 +688,7 @@ function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
     default_return = GradientMeta(alg.empty_∇ϕx)
 
     # Draw refresh time FIRST so we can cap grid construction (Phase 1A)
-    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
     effective_horizon = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon)
 
     # Build grid once for this event, capped at effective horizon
@@ -710,8 +716,8 @@ function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
     safety_limit = alg.safety_limit
     while safety_limit > 0
 
-        cumulative_exp += rand(Exponential())
-        τ_reflection, lb_reflection = propose_event_time(pcb, cumulative_exp)
+        cumulative_exp += rand(rng, Exponential())
+        τ_reflection, lb_reflection = propose_event_time(rng, pcb, cumulative_exp)
 
         if τ_reflection >= effective_horizon
 
@@ -741,7 +747,7 @@ function _next_event_time_grid!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
 
         l_reflection = λ(state_.ξ, ∇ϕx, flow)
 
-        if rand() * lb_reflection <= l_reflection
+        if rand(rng) * lb_reflection <= l_reflection
             tightness = l_reflection / lb_reflection
             _adapt_grid_N!(alg, tightness)
             _adapt_grid_t_max!(alg, τ_reflection, model.grad)
@@ -784,7 +790,7 @@ end
 # Interleaves grid point evaluation with proposal generation so that for
 # well-adapted samplers only the first few intervals are evaluated.
 
-function _next_event_time_lazy!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64, include_refresh::Bool) where {P, FL<:ContinuousDynamics}
 
@@ -796,7 +802,7 @@ function _next_event_time_lazy!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     default_return = GradientMeta(alg.empty_∇ϕx)
 
-    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
 
     N = alg.N[]
     t_max = alg.t_max[]
@@ -815,7 +821,7 @@ function _next_event_time_lazy!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
     t_left = 0.0
 
     cumulative_area = 0.0
-    exp_target = rand(Exponential())
+    exp_target = rand(rng, Exponential())
     safety_limit = alg.safety_limit
 
     stats.grid_builds += 1
@@ -894,10 +900,10 @@ function _next_event_time_lazy!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
             alg.has_cached_gradient[] = false
             _increase_grid_N!(alg)
             recompute_time_grid!(alg)
-            return _next_event_time_grid!(grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
         end
 
-        if rand() * pos(Λ_cell) <= l_actual
+        if rand(rng) * pos(Λ_cell) <= l_actual
             # Accepted — cache gradient for next call (2C)
             copyto!(alg.cached_gradient, ∇ϕx)
             alg.has_cached_gradient[] = true
@@ -917,7 +923,7 @@ function _next_event_time_lazy!(grad_and_hvp::P, model::PDMPModel{<:GlobalGradie
         y_left, d_left = get_rate_and_deriv(state_, flow, grad_and_hvp, false, ∇ϕx)
         t_left = τ_proposal
         cumulative_area = 0.0
-        exp_target = rand(Exponential())
+        exp_target = rand(rng, Exponential())
     end
 
     error("Safety limit reached in lazy grid")
