@@ -30,9 +30,10 @@ struct PreconditionedDynamics{P <: AbstractPreconditioner, D <: ContinuousDynami
     dynamics::D
 end
 
-update_preconditioner!(flow::ContinuousDynamics, ::AbstractPDMPTrace, state::AbstractPDMPState) = flow
+update_preconditioner!(::Random.AbstractRNG, flow::ContinuousDynamics, ::AbstractPDMPTrace, state::AbstractPDMPState) = flow
+update_preconditioner!(flow::ContinuousDynamics, trace::AbstractPDMPTrace, state::AbstractPDMPState, args...) = update_preconditioner!(Random.default_rng(), flow, trace, state, args...)
 
-function update_preconditioner!(flow::PreconditionedDynamics{<:DiagonalPreconditioner}, trace::AbstractPDMPTrace, state::AbstractPDMPState, first_update::Bool = false)
+function update_preconditioner!(::Random.AbstractRNG, flow::PreconditionedDynamics{<:DiagonalPreconditioner}, trace::AbstractPDMPTrace, state::AbstractPDMPState, first_update::Bool = false)
     sigmas = Statistics.std(trace)
     for i in eachindex(sigmas)
 
@@ -55,7 +56,7 @@ function update_preconditioner!(flow::PreconditionedDynamics{<:DiagonalPrecondit
     flow
 end
 
-function update_preconditioner!(flow::PreconditionedDynamics{DensePreconditioner}, trace::AbstractPDMPTrace, state::AbstractPDMPState, first_update::Bool = false)
+function update_preconditioner!(rng::Random.AbstractRNG, flow::PreconditionedDynamics{DensePreconditioner}, trace::AbstractPDMPTrace, state::AbstractPDMPState, first_update::Bool = false)
     M = flow.metric
     Σ_est = Statistics.cov(trace)
     d = size(Σ_est, 1)
@@ -77,9 +78,9 @@ function update_preconditioner!(flow::PreconditionedDynamics{DensePreconditioner
 
     # Re-draw canonical velocity and set physical velocity accordingly
     if flow.dynamics isa ZigZag
-        rand!(M.v_canonical, (-1.0, 1.0))
+        rand!(rng, M.v_canonical, (-1.0, 1.0))
     else
-        randn!(M.v_canonical)
+        randn!(rng, M.v_canonical)
     end
     mul!(state.ξ.θ, M.L, M.v_canonical)
     flow
@@ -112,8 +113,8 @@ move_forward_time!(state::AbstractPDMPState, τ, pd::PreconditionedDynamics) = m
 λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics) = λ(ξ, ∇ϕ, pd.dynamics)
 
 # 3. Reflection Logic (Mirroring is invariant)
-reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(ξ, ∇ϕ, pd.dynamics, cache)
-reflect!(state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(state, ∇ϕ, pd.dynamics, cache)
+reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, ξ, ∇ϕ, pd.dynamics, cache)
+reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, state, ∇ϕ, pd.dynamics, cache)
 
 
 # 4. Hitting Times (Geometry is invariant)
@@ -128,19 +129,19 @@ refresh_rate(flow::PreconditionedDynamics) = refresh_rate(flow.dynamics)
 
 
 # 5. Initialization
-function initialize_velocity(pd::PreconditionedDynamics, d::Integer)
+function initialize_velocity(rng::Random.AbstractRNG, pd::PreconditionedDynamics, d::Integer)
     # 1. Ask inner dynamics for a "canonical" velocity (e.g., {-1, 1})
-    v = initialize_velocity(pd.dynamics, d)
+    v = initialize_velocity(rng, pd.dynamics, d)
     # 2. Stretch it to physical space (e.g., {-a_i, a_i})
     transform_velocity!(v, pd.metric)
     return v
 end
 
 # 6. Refreshment
-function refresh_velocity!(ξ::SkeletonPoint, pd::PreconditionedDynamics)
+function refresh_velocity!(rng::Random.AbstractRNG, ξ::SkeletonPoint, pd::PreconditionedDynamics)
     # 1. Let the inner dynamics refresh to a canonical state
     # (Note: This assumes the inner dynamics resets v to something standard, like N(0,I))
-    refresh_velocity!(ξ, pd.dynamics)
+    refresh_velocity!(rng, ξ, pd.dynamics)
     # 2. Apply the preconditioner again
     transform_velocity!(ξ.θ, pd.metric)
 end
@@ -170,7 +171,7 @@ function λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditionedZig
     return rate
 end
 
-function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditionedZigZag, cache)
+function reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditionedZigZag, cache)
     M = pd.metric
     v = M.v_canonical
     L = M.L
@@ -187,7 +188,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditio
 
     i₀ = 1
     if ispositive(total_rate)
-        u = rand() * total_rate
+        u = rand(rng) * total_rate
         cumsum = zero(total_rate)
         @inbounds for i in 1:d
             cumsum += pos(v[i] * z[i])
@@ -197,7 +198,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditio
             end
         end
     else
-        i₀ = rand(1:d)
+        i₀ = rand(rng, 1:d)
     end
 
     # Flip canonical velocity and update physical velocity
@@ -209,8 +210,8 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditio
     return nothing
 end
 
-function reflect!(state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::DensePreconditionedZigZag, cache)
-    reflect!(state.ξ, ∇ϕ, pd, cache)
+function reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::DensePreconditionedZigZag, cache)
+    reflect!(rng, state.ξ, ∇ϕ, pd, cache)
 end
 
 # Type aliases for common combinations

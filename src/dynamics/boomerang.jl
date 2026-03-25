@@ -160,17 +160,18 @@ end
 Sample θ ~ N(0, Σ) where Σ = D + VΛV'.
 Uses θ = D^{1/2}ε₁ + V Λ^{1/2}ε₂ with ε₁ ~ N(0,I_d), ε₂ ~ N(0,I_r).
 """
-function lowrank_sample!(θ::AbstractVector, lrp::LowRankPrecision)
-    randn!(θ)
+function lowrank_sample!(rng::Random.AbstractRNG, θ::AbstractVector, lrp::LowRankPrecision)
+    randn!(rng, θ)
     θ .*= lrp.Dsqrt  # D^{1/2} ε₁
 
     buf_r1 = lrp.buf_r1
-    randn!(buf_r1)
+    randn!(rng, buf_r1)
     buf_r1 .*= lrp.Λsqrt  # Λ^{1/2} ε₂
 
     mul!(θ, lrp.V, buf_r1, 1.0, 1.0)  # θ += V Λ^{1/2} ε₂
     return θ
 end
+lowrank_sample!(θ::AbstractVector, lrp::LowRankPrecision) = lowrank_sample!(Random.default_rng(), θ, lrp)
 function Boomerang(Γ, μ, λ = 0.1; ρ=0.0)
     if Γ isa Diagonal
         return Boomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L)
@@ -272,28 +273,28 @@ function AdaptiveBoomerang(Γ, μ; λref=0.1, ρ=0.0)
     MutableBoomerang(Γ, μ, λref; ρ=ρ)
 end
 
-initialize_velocity(flow::AnyBoomerang, d::Integer) = refresh_velocity!(Vector{Float64}(undef, d), flow)
+initialize_velocity(rng::Random.AbstractRNG, flow::AnyBoomerang, d::Integer) = refresh_velocity!(rng, Vector{Float64}(undef, d), flow)
 
 # Boomerang-specific velocity refreshment (complete refresh from Gaussian)
 refresh_rate(flow::AnyBoomerang) = flow.λref
-refresh_velocity!(ξ::SkeletonPoint, flow::AnyBoomerang) = refresh_velocity!(ξ.θ, flow)
-function refresh_velocity!(θ::AbstractVector, flow::AnyBoomerang)
+refresh_velocity!(rng::Random.AbstractRNG, ξ::SkeletonPoint, flow::AnyBoomerang) = refresh_velocity!(rng, ξ.θ, flow)
+function refresh_velocity!(rng::Random.AbstractRNG, θ::AbstractVector, flow::AnyBoomerang)
     if iszero(flow.ρ)
-        ldiv!(flow.L', randn!(θ))
+        ldiv!(flow.L', randn!(rng, θ))
     else
         θ_fresh = similar(θ)
-        ldiv!(flow.L', randn!(θ_fresh))
+        ldiv!(flow.L', randn!(rng, θ_fresh))
         ρ = flow.ρ
         θ .= ρ .* θ .+ sqrt(1 - ρ^2) .* θ_fresh
     end
     return θ
 end
-function refresh_velocity!(state::StickyPDMPState, flow::AnyBoomerang)
+function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::AnyBoomerang)
     ΣL = flow.ΣL
     # ΣL = cholesky(Symmetric(L*L')).L  # could cache this if many stickies
     ΣLs = view(ΣL, state.free, :)
     θ = state.ξ.θ
-    randn!(θ)
+    randn!(rng, θ)
     u = similar(θ, sum(state.free))
     mul!(u, ΣLs, θ)
     j = 1
@@ -308,6 +309,7 @@ function refresh_velocity!(state::StickyPDMPState, flow::AnyBoomerang)
     return θ
 end
 
+reflect!(::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(ξ, ∇ϕ, flow, cache)
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
     θ = ξ.θ
     z = cache.z
@@ -319,6 +321,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, 
     return nothing
 end
 
+reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(state, ∇ϕ, flow, cache)
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
     reflect!(state.ξ, ∇ϕ, flow, cache)
     # Reflection may set non-zero velocity for frozen coordinates; restore invariant
@@ -445,28 +448,28 @@ Used for method dispatch on low-rank Boomerang dynamics.
 """
 const LowRankMutableBoomerang = MutableBoomerang{<:LowRankPrecision}
 
-function refresh_velocity!(θ::AbstractVector, flow::LowRankMutableBoomerang)
+function refresh_velocity!(rng::Random.AbstractRNG, θ::AbstractVector, flow::LowRankMutableBoomerang)
     if iszero(flow.ρ)
-        lowrank_sample!(θ, flow.Γ)
+        lowrank_sample!(rng, θ, flow.Γ)
     else
         θ_fresh = similar(θ)
-        lowrank_sample!(θ_fresh, flow.Γ)
+        lowrank_sample!(rng, θ_fresh, flow.Γ)
         ρ = flow.ρ
         θ .= ρ .* θ .+ sqrt(1 - ρ^2) .* θ_fresh
     end
     return θ
 end
 
-function refresh_velocity!(state::StickyPDMPState, flow::LowRankMutableBoomerang)
+function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::LowRankMutableBoomerang)
     lrp = flow.Γ
     θ = state.ξ.θ
     # Sample θ_free ~ N(0, Σ[free,free]) where Σ = D + VΛV'
     buf_r = lrp.buf_r1
-    randn!(buf_r)
+    randn!(rng, buf_r)
     buf_r .*= lrp.Λsqrt  # Λ^{1/2} ε₂
     for i in eachindex(θ)
         if state.free[i]
-            val = lrp.Dsqrt[i] * randn()
+            val = lrp.Dsqrt[i] * randn(rng)
             for k in eachindex(buf_r)
                 val += lrp.V[i, k] * buf_r[k]
             end

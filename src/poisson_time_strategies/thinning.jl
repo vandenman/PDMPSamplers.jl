@@ -1,7 +1,7 @@
 struct ThinningStrategy{T<:BoundStrategy} <: PoissonTimeStrategy
     c::T
 end
-_to_internal(x::ThinningStrategy, flow::ContinuousDynamics, model::PDMPModel, args...) = x
+_to_internal(x::ThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, args...) = x
 
 function poisson_time(a::Number, u::Number)
     !ispositive(a) && return Inf
@@ -26,7 +26,9 @@ function poisson_time(a, b, u)
     end
 end
 
-function next_time(t, abc, z=rand())
+next_time(t, abc, z) = next_time(Random.default_rng(), t, abc, z)
+
+function next_time(rng::Random.AbstractRNG, t, abc, z=rand(rng))
     a, b, refresh_time = abc
     Δt = poisson_time(a, b, z)
     if Δt > refresh_time
@@ -55,7 +57,7 @@ get_bounds(b::GlobalBounds) = FillArrays.Fill(b.c, b.d)
 ab(ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab(ξ, get_bounds(c), flow, cache)
 ab_i(i::Int, ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab_i(i, ξ, get_bounds(c), flow, cache)
 
-function next_event_time(::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
+function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
     # TODO: these only exist temporarily due to issues/ testing in gridthinning
     ignored1::Any=nothing, ignored2::Any=nothing
 )
@@ -73,9 +75,9 @@ function next_event_time(::PDMPModel{<:GlobalGradientStrategy}, flow::Continuous
 
     # this step only should be done through dispatch!
     abc = ab(ξ, alg, flow, cache)
-    reflect_time = poisson_time(abc[1], abc[2], rand())
+    reflect_time = poisson_time(abc[1], abc[2], rand(rng))
 
-    refresh_time = rand_refresh_time(flow)
+    refresh_time = rand_refresh_time(rng, flow)
 
     # at this point maybe sample/ compute the sticky times?
 
@@ -93,7 +95,7 @@ function next_event_time(::PDMPModel{<:GlobalGradientStrategy}, flow::Continuous
 
 end
 
-function next_event_time(::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::StatisticCounter)
+function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::StatisticCounter)
     pq = cache.pq # rename for clarity
     # i₀, t_event = dequeue_pair!(pq)
     i₀, t_event = Base.popfirst!(pq)
@@ -102,7 +104,7 @@ function next_event_time(::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::T
     return τ, nothing, CoordinateMeta(i₀)
 end
 
-function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta::BoundsMeta)
+function accept_reflection_event(rng::Random.AbstractRNG, ::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta::BoundsMeta)
 
     l = λ(ξ, ∇ϕx, flow)
     l_bound = pos(meta.a + meta.b * dt)
@@ -112,7 +114,7 @@ function accept_reflection_event(::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::
     # for now, the bound should be way tighter
     # l / l_bound < 0.6 && error("Tuning parameter `c` too large? dt = $dt, l=$l, lb=$l_bound, l / l_bound = $(l / l_bound)")
 
-    u = rand()
+    u = rand(rng)
     accept = u * l_bound <= l
 
     if accept

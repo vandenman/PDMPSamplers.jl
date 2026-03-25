@@ -114,9 +114,10 @@ struct OptimisticState{S<:AbstractPDMPState} <: PoissonTimeStrategy
     total_proposals::Base.RefValue{Int}
 end
 
+accept_reflection_event(::Random.AbstractRNG, ::OptimisticState, args...) = true
 accept_reflection_event(::OptimisticState, args...) = true
 
-function _to_internal(strat::OptimisticStrategy, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::OptimisticStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
     OptimisticState(
         PiecewiseLinearBound(strat.N),
         strat.N,
@@ -164,7 +165,7 @@ end
 
 # ─── Main event time proposal ────────────────────────────────────────────────
 
-function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::OptimisticState, state::AbstractPDMPState, cache, stats::StatisticCounter,
     max_horizon::Float64=Inf, include_refresh::Bool=true) where {FL<:ContinuousDynamics}
 
@@ -178,7 +179,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     default_return = GradientMeta(alg.empty_∇ϕx)
 
-    τ_refresh = ispositive(λ_refresh) ? rand(Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
     effective_horizon = min(alg.t_max[], τ_refresh, max_horizon)
 
     N_active = alg.N_current[]
@@ -196,7 +197,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     cumulative_exp = 0.0
 
     for _ in 1:alg.safety_limit
-        cumulative_exp += rand(Exponential())
+        cumulative_exp += rand(rng, Exponential())
         τ, λ_tilde = propose_from_linear_bound(plb, cumulative_exp)
         alg.total_proposals[] += 1
 
@@ -244,7 +245,7 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
             continue
         end
 
-        if rand() * λ_tilde <= l_true
+        if rand(rng) * λ_tilde <= l_true
             _adapt_t_max_optimistic!(alg, τ)
             # Decay N_current back toward N_base after successful acceptance
             if N_active > alg.N_base
