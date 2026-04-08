@@ -1,14 +1,15 @@
 # --- 1. Infrastructure ---
 struct NoAdaptation <: AbstractAdapter end
-adapt!(::NoAdaptation, args...; kwargs...) = nothing
+adapt!(::Random.AbstractRNG, ::NoAdaptation, args...; kwargs...) = nothing
+adapt!(ad::AbstractAdapter, args...; kwargs...) = adapt!(Random.default_rng(), ad, args...;  kwargs...)
 
 struct SequenceAdapter{T} <: AbstractAdapter
     adapters::T
 end
 
-function adapt!(seq::SequenceAdapter, state, flow, grad, trace_mgr; kwargs...)
+function adapt!(rng::Random.AbstractRNG, seq::SequenceAdapter, state, flow, grad, trace_mgr; kwargs...)
     for a in seq.adapters
-        adapt!(a, state, flow, grad, trace_mgr; kwargs...)
+        adapt!(rng, a, state, flow, grad, trace_mgr; kwargs...)
     end
 end
 
@@ -23,9 +24,9 @@ mutable struct PreconditionerAdapter <: AbstractAdapter
     scheme::Symbol
 end
 
-function adapt!(ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
+function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
-        update_preconditioner!(flow, get_warmup_trace(trace_mgr), state, iszero(ad.no_updates_done))
+        update_preconditioner!(rng, flow, get_warmup_trace(trace_mgr), state, iszero(ad.no_updates_done))
         ad.last_update = state.t[]
         ad.no_updates_done += 1
     end
@@ -38,7 +39,7 @@ mutable struct GradientResampler <: AbstractAdapter
 end
 GradientResampler() = GradientResampler(0.0, -Inf)
 
-function adapt!(ad::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup, kwargs...)
+function adapt!(::Random.AbstractRNG, ad::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup, kwargs...)
     if ad.dt <= 0.0 || (state.t[] - ad.last_update >= ad.dt)
         grad.resample_indices!(grad.nsub)
         ad.last_update = state.t[]
@@ -62,7 +63,7 @@ function _has_integrable_segment(trace)
     return second_event !== nothing
 end
 
-function adapt!(ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
+function adapt!(::Random.AbstractRNG, ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     if (state.t[] - ad.last_update >= ad.dt)
         if phase === :warmup
             trace = get_warmup_trace(trace_mgr)
@@ -89,7 +90,7 @@ mutable struct AnchorBankAdapter{F1, F2} <: AbstractAdapter
     warmup_only::Bool
 end
 
-function adapt!(ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
+function adapt!(::Random.AbstractRNG, ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
                 phase::Symbol=:warmup, kwargs...)
     ad.select_fn!(state.ξ.x)
 
@@ -382,7 +383,7 @@ function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Sym
     BoomerangAdapter(base_dt, t0, 0, scheme, stats, false, ws)
 end
 
-function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
+function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     ad.did_update = false
 
     if phase === :warmup
@@ -392,7 +393,7 @@ function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::Muta
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
         update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace)
-        refresh_velocity!(state, flow)
+        refresh_velocity!(rng, state, flow)
         # After flow.μ changes, reset prev_x so next segment starts fresh
         ad.stats.prev_x .= state.ξ.x
         ad.stats.prev_t = state.t[]
@@ -403,7 +404,7 @@ function adapt!(ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::Muta
 end
 
 # Fallback: if the flow is not MutableBoomerang, do nothing
-adapt!(::BoomerangAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
+adapt!(::Random.AbstractRNG, ::BoomerangAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
 
 # --- Query whether dynamics adaptation occurred (for sticky time invalidation) ---
 did_dynamics_adapt(::AbstractAdapter) = false
@@ -666,7 +667,7 @@ function RefreshRateAdapter(base_dt::Float64, min_start_time::Float64;
         min_start_time, 0, 0, 0.0, Inf, 1, false)
 end
 
-function adapt!(ad::RefreshRateAdapter, state, flow::MutableBoomerang, grad, trace_mgr;
+function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::MutableBoomerang, grad, trace_mgr;
     phase::Symbol=:warmup, stats::Union{StatisticCounter,Nothing}=nothing, kwargs...)
     ad.did_update = false
     phase === :warmup || return
@@ -715,7 +716,7 @@ function adapt!(ad::RefreshRateAdapter, state, flow::MutableBoomerang, grad, tra
     ad.did_update = true
 end
 
-adapt!(::RefreshRateAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
+adapt!(::Random.AbstractRNG, ::RefreshRateAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
 did_dynamics_adapt(::RefreshRateAdapter) = false
 
 function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warmup=0.0)

@@ -1,6 +1,9 @@
-pdmp_sample(d::Integer, args...; kwargs...) = pdmp_sample(randn(d), args...; kwargs...)
+pdmp_sample(d::Integer, args...; seed::Union{Integer,Nothing}=nothing, kwargs...) = pdmp_sample(randn(_make_rng(seed), d), args...; seed, kwargs...)
 pdmp_sample(x₀::AbstractVector, θ₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; kwargs...)
-pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, initialize_velocity(flow, length(x₀))), flow, args...; kwargs...)
+pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; seed::Union{Integer,Nothing}=nothing, kwargs...) = pdmp_sample(SkeletonPoint(x₀, initialize_velocity(_make_rng(seed), flow, length(x₀))), flow, args...; seed, kwargs...)
+
+_make_rng(::Nothing) = Random.default_rng()
+_make_rng(seed::Integer) = Random.Xoshiro(seed)
 
 """
     pdmp_sample(ξ₀, flow, model, alg, t₀=0.0, T=10_000, t_warmup=0.0;
@@ -28,33 +31,37 @@ function pdmp_sample(
     warmup_stop::Union{StoppingCriterion,Nothing}=nothing,
     n_chains::Int=1, threaded::Bool=false,
     progress::Bool=true,
-    adapter::AbstractAdapter=NoAdaptation()
+    adapter::AbstractAdapter=NoAdaptation(),
+    seed::Union{Integer,Nothing}=nothing
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
 
     if n_chains == 1
-        trace, stats = _pdmp_sample_single(ξ₀, flow, model, alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop)
+        rng = _make_rng(seed)
+        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop)
         return PDMPChains([trace], [stats])
     end
 
     if threaded
-        tasks = map(1:n_chains) do _
+        tasks = map(1:n_chains) do chain_i
             Threads.@spawn begin
+                rng_i = _make_chain_rng(seed, chain_i)
                 flow_i = _copy_flow(flow)
                 model_i = _copy_model(model)
                 stop_i = _maybe_copy_criterion(stop)
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
+                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
             end
         end
         results = fetch.(tasks)
     else
-        results = map(1:n_chains) do _
+        results = map(1:n_chains) do chain_i
+            rng_i = _make_chain_rng(seed, chain_i)
             flow_i = _copy_flow(flow)
             model_i = _copy_model(model)
             stop_i = _maybe_copy_criterion(stop)
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
+            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
         end
     end
 
@@ -62,6 +69,9 @@ function pdmp_sample(
     all_stats = [r[2] for r in results]
     return PDMPChains(traces, all_stats)
 end
+
+_make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
+_make_chain_rng(seed::Integer, chain_i::Int) = Random.Xoshiro(seed + chain_i - 1)
 
 function pdmp_sample(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, models::AbstractVector{<:PDMPModel},
@@ -71,33 +81,37 @@ function pdmp_sample(
     warmup_stop::Union{StoppingCriterion,Nothing}=nothing,
     threaded::Bool=false,
     progress::Bool=true,
-    adapter::AbstractAdapter=NoAdaptation()
+    adapter::AbstractAdapter=NoAdaptation(),
+    seed::Union{Integer,Nothing}=nothing
 )
     n_chains = length(models)
     n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
 
     if n_chains == 1
-        trace, stats = _pdmp_sample_single(ξ₀, flow, models[1], alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop)
+        rng = _make_rng(seed)
+        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop)
         return PDMPChains([trace], [stats])
     end
 
     if threaded
         tasks = map(1:n_chains) do i
             Threads.@spawn begin
+                rng_i        = _make_chain_rng(seed, i)
                 flow_i        = _copy_flow(flow)
                 stop_i        = _maybe_copy_criterion(stop)
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
+                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
                     progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
             end
         end
         results = fetch.(tasks)
     else
         results = map(1:n_chains) do i
+            rng_i        = _make_chain_rng(seed, i)
             flow_i        = _copy_flow(flow)
             stop_i        = _maybe_copy_criterion(stop)
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
+            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
                 progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i)
         end
     end
@@ -124,6 +138,7 @@ end
 
 # the inner workhorse that runs a single chain
 function _step!(
+    rng::Random.AbstractRNG,
     state::AbstractPDMPState,
     model_::PDMPModel,
     flow::FL,
@@ -133,11 +148,11 @@ function _step!(
     trace_manager::TraceManager;
     phase::Symbol
 ) where {FL<:ContinuousDynamics}
-    τ, event_type, meta = next_event_time(model_, flow, alg_, state, cache, stats)
+    τ, event_type, meta = next_event_time(rng, model_, flow, alg_, state, cache, stats)
 
     @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-    needs_saving, saving_args = handle_event!(τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+    needs_saving, saving_args = handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
     needs_saving && record_event!(trace_manager, state, flow, saving_args; phase)
 
     return event_type
@@ -152,6 +167,7 @@ function _update_progress!(progress::Bool, prg, tstop::Base.RefValue{Float64}, T
 end
 
 function _run_phase!(
+    rng::Random.AbstractRNG,
     criterion::StoppingCriterion,
     state::AbstractPDMPState,
     model_::PDMPModel,
@@ -179,14 +195,14 @@ function _run_phase!(
             return nothing
         end
 
-        event_type = _step!(state, model_, flow, alg_, cache, stats, trace_manager; phase)
+        event_type = _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager; phase)
         update!(criterion, state, trace_manager, stats, event_type)
 
-        adapt!(adapter, state, flow, model_.grad, trace_manager; phase, stats)
+        adapt!(rng, adapter, state, flow, model_.grad, trace_manager; phase, stats)
         if did_dynamics_adapt(adapter)
             _reset_inner_grid!(alg_)
             if alg_ isa StickyLoopState
-                update_all_stick_times!(alg_, state, flow)
+                update_all_stick_times!(rng, alg_, state, flow)
             end
         end
 
@@ -204,6 +220,7 @@ function _run_phase!(
 end
 
 function _pdmp_sample_single(
+    rng::Random.AbstractRNG,
     ξ₀::SkeletonPoint, flow::FL, model::PDMPModel,
     alg::PoissonTimeStrategy,
     t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
@@ -238,7 +255,7 @@ function _pdmp_sample_single(
 
     t_start = time_ns()
 
-    state, model_, alg_, cache, stats = initialize_state(flow, model, alg, t₀, ξ₀)
+    state, model_, alg_, cache, stats = initialize_state(rng, flow, model, alg, t₀, ξ₀)
 
     validate_state(state, flow, "at initialization")
 
@@ -261,6 +278,7 @@ function _pdmp_sample_single(
     end
 
     _run_phase!(
+        rng,
         warmup_criterion,
         state,
         model_,
@@ -282,6 +300,7 @@ function _pdmp_sample_single(
     _maybe_activate_constant_bound!(alg_, stats)
 
     _run_phase!(
+        rng,
         stop_criterion,
         state,
         model_,
@@ -306,17 +325,18 @@ function _pdmp_sample_single(
 
 end
 
-function initialize_state(flow::ContinuousDynamics, model::PDMPModel, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint)
+function initialize_state(rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint)
     ξ = copy(ξ₀)
     t = t₀
     stats = StatisticCounter()
     state = alg isa Sticky ? StickyPDMPState(t, ξ) : PDMPState(t, ξ)
-    cache = add_gradient_to_cache(initialize_cache(flow, model.grad, alg, t, ξ), ξ)
-    alg_ = _to_internal(alg, flow, model, state, cache, stats)
+    cache = add_gradient_to_cache(initialize_cache(rng, flow, model.grad, alg, t, ξ), ξ)
+    alg_ = _to_internal(alg, rng, flow, model, state, cache, stats)
     model_ = with_stats(model, stats)
     model_.grad isa SubsampledGradient && model_.grad.resample_indices!(model_.grad.nsub)
     return state, model_, alg_, cache, stats
 end
+initialize_state(flow::ContinuousDynamics, model::PDMPModel, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint) = initialize_state(Random.default_rng(), flow, model, alg, t₀, ξ₀)
 
 function add_gradient_to_cache(cache::NamedTuple, ξ::SkeletonPoint)
     if haskey(cache, :∇ϕx)
@@ -331,23 +351,25 @@ function add_gradient_to_cache(cache::NamedTuple, ξ::SkeletonPoint)
 end
 
 # TODO: these need to move to the respective dynamics files?
-function initialize_cache(::ContinuousDynamics, ::GradientStrategy, ::PoissonTimeStrategy, ::Real, ::SkeletonPoint)
+function initialize_cache(::Random.AbstractRNG, ::ContinuousDynamics, ::GradientStrategy, ::PoissonTimeStrategy, ::Real, ::SkeletonPoint)
     (;)
 end
-function initialize_cache(flow::PreconditionedDynamics, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
-    return initialize_cache(flow.dynamics, grad, alg, t, ξ)
+function initialize_cache(rng::Random.AbstractRNG, flow::PreconditionedDynamics, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
+    return initialize_cache(rng, flow.dynamics, grad, alg, t, ξ)
 end
-function initialize_cache(flow::PreconditionedDynamics{DensePreconditioner}, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
+function initialize_cache(::Random.AbstractRNG, flow::PreconditionedDynamics{DensePreconditioner}, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
     return (; z=similar(ξ.x))
 end
-function initialize_cache(::BouncyParticle, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
+function initialize_cache(::Random.AbstractRNG, ::BouncyParticle, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
     return (; z=similar(ξ.x))
 end
-function initialize_cache(::AnyBoomerang, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
+function initialize_cache(::Random.AbstractRNG, ::AnyBoomerang, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
     return (; z=similar(ξ.x))
 end
 
-function initialize_cache(flow::ZigZag, ::CoordinateWiseGradient, thinningstrategy::ThinningStrategy, t::Real, ξ::SkeletonPoint)
+initialize_cache(flow::ContinuousDynamics, grad::GradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint) = initialize_cache(Random.default_rng(), flow, grad, alg, t, ξ)
+
+function initialize_cache(rng::Random.AbstractRNG, flow::ZigZag, ::CoordinateWiseGradient, thinningstrategy::ThinningStrategy, t::Real, ξ::SkeletonPoint)
 
     # PriorityQueue stores: Coordinate Index => Absolute Event Time
     # could also be a MutableBinaryMinHeap{Float64, DataStructures.FasterForward}, which might be more efficient.
@@ -358,7 +380,7 @@ function initialize_cache(flow::ZigZag, ::CoordinateWiseGradient, thinningstrate
     # Initialize all d clocks with their proposed event times
     for i in eachindex(ξ.x)
         abc_i = ab_i(i, ξ, thinningstrategy, flow, nothing)
-        t_event = t + poisson_time(abc_i[1], abc_i[2], rand())
+        t_event = t + poisson_time(abc_i[1], abc_i[2], rand(rng))
         # enqueue!(pq, i => t_event)
         push!(pq, i => t_event)
     end
@@ -366,7 +388,7 @@ function initialize_cache(flow::ZigZag, ::CoordinateWiseGradient, thinningstrate
     return (; pq)
 end
 
-function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::StatisticCounter)
+function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::StatisticCounter)
 
     # Always move forward in time
     move_forward_time!(state, τ, flow)
@@ -392,10 +414,10 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
             else
                 ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
-                saving_args = reflect!(state, ∇ϕx, flow, cache)
+                saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
             end
             needs_saving = true
-            (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
+            (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
             # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
         else
 
@@ -407,14 +429,14 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
             end
 
             # meta == abc for ThinningStrategy
-            if accept_reflection_event(alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
+            if accept_reflection_event(rng, alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
                 stats.reflections_accepted += 1
                 # @show "before reflect", state, ∇ϕx, flow, cache
-                saving_args = reflect!(state, ∇ϕx, flow, cache)
+                saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
                 # @show "after reflect", state
                 needs_saving = true
 
-                (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
+                (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
                 # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
             else
                 # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
@@ -428,7 +450,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
 
         # meta == nothing for ThinningStrategy
         # @show "before refresh", state
-        refresh_velocity!(state, flow)
+        refresh_velocity!(rng, state, flow)
         # @show "after refresh", state
         # saving_args = nothing # could be informed by the refresh function?
         needs_saving = true
@@ -437,13 +459,13 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
 
     elseif event_type == :sticky
 
         stats.sticky_events += 1
         i = meta.i
-        stick_or_unstick!(state::StickyPDMPState, flow, alg, i)
+        stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true
         if isfactorized(flow)
@@ -455,7 +477,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
         # for now only when horizon is reached.
         stats.last_rejected = true
     end
@@ -469,7 +491,7 @@ function handle_event!(τ::Real, gradient_strategy::GlobalGradientStrategy, flow
     return needs_saving, saving_args
 end
 
-function handle_event!(τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::StatisticCounter)
+function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::StatisticCounter)
 
     stats.last_rejected = false
     # rename for clarity
@@ -497,7 +519,7 @@ function handle_event!(τ::Real, gradient_strategy::CoordinateWiseGradient, flow
     needs_saving = false
     saving_args = nothing
 
-    if rand() * l_bound_i₀ <= l_i₀
+    if rand(rng) * l_bound_i₀ <= l_i₀
 
         if l_i₀ >= l_bound_i₀
             # TODO: somehow τ is negative!?!?
@@ -520,13 +542,13 @@ function handle_event!(τ::Real, gradient_strategy::CoordinateWiseGradient, flow
             # For simplicity and correctness in the fully non-factorized case,
             # we recalculate all bounds with the fully updated state (t, x, θ).
             abc_i_new = ab_i(i, ξ, alg, flow, nothing)
-            t_event = state.t[] + poisson_time(abc_i_new[1], abc_i_new[2], rand())
+            t_event = state.t[] + poisson_time(abc_i_new[1], abc_i_new[2], rand(rng))
             # enqueue!(pq, i => t_event)
             push!(pq, i => t_event)
         end
     else
         abc_i₀_new = ab_i(i₀, ξ, alg, flow, nothing)
-        t_event = state.t[] + poisson_time(abc_i₀_new[1], abc_i₀_new[2], rand())
+        t_event = state.t[] + poisson_time(abc_i₀_new[1], abc_i₀_new[2], rand(rng))
         # enqueue!(pq, i₀ => t_event)
         push!(pq, i₀ => t_event)
         stats.last_rejected = true

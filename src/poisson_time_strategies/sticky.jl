@@ -45,15 +45,16 @@ struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,Abs
     empty_∇ϕx::V
 end
 
+accept_reflection_event(rng::Random.AbstractRNG, alg::StickyLoopState, args...) = accept_reflection_event(rng, alg.inner_alg_state, args...)
 accept_reflection_event(alg::StickyLoopState, args...) = accept_reflection_event(alg.inner_alg_state, args...)
 
 # this could use less memory by looking at
-function _to_internal(strat::Sticky, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
 
     d = length(state.ξ)
     sticky_times = Vector{Float64}(undef, d)
 
-    internal_alg_ = _to_internal(strat.alg, flow, model, state, cache, stats)
+    internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
 
     # old_velocity = copy(state.ξ.θ)
     # # zero is problematic because the unfreeze time divides by abs(θf[i]), so divide by zero
@@ -66,7 +67,7 @@ function _to_internal(strat::Sticky, flow::ContinuousDynamics, model::PDMPModel,
     #     end
     # end
     alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, similar(state.ξ.x, 0))
-    update_all_stick_times!(alg, state, flow)
+    update_all_stick_times!(rng, alg, state, flow)
 
     # do this once
     for i in eachindex(alg.sticky_times)
@@ -87,13 +88,13 @@ end
 
 Simulate the time a stuck/ frozen particle takes to unfreeze/ unstick
 """
-function unfreeze_time(alg::StickyLoopState, state::StickyPDMPState, i::Integer)
+function unfreeze_time(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, i::Integer)
     validate_state(state, nothing, "in unfreeze_time")
     κ = get_κ(alg, i, state.ξ.x, state.free, state.ξ.θ)
 
     if κ isa Distribution
 
-        retval = rand(κ)
+        retval = rand(rng, κ)
         if isnegative(retval)# || isinf(retval)
             @show κ, i, state.ξ.x, state.free, state.ξ.θ
             throw(ArgumentError("κ must be non-negative and finite!"))
@@ -108,7 +109,7 @@ function unfreeze_time(alg::StickyLoopState, state::StickyPDMPState, i::Integer)
         end
 
         # return -log(rand()) / (κ * abs(θf)) # old approach
-        return rand(Exponential(inv(κ * abs(θf))))
+        return rand(rng, Exponential(inv(κ * abs(θf))))
     end
 end
 
@@ -151,7 +152,7 @@ get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, i,
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_state.κ(i, args...)
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:RateFunction}, i, args...) = sticky_state.κ(i, args...)
 
-function update_all_stick_times!(alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function update_all_stick_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
 
     t = state.t[]
     # TODO: instead of 1:d we should precompute a vector of things that may stick and loop over that
@@ -162,7 +163,7 @@ function update_all_stick_times!(alg::StickyLoopState, state::StickyPDMPState, f
                 alg.sticky_times[i] = t + freezing_time(state.ξ, flow, i)
                 # @show "freezing_time", alg.sticky_times[i]
             else # stuck/ frozen
-                alg.sticky_times[i] = t + unfreeze_time(alg, state, i)
+                alg.sticky_times[i] = t + unfreeze_time(rng, alg, state, i)
                 # @assert !isinf(alg.sticky_times[i]) "sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])"
 
                 # @show "unsticking_time", alg.sticky_times[i]
@@ -184,19 +185,19 @@ function update_all_freeze_times!(alg::StickyLoopState, state::StickyPDMPState, 
     end
 end
 
-function update_all_unfreeze_times!(alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function update_all_unfreeze_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
     for i in eachindex(alg.can_stick)
         if alg.can_stick[i]
             if !state.free[i]
-                alg.sticky_times[i] = t + unfreeze_time(alg, state, i)
+                alg.sticky_times[i] = t + unfreeze_time(rng, alg, state, i)
                 @assert !isinf(alg.sticky_times[i]) "sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])"
             end
         end
     end
 end
 
-function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg::StickyLoopState, i::Int)
+function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::ContinuousDynamics, alg::StickyLoopState, i::Int)
 
     t = state.t[]
     ξ = state.ξ
@@ -217,7 +218,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
         # sticky_times[i] = t - log(rand()) / (κᵢ * abs(θf[i])) # sticky time
 
         if alg.κ isa AbstractVector
-            sticky_times[i] = t + unfreeze_time(alg, state, i)
+            sticky_times[i] = t + unfreeze_time(rng, alg, state, i)
             @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN after unfreezing"
         else
             #= TODO: not sure about this design... there are a few cases:
@@ -239,7 +240,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
                 case 3 still needs to be studied. No idea if the current approach even works.
 
             =#
-            update_all_stick_times!(alg, state, flow)
+            update_all_stick_times!(rng, alg, state, flow)
             # update_all_unfreeze_times!(alg, state, flow)
         end
         # tfrez[i] = t - log(rand()) # option 2 # TODO: this is independent of the prior!?
@@ -261,7 +262,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
         sticky_times[i] = t + freezing_time(ξ, flow, i)
         @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(sticky_times[i])) after freezing (θ[i] = $(ξ.θ[i]))"
         if !(alg.κ isa AbstractVector)
-            update_all_stick_times!(alg, state, flow)
+            update_all_stick_times!(rng, alg, state, flow)
             # update_all_unfreeze_times!(alg, state, flow)
         end
         # TODO: maybe we need to update other freezing times here as well
@@ -270,7 +271,7 @@ function stick_or_unstick!(state::StickyPDMPState, flow::ContinuousDynamics, alg
     validate_state(state, flow, "after stick_or_unstick! at index $i")
 end
 
-function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
 
     t = state.t[]
     sticky_time = alg.sticky_times
@@ -303,10 +304,10 @@ function next_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::Conti
         # @show τ
 
         # Sample refresh time independently at the sticky level
-        τ_refresh = rand_refresh_time(flow)
+        τ_refresh = rand_refresh_time(rng, flow)
         tʳ = t + τ_refresh
 
-        τ, event_type, meta = next_event_time(model, flow, inner_alg_state, state, cache, stats, Inf, false)
+        τ, event_type, meta = next_event_time(rng, model, flow, inner_alg_state, state, cache, stats, Inf, false)
 
         t′ = t + τ
 

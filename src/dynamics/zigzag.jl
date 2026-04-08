@@ -13,9 +13,9 @@ ZigZag(Γ, μ, σ=(Vector(diag(Γ))).^(-0.5); λref=0.0, ρ=0.0) = ZigZag(Γ, μ
 ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
 
 refresh_rate(::ZigZag) = 0.0
-initialize_velocity(::ZigZag, d::Integer) = rand((-1., 1.), d)
+initialize_velocity(rng::Random.AbstractRNG, ::ZigZag, d::Integer) = rand(rng, (-1., 1.), d)
 refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
-function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
+function reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
 
     θ = ξ.θ
     # Single-pass weighted sampling: compute cumulative sum on-the-fly
@@ -24,7 +24,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
         total_rate += λ_i(i, ξ, ∇ϕ[i], flow)
     end
     if ispositive(total_rate)
-        u = rand() * total_rate
+        u = rand(rng) * total_rate
         cumsum = zero(total_rate)
         i₀ = firstindex(θ)
         for i in eachindex(θ)
@@ -35,7 +35,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
             end
         end
     else
-        i₀ = rand(eachindex(θ))
+        i₀ = rand(rng, eachindex(θ))
     end
     θ[i₀] = -θ[i₀]
     return i₀
