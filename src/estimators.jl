@@ -608,6 +608,7 @@ inclusion_probs(trace::AbstractPDMPTrace) = _integrate(trace, inclusion_probs)
 _integrate_segment(f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment(f, flow.dynamics, args...)
 _integrate_segment!(buf, f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment!(buf, f, flow.dynamics, args...)
 _integrate_segment(::typeof(inclusion_probs), flow::PreconditionedDynamics, x0, x1, θ0, θ1, t0, t1) = _integrate_segment(inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1)
+_integrate_segment!(buf, ::typeof(inclusion_probs), flow::PreconditionedDynamics, x0, x1, θ0, θ1, t0, t1) = _integrate_segment!(buf, inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1)
 
 function _integrate_segment(::typeof(inclusion_probs), flow::ContinuousDynamics, x0, x1, θ0, θ1, t0, t1)
     result = zeros(length(x0))
