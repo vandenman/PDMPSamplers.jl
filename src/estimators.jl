@@ -607,26 +607,21 @@ inclusion_probs(trace::AbstractPDMPTrace) = _integrate(trace, inclusion_probs)
 # TODO: this should actually use the flows M matrix!
 _integrate_segment(f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment(f, flow.dynamics, args...)
 _integrate_segment!(buf, f::Any, flow::PreconditionedDynamics, args...) = _integrate_segment!(buf, f, flow.dynamics, args...)
+_integrate_segment(::typeof(inclusion_probs), flow::PreconditionedDynamics, x0, x1, θ0, θ1, t0, t1) = _integrate_segment(inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1)
+_integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flow::PreconditionedDynamics, x0, x1, θ0, θ1, t0, t1) = _integrate_segment!(buf, inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1)
 
-function _integrate_segment(::typeof(inclusion_probs), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1)
-
+function _integrate_segment(::typeof(inclusion_probs), flow::ContinuousDynamics, x0, x1, θ0, θ1, t0, t1)
     result = zeros(length(x0))
-    _integrate_segment!(result, inclusion_probs, ZigZag(length(x0)), x0, x1, θ0, θ1, t0, t1)
+    _integrate_segment!(result, inclusion_probs, flow, x0, x1, θ0, θ1, t0, t1)
     return result
 end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), ::Union{ZigZag, BouncyParticle}, x0, x1, θ0, θ1, t0, t1)
-    # x_i(s) = x + v*s is zero only on a measure-zero set when not both are zero,
-    # so inclusion_probs integral = dt when the trajectory is not identically zero.
-    #
-    # Mathematica: g[x_] := If[x == 0, 1, 0]
-    #   FullSimplify[Integrate[g[x + s*v], {s, 0, t1 - t0}], ...]
-    #   → -t0+t1  if v==0 && x==0;  0  otherwise
-    # The code uses the negation of that condition.
+function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), ::ContinuousDynamics, x0, x1, θ0, θ1, t0, t1)
+    # A segment contributes dt iff the coordinate is not frozen.
+    # Frozen sticky coordinates have x0[i]=0 and θ0[i]=0 for the entire segment,
+    # regardless of any flow-specific parameters (e.g., Boomerang μ).
     for i in eachindex(x0)
-        v = θ0[i]
-        x = x0[i]
-        if !(iszero(x) && iszero(v))
+        if !(iszero(x0[i]) && iszero(θ0[i]))
             buf[i] += t1 - t0
         end
     end
@@ -819,27 +814,7 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow
     return buf
 end
 
-function _integrate_segment(::typeof(inclusion_probs), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
-    result = zeros(length(x0))
-    _integrate_segment!(result, inclusion_probs, flow, x0, x1, θ0, θ1, t0, t1)
-    return result
-end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
-    # x_i(s) = (x0[i] - μ[i]) cos(s) + θ0[i] sin(s) + μ[i]
-    # x_i(s) == 0 only on a set of measure zero for most initial conditions,
-    # so inclusion_probs integral = dt when the trajectory is not identically zero.
-    μ = flow.μ
-    dt = t1 - t0
-    for i in eachindex(x0)
-        Δ = x0[i] - μ[i]
-        v = θ0[i]
-        if !(iszero(Δ) && iszero(v) && iszero(μ[i]))
-            buf[i] += dt
-        end
-    end
-    return buf
-end
 
 
 # ──────────────────────────────────────────────────────────────────────────────

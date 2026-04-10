@@ -70,6 +70,23 @@
         @test all(ip .> 0.9)  # non-sparse target → always included
     end
 
+    @testset "Boomerang inclusion_probs: frozen coords with μ ≠ 0 (regression)" begin
+        # Regression: _integrate_segment! must not count frozen segments (x=0, θ=0)
+        # as included when flow.μ ≠ 0 (e.g., after BoomerangAdapter updates μ).
+        d = 4
+        μ = [0.0, 2.0, -1.5, 0.5]
+        for flow in [Boomerang(Diagonal(ones(d)), μ), AdaptiveBoomerang(Diagonal(ones(d)), μ)]
+            buf = zeros(d)
+            x0 = [1.0, 0.0, 0.0, 0.0]
+            θ0 = [0.5, 0.0, 0.0, 0.0]
+            PDMPSamplers._integrate_segment!(buf, inclusion_probs, flow, x0, x0, θ0, θ0, 0.0, 2.0)
+            @test buf[1] ≈ 2.0   # active coord: contributes full duration
+            @test buf[2] == 0.0  # frozen, μ=2.0: must not be counted
+            @test buf[3] == 0.0  # frozen, μ=-1.5: must not be counted
+            @test buf[4] == 0.0  # frozen, μ=0.5: must not be counted
+        end
+    end
+
     @testset "_time_below_segment for Boomerang" begin
         boom = Boomerang(3)
         μj = 0.0
