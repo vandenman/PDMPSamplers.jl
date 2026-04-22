@@ -7,7 +7,7 @@
         ws = PDMPSamplers.WelfordBoomerangStats(d)
         @test ws.total_time == 0.0
         @test !ws.initialized
-        @test length(ws.sum_x_lin) == d
+        @test length(ws.sum_x_dt) == d
 
         # Before data, stats should return defaults
         μ = PDMPSamplers.stats_mean(ws)
@@ -19,16 +19,18 @@
     @testset "WelfordBoomerangStats diagonal updates" begin
         d = 3
         ws = PDMPSamplers.WelfordBoomerangStats(d)
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        θ0 = zeros(d)
 
         # First call initializes
         x1 = [1.0, 2.0, 3.0]
-        PDMPSamplers.welford_update!(ws, x1, 0.0)
+        PDMPSamplers.welford_update!(ws, x1, θ0, 0.0, flow)
         @test ws.initialized
         @test ws.total_time == 0.0
 
         # Second call accumulates
         x2 = [1.5, 2.5, 3.5]
-        PDMPSamplers.welford_update!(ws, x2, 1.0)
+        PDMPSamplers.welford_update!(ws, x2, θ0, 1.0, flow)
         @test ws.total_time == 1.0
 
         μ = PDMPSamplers.stats_mean(ws)
@@ -39,21 +41,23 @@
 
         # dt = 0 → no change
         old_time = ws.total_time
-        PDMPSamplers.welford_update!(ws, x2, 1.0)
+        PDMPSamplers.welford_update!(ws, x2, θ0, 1.0, flow)
         @test ws.total_time == old_time
     end
 
     @testset "WelfordBoomerangStats fullrank mode" begin
         d = 4
         ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        @test ws.sum_xy !== nothing
+        @test ws.sum_xy_dt !== nothing
+        flow = AdaptiveBoomerang(d; scheme=:fullrank)
 
         Random.seed!(42)
         t = 0.0
         for _ in 1:100
             x = randn(d)
+            θ = randn(d)
             t += 0.1
-            PDMPSamplers.welford_update!(ws, x, t)
+            PDMPSamplers.welford_update!(ws, x, θ, t, flow)
         end
 
         C = PDMPSamplers.stats_cov(ws)
@@ -70,10 +74,12 @@
     @testset "WelfordBoomerangStats stats_std" begin
         d = 3
         ws = PDMPSamplers.WelfordBoomerangStats(d)
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        θ0 = zeros(d)
         @test all(PDMPSamplers.stats_std(ws) .== 1.0)
 
-        PDMPSamplers.welford_update!(ws, [2.0, 4.0, 6.0], 0.0)
-        PDMPSamplers.welford_update!(ws, [2.0, 4.0, 6.0], 1.0)
+        PDMPSamplers.welford_update!(ws, [2.0, 4.0, 6.0], θ0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, [2.0, 4.0, 6.0], θ0, 1.0, flow)
         σ = PDMPSamplers.stats_std(ws)
         @test all(σ .>= 0)
         @test σ ≈ sqrt.(PDMPSamplers.stats_var(ws))
@@ -82,10 +88,12 @@
     @testset "_coord_time for WelfordBoomerangStats" begin
         d = 3
         ws = PDMPSamplers.WelfordBoomerangStats(d)
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        θ0 = zeros(d)
         @test PDMPSamplers._coord_time(ws, 1) == 0.0
 
-        PDMPSamplers.welford_update!(ws, ones(d), 0.0)
-        PDMPSamplers.welford_update!(ws, ones(d), 5.0)
+        PDMPSamplers.welford_update!(ws, ones(d), θ0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, ones(d), θ0, 5.0, flow)
         @test PDMPSamplers._coord_time(ws, 1) == 5.0
         @test PDMPSamplers._coord_time(ws, 2) == 5.0
     end
@@ -111,10 +119,11 @@
         # Feed data
         Random.seed!(42)
         t = 0.0
+        θ0 = zeros(d)
         for _ in 1:200
             x = randn(d) .+ [1.0, 2.0, 3.0, 4.0]
             t += 0.1
-            PDMPSamplers.welford_update!(ws, x, t)
+            PDMPSamplers.welford_update!(ws, x, θ0, t, flow)
         end
 
         PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing)
@@ -130,10 +139,11 @@
         Random.seed!(42)
         μ_true = [1.0, 2.0, 3.0, 4.0]
         t = 0.0
+        θ0 = zeros(d)
         for _ in 1:500
             x = randn(d) .+ μ_true
             t += 0.1
-            PDMPSamplers.welford_update!(ws, x, t)
+            PDMPSamplers.welford_update!(ws, x, θ0, t, flow)
         end
 
         PDMPSamplers.update_boomerang!(flow, ws, Val(:fullrank), PDMPSamplers.FullrankWorkspace(d))
@@ -148,10 +158,11 @@
 
         Random.seed!(42)
         t = 0.0
+        θ0 = zeros(d)
         for _ in 1:500
             x = randn(d)
             t += 0.1
-            PDMPSamplers.welford_update!(ws, x, t)
+            PDMPSamplers.welford_update!(ws, x, θ0, t, flow)
         end
 
         PDMPSamplers.update_boomerang!(flow, ws, Val(:lowrank), PDMPSamplers.FullrankWorkspace(d))
@@ -173,11 +184,13 @@
 
     @testset "_has_data and _shrinkage_time" begin
         ws = PDMPSamplers.WelfordBoomerangStats(3)
+        flow = AdaptiveBoomerang(3; scheme=:diagonal)
+        θ0 = zeros(3)
         @test !PDMPSamplers._has_data(ws)
         @test PDMPSamplers._shrinkage_time(ws) == 0.0
 
-        PDMPSamplers.welford_update!(ws, [1.0, 2.0, 3.0], 0.0)
-        PDMPSamplers.welford_update!(ws, [1.0, 2.0, 3.0], 1.0)
+        PDMPSamplers.welford_update!(ws, [1.0, 2.0, 3.0], θ0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, [1.0, 2.0, 3.0], θ0, 1.0, flow)
         @test PDMPSamplers._has_data(ws)
         @test PDMPSamplers._shrinkage_time(ws) == 1.0
     end
@@ -264,7 +277,7 @@
         @test ad.no_updates_done == 0
         @test ad.scheme == :fullrank
         @test ad.stats isa PDMPSamplers.WelfordBoomerangStats
-        @test ad.stats.sum_xy !== nothing
+        @test ad.stats.sum_xy_dt !== nothing
     end
 
     @testset "Allocation-free stats helpers" begin
