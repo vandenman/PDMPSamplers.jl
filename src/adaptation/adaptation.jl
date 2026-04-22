@@ -186,87 +186,167 @@ end
 """
     WelfordBoomerangStats
 
-Streaming time-weighted statistics accumulator for Boomerang adaptation.
-Uses trapezoidal mean and left-Riemann variance, operating per-event
-without needing the trace buffer. Stores previous-event state so each
-`welford_update!` integrates exactly one trajectory segment.
+Exact continuous-time raw-moment accumulator for Boomerang adaptation.
+Each segment `[prev_t, t]` is integrated analytically using the exact
+sinusoidal Boomerang trajectory with the reference `flow.μ` active at
+that time. Stores raw sufficient statistics:
+
+- `total_time T = Σ dt`
+- `sum_x_dt S1 = Σ ∫ x(t) dt`
+- `sum_x2_dt S2 = Σ ∫ x(t).² dt`
+- `sum_xy_dt S11 = Σ ∫ x(t) x(t)' dt` (fullrank/lowrank only)
+
+Derived moments: m̂ = S1/T, Var̂ = S2/T - m̂², Ĉov = S11/T - m̂ m̂'.
 """
 mutable struct WelfordBoomerangStats
     total_time::Float64
-    sum_x_lin::Vector{Float64}                # ∑ (xᵢ + xᵢ₊₁)/2 · dt  (trapezoidal mean)
-    sum_x::Vector{Float64}                    # ∑ xᵢ · dt              (left Riemann, for var)
-    sum_x2::Vector{Float64}                   # ∑ xᵢ² · dt             (left Riemann, for var)
-    sum_xy::Union{Nothing, Matrix{Float64}}   # ∑ xᵢ xⱼ · dt           (fullrank only)
+    sum_x_dt::Vector{Float64}
+    sum_x2_dt::Vector{Float64}
+    sum_xy_dt::Union{Nothing, Matrix{Float64}}
     prev_x::Vector{Float64}
+    prev_theta::Vector{Float64}
     prev_t::Float64
     initialized::Bool
 end
 
 function WelfordBoomerangStats(d::Integer; fullrank::Bool=false)
     WelfordBoomerangStats(
-        0.0, zeros(d), zeros(d), zeros(d),
+        0.0, zeros(d), zeros(d),
         fullrank ? zeros(d, d) : nothing,
-        zeros(d), 0.0, false,
+        zeros(d), zeros(d), 0.0, false,
     )
 end
 
-function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, t::Float64)
+# --- Private exact segment integral helpers ---
+
+# Accumulate exact ∫₀^dt xᵢ(t) dt into S1.
+# x(t) = (x0 - μ) cos(t) + θ0 sin(t) + μ
+# ∫₀^dt xᵢ(t) dt = aᵢ sin(dt) + bᵢ (1 − cos(dt)) + μᵢ dt
+function _boom_raw_S1!(S1::AbstractVector, x0::AbstractVector, theta0::AbstractVector,
+                       mu::AbstractVector, dt::Float64)
+    sd, cd = sincos(dt)
+    omc = 1 - cd
+    @inbounds for i in eachindex(S1)
+        ai = x0[i] - mu[i]
+        S1[i] += ai * sd + theta0[i] * omc + mu[i] * dt
+    end
+    return S1
+end
+
+# Accumulate exact ∫₀^dt xᵢ(t)² dt into S2 (diagonal of the raw second moment).
+# ∫₀^dt xᵢ² dt = aᵢ²(dt/2 + s2d/4) + bᵢ²(dt/2 − s2d/4) + μᵢ² dt
+#                + aᵢ bᵢ sd² + 2 aᵢ μᵢ sd + 2 bᵢ μᵢ (1−cd)
+function _boom_raw_S2!(S2::AbstractVector, x0::AbstractVector, theta0::AbstractVector,
+                       mu::AbstractVector, dt::Float64)
+    sd, cd = sincos(dt)
+    s2d = sin(2 * dt)
+    omc = 1 - cd
+    sd2 = sd * sd
+    half_dt = dt / 2
+    @inbounds for i in eachindex(S2)
+        ai = x0[i] - mu[i]
+        bi = theta0[i]
+        mui = mu[i]
+        S2[i] += (ai^2 * (half_dt + s2d / 4) +
+                  bi^2 * (half_dt - s2d / 4) +
+                  mui^2 * dt +
+                  ai * bi * sd2 +
+                  2 * ai * mui * sd +
+                  2 * bi * mui * omc)
+    end
+    return S2
+end
+
+# Accumulate exact ∫₀^dt xᵢ(t) xⱼ(t) dt into S11 (full raw cross-moment matrix).
+# ∫₀^dt xᵢ xⱼ dt = aᵢaⱼ(dt/2 + s2d/4) + bᵢbⱼ(dt/2 − s2d/4)
+#                   + (aᵢbⱼ + aⱼbᵢ)/2 · sd² + μᵢμⱼ dt
+#                   + (aᵢμⱼ + aⱼμᵢ) sd + (bᵢμⱼ + bⱼμᵢ)(1−cd)
+function _boom_raw_S11!(S11::AbstractMatrix, x0::AbstractVector, theta0::AbstractVector,
+                        mu::AbstractVector, dt::Float64)
+    sd, cd = sincos(dt)
+    s2d = sin(2 * dt)
+    omc = 1 - cd
+    sd2 = sd * sd
+    half_dt = dt / 2
+    d = length(x0)
+    @inbounds for j in 1:d
+        aj = x0[j] - mu[j]
+        bj = theta0[j]
+        muj = mu[j]
+        for i in j:d
+            ai = x0[i] - mu[i]
+            bi = theta0[i]
+            mui = mu[i]
+            val = (ai * aj * (half_dt + s2d / 4) +
+                   bi * bj * (half_dt - s2d / 4) +
+                   (ai * bj + aj * bi) / 2 * sd2 +
+                   mui * muj * dt +
+                   (ai * muj + aj * mui) * sd +
+                   (bi * muj + bj * mui) * omc)
+            S11[i, j] += val
+            i != j && (S11[j, i] += val)
+        end
+    end
+    return S11
+end
+
+function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::AbstractVector,
+                         t::Float64, flow::MutableBoomerang)
     if !ws.initialized
         ws.prev_x .= x
+        ws.prev_theta .= theta
         ws.prev_t = t
         ws.initialized = true
         return ws
     end
 
     dt = t - ws.prev_t
-    dt <= 0 && return ws
+    if dt <= 0
+        ws.prev_x .= x
+        ws.prev_theta .= theta
+        ws.prev_t = t
+        return ws
+    end
 
-    d = length(ws.sum_x)
-    has_xy = ws.sum_xy !== nothing
+    mu = flow.μ
     ws.total_time += dt
-
-    @inbounds for i in 1:d
-        xi = ws.prev_x[i]
-        ws.sum_x_lin[i] += (xi + x[i]) / 2 * dt
-        ws.sum_x[i] += xi * dt
-        ws.sum_x2[i] += xi * xi * dt
-    end
-
-    if has_xy
-        sum_xy = ws.sum_xy::Matrix{Float64}
-        @inbounds for j in 1:d
-            xj = ws.prev_x[j]
-            for i in j:d
-                xi = ws.prev_x[i]
-                val = xi * xj * dt
-                sum_xy[i, j] += val
-                i != j && (sum_xy[j, i] += val)
-            end
-        end
-    end
+    _boom_raw_S1!(ws.sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    _boom_raw_S2!(ws.sum_x2_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    ws.sum_xy_dt !== nothing && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
 
     ws.prev_x .= x
+    ws.prev_theta .= theta
+    ws.prev_t = t
+    return ws
+end
+
+function reset_segment_start!(ws::WelfordBoomerangStats, x::AbstractVector,
+                               theta::AbstractVector, t::Float64)
+    ws.prev_x .= x
+    ws.prev_theta .= theta
     ws.prev_t = t
     return ws
 end
 
 function stats_mean(ws::WelfordBoomerangStats)
-    d = length(ws.sum_x_lin)
+    d = length(ws.sum_x_dt)
     μ = zeros(d)
     ws.total_time > 0 || return μ
+    T = ws.total_time
     @inbounds for i in 1:d
-        μ[i] = ws.sum_x_lin[i] / ws.total_time
+        μ[i] = ws.sum_x_dt[i] / T
     end
     return μ
 end
 
 function stats_var(ws::WelfordBoomerangStats)
-    d = length(ws.sum_x)
+    d = length(ws.sum_x_dt)
     v = ones(d)
     ws.total_time > 0 || return v
+    T = ws.total_time
     @inbounds for i in 1:d
-        μi = ws.sum_x[i] / ws.total_time
-        v[i] = max(ws.sum_x2[i] / ws.total_time - μi * μi, 0.0)
+        m = ws.sum_x_dt[i] / T
+        v[i] = max(ws.sum_x2_dt[i] / T - m * m, 0.0)
     end
     return v
 end
@@ -274,16 +354,16 @@ end
 stats_std(ws::WelfordBoomerangStats) = sqrt.(stats_var(ws))
 
 function stats_cov(ws::WelfordBoomerangStats)
-    d = length(ws.sum_x)
-    sum_xy = ws.sum_xy
-    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy)")
+    d = length(ws.sum_x_dt)
+    sum_xy = ws.sum_xy_dt
+    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
     ws.total_time <= 0 && return Matrix{Float64}(I, d, d)
     T = ws.total_time
     C = zeros(d, d)
     @inbounds for j in 1:d
-        μj = ws.sum_x[j] / T
+        μj = ws.sum_x_dt[j] / T
         for i in j:d
-            μi = ws.sum_x[i] / T
+            μi = ws.sum_x_dt[i] / T
             C[i, j] = sum_xy[i, j] / T - μi * μj
             C[j, i] = C[i, j]
         end
@@ -300,7 +380,7 @@ function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
     T = stats.total_time
     if T > 0
         @inbounds for i in eachindex(μ)
-            μ[i] = stats.sum_x_lin[i] / T
+            μ[i] = stats.sum_x_dt[i] / T
         end
     else
         fill!(μ, 0.0)
@@ -308,12 +388,10 @@ function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
     return μ
 end
 
-
-
 function stats_cov!(C::AbstractMatrix, stats::WelfordBoomerangStats)
-    sum_xy = stats.sum_xy
-    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy)")
-    _stats_cov_inner!(C, stats.sum_x, sum_xy, stats.total_time)
+    sum_xy = stats.sum_xy_dt
+    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
+    _stats_cov_inner!(C, stats.sum_x_dt, sum_xy, stats.total_time)
 end
 
 function _stats_cov_inner!(C::AbstractMatrix, sum_x::Vector{Float64}, sum_xy::Matrix{Float64}, T::Float64)
@@ -387,16 +465,14 @@ function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerang
     ad.did_update = false
 
     if phase === :warmup
-        welford_update!(ad.stats, state.ξ.x, state.t[])
+        welford_update!(ad.stats, state.ξ.x, state.ξ.θ, state.t[], flow)
     end
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
         update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace)
         refresh_velocity!(rng, state, flow)
-        # After flow.μ changes, reset prev_x so next segment starts fresh
-        ad.stats.prev_x .= state.ξ.x
-        ad.stats.prev_t = state.t[]
+        reset_segment_start!(ad.stats, state.ξ.x, state.ξ.θ, state.t[])
         ad.last_update = state.t[]
         ad.no_updates_done += 1
         ad.did_update = true
@@ -428,12 +504,12 @@ Zero-allocation: computes mean, variance, and Cholesky factors in a single pass.
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:diagonal}, ::Nothing)
     _has_data(stats) || return flow
     d = length(flow.μ)
+    T = stats.total_time
     stats_mean!(flow.μ, stats)
     @inbounds for i in 1:d
-        T = _coord_time(stats, i)
         if T > 0
-            μi = stats.sum_x[i] / T
-            σ2 = max(stats.sum_x2[i] / T - μi * μi, BOOM_DIAG_FLOOR^2)
+            μi = stats.sum_x_dt[i] / T
+            σ2 = max(stats.sum_x2_dt[i] / T - μi * μi, BOOM_DIAG_FLOOR^2)
         else
             σ2 = 1.0
         end

@@ -253,10 +253,9 @@
         d = 2
         stats = PDMPSamplers.WelfordBoomerangStats(d)
         @test stats.total_time == 0.0
-        @test stats.sum_x_lin == zeros(d)
-        @test stats.sum_x == zeros(d)
-        @test stats.sum_x2 == zeros(d)
-        @test stats.sum_xy === nothing
+        @test stats.sum_x_dt == zeros(d)
+        @test stats.sum_x2_dt == zeros(d)
+        @test stats.sum_xy_dt === nothing
 
         μ = PDMPSamplers.stats_mean(stats)
         σ² = PDMPSamplers.stats_var(stats)
@@ -264,8 +263,8 @@
         @test σ² == ones(d)
 
         stats_fr = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        @test stats_fr.sum_xy !== nothing
-        @test size(stats_fr.sum_xy) == (d, d)
+        @test stats_fr.sum_xy_dt !== nothing
+        @test size(stats_fr.sum_xy_dt) == (d, d)
     end
 
 end
@@ -452,23 +451,27 @@ end
     # ──────────────────────────────────────────────────────────────────────
     @testset "stats_cov correctness" begin
         d = 2
+        # Stationary trajectory at reference point: x = μ_ref = [2,3], theta = 0
+        # x(t) = 0*cos(t) + 0*sin(t) + μ_ref = μ_ref  → zero variance
+        flow_const = AdaptiveBoomerang(Diagonal(ones(d)), [2.0, 3.0])
         stats = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
+        θ0 = zeros(d)
 
-        # Constant stream: x=[2,3] for 10 time units → zero variance
-        PDMPSamplers.welford_update!(stats, [2.0, 3.0], 0.0)
-        PDMPSamplers.welford_update!(stats, [2.0, 3.0], 10.0)
+        PDMPSamplers.welford_update!(stats, [2.0, 3.0], θ0, 0.0, flow_const)
+        PDMPSamplers.welford_update!(stats, [2.0, 3.0], θ0, 10.0, flow_const)
 
         μ = PDMPSamplers.stats_mean(stats)
-        @test μ ≈ [2.0, 3.0]
+        @test μ ≈ [2.0, 3.0] atol=1e-10
 
         C = PDMPSamplers.stats_cov(stats)
-        @test C ≈ zeros(2, 2)
+        @test C ≈ zeros(2, 2) atol=1e-10
 
-        # Non-trivial: x=[0,0] for first 10 units, x=[2,4] for next 10 units
+        # Non-trivial: two segments with different positions; check structural properties
+        flow_zero = AdaptiveBoomerang(d; scheme=:fullrank)
         stats2 = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        PDMPSamplers.welford_update!(stats2, [0.0, 0.0], 0.0)
-        PDMPSamplers.welford_update!(stats2, [2.0, 4.0], 10.0)
-        PDMPSamplers.welford_update!(stats2, [2.0, 4.0], 20.0)
+        PDMPSamplers.welford_update!(stats2, [0.0, 0.0], θ0, 0.0, flow_zero)
+        PDMPSamplers.welford_update!(stats2, [2.0, 4.0], θ0, 10.0, flow_zero)
+        PDMPSamplers.welford_update!(stats2, [2.0, 4.0], θ0, 20.0, flow_zero)
 
         C2 = PDMPSamplers.stats_cov(stats2)
         @test issymmetric(C2)
