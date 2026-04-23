@@ -577,7 +577,13 @@ recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg
 function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     alg.t_max[] = t_max
     alg.N[] = alg.N_max
+    alg.has_cached_gradient[] = false
     recompute_time_grid!(alg)
+end
+
+function _invalidate_cached_gradient!(alg::GridAdaptiveState)
+    alg.has_cached_gradient[] = false
+    return nothing
 end
 
 function _constant_bound_event_time(

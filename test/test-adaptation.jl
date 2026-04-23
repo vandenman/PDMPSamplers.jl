@@ -414,15 +414,17 @@
         state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
         trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
 
+        select_called = Ref(0)
         update_called = Ref(0)
         ad = AnchorBankAdapter(
-            _ -> nothing,
+            _ -> (select_called[] += 1),
             _ -> (update_called[] += 1),
             5.0, 0.0, true,
         )
 
         PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
 
+        @test select_called[] == 0
         @test update_called[] == 0
         @test ad.last_update == 0.0
     end

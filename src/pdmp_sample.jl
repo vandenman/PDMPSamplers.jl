@@ -199,6 +199,9 @@ function _run_phase!(
         update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, model_.grad, trace_manager; phase, stats)
+        if model_.grad isa SubsampledGradient
+            _invalidate_cached_gradient!(alg_)
+        end
         if did_dynamics_adapt(adapter)
             _reset_inner_grid!(alg_)
             if alg_ isa StickyLoopState

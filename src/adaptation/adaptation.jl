@@ -92,7 +92,9 @@ end
 
 function adapt!(::Random.AbstractRNG, ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
                 phase::Symbol=:warmup, kwargs...)
-    ad.select_fn!(state.ξ.x)
+    if phase === :warmup || !ad.warmup_only
+        ad.select_fn!(state.ξ.x)
+    end
 
     if state.t[] - ad.last_update >= ad.update_dt
         if phase === :warmup

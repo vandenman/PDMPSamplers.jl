@@ -335,6 +335,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
 end
 
 _reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)
+_invalidate_cached_gradient!(alg::StickyLoopState) = _invalidate_cached_gradient!(alg.inner_alg_state)
 
 function _maybe_activate_constant_bound!(alg::StickyLoopState, stats::StatisticCounter)
     _maybe_activate_constant_bound!(alg.inner_alg_state, stats)
