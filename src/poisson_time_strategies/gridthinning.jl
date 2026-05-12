@@ -508,7 +508,8 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     N_min = min_grid_cells(flow, strat.N_min, N_base)
     est = _default_early_stop(flow, strat.early_stop_threshold)
     est = _adjust_early_stop(model.grad, est)
-    _build_grid_adaptive_state(strat, state, N_base, N_min, est)
+    N_max = max(N_base + 4, 2 * N_base)
+    _build_grid_adaptive_state(strat, state, N_base, N_min, N_max, est)
 end
 
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
@@ -517,6 +518,10 @@ _adjust_early_stop(::SubsampledGradient, ::Float64) = Inf
 _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64) = min(t_max, τ_refresh, max_horizon)
 
 function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
+    return _build_grid_adaptive_state(strat, state, N_base, N_min, N_base, est)
+end
+
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, N_max::Int, est) where S<:AbstractPDMPState
     T = typeof(strat.t_max)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
@@ -526,7 +531,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         strat.α⁻,
         strat.safety_limit,
         N_min,
-        N_base,
+        N_max,
         est,
         copy(state),
         copy(state),
@@ -830,6 +835,12 @@ end
 
 _safe_tightness(l_actual::Real, Λ_cell::Real) = ispositive(Λ_cell) ? l_actual / pos(Λ_cell) : NaN
 
+function _record_lazy_search_stats!(stats::StatisticCounter, proposal_attempts::Int, proposal_rejections::Int)
+    stats.lazy_proposal_attempts += proposal_attempts
+    stats.lazy_proposal_rejections += proposal_rejections
+    return nothing
+end
+
 function _lazy_grid_failure_message(; alg::GridAdaptiveState, flow::ContinuousDynamics,
     state_time::Float64, effective_horizon::Float64, Δt::Float64, no_event_cells::Int, proposal_attempts::Int,
     proposal_rejections::Int, tightness_sum::Float64, min_tightness::Float64, max_tightness::Float64,
@@ -947,11 +958,13 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         if Δt_cell <= 0.0
             # Reached the horizon
             if effective_horizon < t_max
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 return τ_refresh, :refresh, default_return
             end
             alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
             recompute_time_grid!(alg)
             stats.grid_grows += 1
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
             return t_max, :horizon_hit, default_return
         end
 
@@ -988,11 +1001,13 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             # Check if we've exhausted the horizon
             if t_right >= effective_horizon
                 if effective_horizon < t_max
+                    _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                     return τ_refresh, :refresh, default_return
                 end
                 alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
                 recompute_time_grid!(alg)
                 stats.grid_grows += 1
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 return t_max, :horizon_hit, default_return
             end
             continue
@@ -1005,6 +1020,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         # Check refresh
         if τ_refresh < τ_proposal
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
             return τ_refresh, :refresh, default_return
         end
 
@@ -1030,6 +1046,8 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         if l_actual > pos(Λ_cell)
             # Safety violation — fall back to eager grid with finer N
+            stats.lazy_fallback_bound_violation += 1
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
             alg.lazy_enabled[] = false
             alg.has_cached_gradient[] = false
             _increase_grid_N!(alg)
@@ -1046,6 +1064,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             _adapt_grid_t_max!(alg, τ_proposal, model.grad)
             stats.grid_N_current = alg.N[]
             alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
             return τ_proposal, :reflect, GradientMeta(∇ϕx)
         end
 
@@ -1059,7 +1078,18 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             low_tightness_rejections = 0
         end
 
-        if low_tightness_rejections >= max_low_tightness_rejections || proposal_rejections >= max_rejections
+        if low_tightness_rejections >= max_low_tightness_rejections
+            stats.lazy_fallback_low_tightness += 1
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+            alg.lazy_enabled[] = false
+            alg.has_cached_gradient[] = false
+            _increase_grid_N!(alg)
+            recompute_time_grid!(alg)
+            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        end
+
+        if proposal_rejections >= max_rejections
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
             alg.lazy_enabled[] = false
             alg.has_cached_gradient[] = false
             _increase_grid_N!(alg)

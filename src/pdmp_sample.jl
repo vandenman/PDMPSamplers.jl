@@ -287,9 +287,7 @@ function _run_phase!(
         update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, model_.grad, trace_manager; phase, stats)
-        if model_.grad isa SubsampledGradient
-            _invalidate_cached_gradient!(alg_)
-        end
+        model_.grad isa SubsampledGradient && _invalidate_cached_gradient!(alg_)
         _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats)
 
         if phase === :main
