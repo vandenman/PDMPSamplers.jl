@@ -730,9 +730,10 @@ function _get_trace_stats(trace::PDMPSamplers.AbstractPDMPTrace, D, coordinate::
     key = objectid(trace)
     haskey(_trace_stats_cache, key) && return _trace_stats_cache[key]
 
-    min_ess = minimum(ess(trace))
-    trace_mean = mean(trace)
-    trace_cov = cov(trace)
+    moments = PDMPSamplers._trace_moments(trace)
+    min_ess = minimum(ess(trace, moments.mean, moments.var))
+    trace_mean = moments.mean
+    trace_cov = moments.cov
 
     probs = .1:.1:.99
     q_observed = quantile(trace, collect(probs); coordinate)

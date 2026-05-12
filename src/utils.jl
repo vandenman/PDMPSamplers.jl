@@ -27,10 +27,15 @@ mutable struct StatisticCounter
     grid_points_evaluated::Int
     grid_points_skipped::Int
     grid_N_current::Int
+    lazy_fallback_low_tightness::Int
+    lazy_fallback_bound_violation::Int
+    lazy_proposal_attempts::Int
+    lazy_proposal_rejections::Int
+    grid_resets_from_dynamics_adaptation::Int
     elapsed_time::Float64
     stop_reason::Symbol
 end
-StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0.0, :none)
+StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, :none)
 
 
 

@@ -506,9 +506,10 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
     N_base = strat.N
     N_min = min_grid_cells(flow, strat.N_min, N_base)
+    N_max = max(4 * N_base, N_base)
     est = _default_early_stop(flow, strat.early_stop_threshold)
     est = _adjust_early_stop(model.grad, est)
-    _build_grid_adaptive_state(strat, state, N_base, N_min, est)
+    _build_grid_adaptive_state(strat, state, N_base, N_min, est, N_max)
 end
 
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
@@ -516,7 +517,7 @@ _adjust_early_stop(::SubsampledGradient, ::Float64) = Inf
 
 _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64) = min(t_max, τ_refresh, max_horizon)
 
-function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est, N_max::Int=N_base) where S<:AbstractPDMPState
     T = typeof(strat.t_max)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
@@ -526,7 +527,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         strat.α⁻,
         strat.safety_limit,
         N_min,
-        N_base,
+        N_max,
         est,
         copy(state),
         copy(state),
@@ -539,6 +540,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         Ref(0.0),
         strat.post_warmup_simplify,
         strat.lazy,
+        Ref(strat.lazy),
         similar(state.ξ.x),
         Ref(false),
     )
@@ -565,6 +567,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     max_observed_rate::Base.RefValue{Float64}
     post_warmup_simplify::Bool
     lazy::Bool
+    lazy_enabled::Base.RefValue{Bool}
     cached_gradient::Vector{Float64}
     has_cached_gradient::Base.RefValue{Bool}
 end
@@ -577,6 +580,7 @@ recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg
 function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     alg.t_max[] = t_max
     alg.N[] = alg.N_max
+    alg.lazy_enabled[] = alg.lazy
     alg.has_cached_gradient[] = false
     recompute_time_grid!(alg)
 end
@@ -673,7 +677,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     grad_and_hvp = _make_grad_provider(grad_func, model, flow, alg)
 
     # Function barrier: specialized on the concrete type of grad_and_hvp
-    if alg.lazy
+    if alg.lazy_enabled[]
         return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
     end
     return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
@@ -716,6 +720,12 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     cumulative_exp = 0.0
     rejection_count = 0
     max_rejections = 100
+    low_tightness_rejections = 0
+    low_tightness_threshold = 0.1
+    max_low_tightness_rejections = 3
+    last_τ_reflection = NaN
+    last_lb_reflection = NaN
+    last_l_reflection = NaN
 
     max_t_max = max_grid_horizon(flow)
 
@@ -724,6 +734,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         cumulative_exp += rand(rng, Exponential())
         τ_reflection, lb_reflection = propose_event_time(rng, pcb, cumulative_exp)
+        last_τ_reflection = τ_reflection
+        last_lb_reflection = lb_reflection
 
         if τ_reflection >= effective_horizon
 
@@ -752,9 +764,10 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         ∇ϕx = compute_gradient!(state_, model.grad, flow, cache)
 
         l_reflection = λ(state_.ξ, ∇ϕx, flow)
+        last_l_reflection = l_reflection
+        tightness = _safe_tightness(l_reflection, lb_reflection)
 
         if rand(rng) * lb_reflection <= l_reflection
-            tightness = l_reflection / lb_reflection
             _adapt_grid_N!(alg, tightness)
             _adapt_grid_t_max!(alg, τ_reflection, model.grad)
             stats.grid_N_current = alg.N[]
@@ -766,10 +779,17 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         # Rejection: cumulative_exp has advanced, next proposal will be at a later time
         rejection_count += 1
-        if rejection_count >= max_rejections
+        if tightness < low_tightness_threshold
+            low_tightness_rejections += 1
+        else
+            low_tightness_rejections = 0
+        end
+
+        if low_tightness_rejections >= max_low_tightness_rejections || rejection_count >= max_rejections
             # Too many rejections — rebuild with a finer grid and restart the
-            # thinning. The cumulative_exp is reset because the new grid has
-            # different cell integrals.
+            # thinning from the same unit-rate exponential target. Resetting
+            # cumulative_exp here can trap the search in the same loose-bound
+            # regime indefinitely.
             _increase_grid_N!(alg)
             recompute_time_grid!(alg)
 
@@ -781,15 +801,92 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
                 early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
                 max_time=effective_horizon)
-            cumulative_exp = 0.0
             rejection_count = 0
+            low_tightness_rejections = 0
             max_rejections = min(max_rejections * 2, alg.safety_limit)
             stats.grid_shrinks += 1
         end
         safety_limit -= 1
     end
 
-    error("Safety limit reached")
+    error(_eager_grid_failure_message(; alg, flow, state_time=state.t[], effective_horizon,
+        cumulative_exp, rejection_count, max_rejections, last_τ_reflection, last_lb_reflection, last_l_reflection))
+end
+
+_metric_scale_extrema(::ContinuousDynamics) = (NaN, NaN)
+
+function _metric_scale_extrema(flow::PreconditionedDynamics{<:DiagonalPreconditioner})
+    scales = flow.metric.scale
+    return minimum(scales), maximum(scales)
+end
+
+function _metric_scale_extrema(flow::DensePreconditionedBPS)
+    diag_entries = diag(flow.metric.L)
+    return minimum(diag_entries), maximum(diag_entries)
+end
+
+function _metric_scale_extrema(flow::DensePreconditionedZigZag)
+    diag_entries = diag(flow.metric.L)
+    return minimum(diag_entries), maximum(diag_entries)
+end
+
+_safe_tightness(l_actual::Real, Λ_cell::Real) = ispositive(Λ_cell) ? l_actual / pos(Λ_cell) : NaN
+
+function _eager_grid_failure_message(; alg::GridAdaptiveState, flow::ContinuousDynamics,
+    state_time::Float64, effective_horizon::Float64, cumulative_exp::Float64, rejection_count::Int,
+    max_rejections::Int, last_τ_reflection::Float64, last_lb_reflection::Float64, last_l_reflection::Float64)
+
+    scale_min, scale_max = _metric_scale_extrema(flow)
+    # TODO: should this be "lazystring" or so?
+    return string(
+        "Safety limit reached in eager grid",
+        " | N=", alg.N[],
+        " t_max=", alg.t_max[],
+        " state_time=", state_time,
+        " effective_horizon=", effective_horizon,
+        " | cumulative_exp=", cumulative_exp,
+        " rejection_count=", rejection_count,
+        " max_rejections=", max_rejections,
+        " | last_τ=", last_τ_reflection,
+        " last_bound=", last_lb_reflection,
+        " last_actual=", last_l_reflection,
+        " last_tightness=", _safe_tightness(last_l_reflection, last_lb_reflection),
+        " | metric_scale[min,max]=[", scale_min, ", ", scale_max, "]"
+    )
+end
+
+function _lazy_grid_failure_message(; alg::GridAdaptiveState, flow::ContinuousDynamics,
+    state_time::Float64, effective_horizon::Float64, Δt::Float64, no_event_cells::Int, proposal_attempts::Int,
+    proposal_rejections::Int, tightness_sum::Float64, min_tightness::Float64, max_tightness::Float64,
+    last_t_left::Float64, last_t_right::Float64, last_y_left::Float64, last_y_right::Float64,
+    last_d_left::Float64, last_d_right::Float64, last_Λ_cell::Float64, last_exp_target::Float64,
+    last_cumulative_area::Float64, last_τ_proposal::Float64, last_l_actual::Float64)
+
+    mean_tightness = proposal_attempts == 0 ? NaN : tightness_sum / proposal_attempts
+    last_tightness = _safe_tightness(last_l_actual, last_Λ_cell)
+    scale_min, scale_max = _metric_scale_extrema(flow)
+    return string(
+        "Safety limit reached in lazy grid",
+        " | N=", alg.N[],
+        " t_max=", alg.t_max[],
+        " state_time=", state_time,
+        " effective_horizon=", effective_horizon,
+        " Δt=", Δt,
+        " | no_event_cells=", no_event_cells,
+        " proposal_attempts=", proposal_attempts,
+        " proposal_rejections=", proposal_rejections,
+        " | last_t=[", last_t_left, ", ", last_t_right, "]",
+        " τ=", last_τ_proposal,
+        " | last_rate=[", last_y_left, ", ", last_y_right, "]",
+        " last_deriv=[", last_d_left, ", ", last_d_right, "]",
+        " | last_bound=", last_Λ_cell,
+        " last_actual=", last_l_actual,
+        " last_tightness=", last_tightness,
+        " | tightness[min/mean/max]=[", min_tightness, ", ", mean_tightness, ", ", max_tightness, "]",
+        " | last_exp_target=", last_exp_target,
+        " last_cumulative_area=", last_cumulative_area,
+        " | metric_scale[min,max]=[", scale_min, ", ", scale_max, "]"
+    )
 end
 
 # ── Lazy grid evaluation (Phase 2) ──────────────────────────────────────────
@@ -829,6 +926,27 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     cumulative_area = 0.0
     exp_target = rand(rng, Exponential())
     safety_limit = alg.safety_limit
+    max_rejections = min(25, max(10, alg.safety_limit ÷ 2))
+    low_tightness_rejections = 0
+    low_tightness_threshold = 0.1
+    max_low_tightness_rejections = 3
+    no_event_cells = 0
+    proposal_attempts = 0
+    proposal_rejections = 0
+    tightness_sum = 0.0
+    min_tightness = Inf
+    max_tightness = -Inf
+    last_t_left = NaN
+    last_t_right = NaN
+    last_y_left = NaN
+    last_y_right = NaN
+    last_d_left = NaN
+    last_d_right = NaN
+    last_Λ_cell = NaN
+    last_τ_proposal = NaN
+    last_l_actual = NaN
+    last_exp_target = NaN
+    last_cumulative_area = NaN
 
     stats.grid_builds += 1
     stats.grid_points_evaluated += 1
@@ -862,9 +980,19 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         # Compute piecewise constant bound for this interval
         Λ_cell = _tangent_intersection_bound(t_left, t_right, y_left, y_right, d_left, d_right)
         area_cell = pos(Λ_cell) * Δt_cell
+        last_t_left = t_left
+        last_t_right = t_right
+        last_y_left = y_left
+        last_y_right = y_right
+        last_d_left = d_left
+        last_d_right = d_right
+        last_Λ_cell = Λ_cell
+        last_exp_target = exp_target
+        last_cumulative_area = cumulative_area
 
         if cumulative_area + area_cell < exp_target
             # No event in this interval — advance
+            no_event_cells += 1
             cumulative_area += area_cell
             t_left = t_right
             y_left = y_right
@@ -900,9 +1028,20 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         ∇ϕx = compute_gradient!(state2_, model.grad, flow, cache)
 
         l_actual = λ(state2_.ξ, ∇ϕx, flow)
+        proposal_attempts += 1
+        stats.lazy_proposal_attempts += 1
+        last_τ_proposal = τ_proposal
+        last_l_actual = l_actual
+
+        tightness = _safe_tightness(l_actual, Λ_cell)
+        tightness_sum += tightness
+        min_tightness = min(min_tightness, tightness)
+        max_tightness = max(max_tightness, tightness)
 
         if l_actual > pos(Λ_cell)
             # Safety violation — fall back to eager grid with finer N
+            stats.lazy_fallback_bound_violation += 1
+            alg.lazy_enabled[] = false
             alg.has_cached_gradient[] = false
             _increase_grid_N!(alg)
             recompute_time_grid!(alg)
@@ -914,7 +1053,6 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             copyto!(alg.cached_gradient, ∇ϕx)
             alg.has_cached_gradient[] = true
 
-            tightness = l_actual / pos(Λ_cell)
             _adapt_grid_N!(alg, tightness)
             _adapt_grid_t_max!(alg, τ_proposal, model.grad)
             stats.grid_N_current = alg.N[]
@@ -925,6 +1063,22 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         # Rejected — recycle gradient (2B).
         # The gradient ∇ϕx from compute_gradient! is still valid at τ_proposal.
         # Use it as cached gradient to save one gradient call in get_rate_and_deriv.
+        proposal_rejections += 1
+        stats.lazy_proposal_rejections += 1
+        if tightness < low_tightness_threshold
+            low_tightness_rejections += 1
+        else
+            low_tightness_rejections = 0
+        end
+
+        if low_tightness_rejections >= max_low_tightness_rejections || proposal_rejections >= max_rejections
+            stats.lazy_fallback_low_tightness += 1
+            alg.lazy_enabled[] = false
+            alg.has_cached_gradient[] = false
+            _increase_grid_N!(alg)
+            recompute_time_grid!(alg)
+            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        end
         copyto!(state_, state2_)
         y_left, d_left = get_rate_and_deriv(state_, flow, grad_and_hvp, false, ∇ϕx)
         t_left = τ_proposal
@@ -932,7 +1086,10 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         exp_target = rand(rng, Exponential())
     end
 
-    error("Safety limit reached in lazy grid")
+    error(_lazy_grid_failure_message(; alg, flow, state_time=state.t[], effective_horizon, Δt, no_event_cells,
+        proposal_attempts, proposal_rejections, tightness_sum, min_tightness, max_tightness,
+        last_t_left, last_t_right, last_y_left, last_y_right, last_d_left, last_d_right,
+        last_Λ_cell, last_exp_target, last_cumulative_area, last_τ_proposal, last_l_actual))
 end
 
 function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)

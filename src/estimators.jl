@@ -6,9 +6,47 @@ end
 function Statistics.mean(trace::AbstractPDMPTrace)
     return _integrate(trace, Statistics.mean)
 end
-Statistics.var( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.var, Statistics.mean(trace))
-Statistics.std( trace::AbstractPDMPTrace) = sqrt.(Statistics.var(trace))
-Statistics.cov( trace::AbstractPDMPTrace) = _integrate(trace, Statistics.cov, Statistics.mean(trace))
+
+"""
+Compute mean/var/cov moments from a trace while avoiding redundant recomputation
+when some moments are already known.
+"""
+function _trace_moments(trace::AbstractPDMPTrace)
+    means = Statistics.mean(trace)
+    return _trace_moments(trace, means)
+end
+
+function _trace_moments(trace::AbstractPDMPTrace, means::AbstractVector)
+    variances = Statistics.var(trace, means)
+    covariances = Statistics.cov(trace, means)
+    return (; mean=means, var=variances, cov=covariances)
+end
+
+function _trace_moments(trace::AbstractPDMPTrace, means::AbstractVector, variances::AbstractVector)
+    covariances = Statistics.cov(trace, means)
+    return (; mean=means, var=variances, cov=covariances)
+end
+
+"""
+Compute only mean and variances from a trace while avoiding redundant
+recomputation when the mean is already known.
+"""
+function _trace_mean_var(trace::AbstractPDMPTrace)
+    means = Statistics.mean(trace)
+    return _trace_mean_var(trace, means)
+end
+
+function _trace_mean_var(trace::AbstractPDMPTrace, means::AbstractVector)
+    variances = Statistics.var(trace, means)
+    return (; mean=means, var=variances)
+end
+
+Statistics.var(trace::AbstractPDMPTrace) = Statistics.var(trace, Statistics.mean(trace))
+Statistics.var(trace::AbstractPDMPTrace, means::AbstractVector) = _integrate(trace, Statistics.var, means)
+Statistics.std(trace::AbstractPDMPTrace) = Statistics.std(trace, Statistics.mean(trace))
+Statistics.std(trace::AbstractPDMPTrace, means::AbstractVector) = sqrt.(Statistics.var(trace, means))
+Statistics.cov(trace::AbstractPDMPTrace) = Statistics.cov(trace, Statistics.mean(trace))
+Statistics.cov(trace::AbstractPDMPTrace, means::AbstractVector) = _integrate(trace, Statistics.cov, means)
 function Statistics.cor(trace::AbstractPDMPTrace)
     C = Statistics.cov(trace)
     StatsBase.cov2cor!(C, sqrt.(diag(C)))
@@ -465,6 +503,16 @@ returns
 The result is a `Vector{Float64}` of length `d` (the dimension of the state).
 """
 function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(trace))))
+    moments = _trace_mean_var(trace)
+    return ess(trace, moments.mean, moments.var; n_batches)
+end
+
+function ess(
+    trace::AbstractPDMPTrace,
+    means::AbstractVector,
+    variances::AbstractVector;
+    n_batches::Integer=max(50, isqrt(length(trace)))
+)
 
     flow = trace.flow
 
@@ -550,13 +598,12 @@ function ess(trace::AbstractPDMPTrace; n_batches::Integer=max(50, isqrt(length(t
     n_complete < 3 && error("Too few complete batches ($n_complete) for ESS estimation")
     bm = view(batch_means, 1:n_complete, :)
 
-    overall_var = var(trace)
     batch_var = vec(var(bm, dims=1))
 
     result = Vector{Float64}(undef, d)
     for i in 1:d
-        if batch_var[i] > 0 && overall_var[i] > 0
-            result[i] = n_complete * overall_var[i] / batch_var[i]
+        if batch_var[i] > 0 && variances[i] > 0
+            result[i] = n_complete * variances[i] / batch_var[i]
         else
             result[i] = Float64(n_complete)
         end

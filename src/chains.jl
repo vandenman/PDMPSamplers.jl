@@ -22,8 +22,11 @@ Base.iterate(::PDMPChains, ::Val{:done}) = nothing
 
 Statistics.mean(chains::PDMPChains; chain::Integer=1)    = Statistics.mean(chains.traces[chain])
 Statistics.var(chains::PDMPChains; chain::Integer=1)     = Statistics.var(chains.traces[chain])
+Statistics.var(chains::PDMPChains, mean_value::AbstractVector; chain::Integer=1) = Statistics.var(chains.traces[chain], mean_value)
 Statistics.std(chains::PDMPChains; chain::Integer=1)     = Statistics.std(chains.traces[chain])
+Statistics.std(chains::PDMPChains, mean_value::AbstractVector; chain::Integer=1) = Statistics.std(chains.traces[chain], mean_value)
 Statistics.cov(chains::PDMPChains; chain::Integer=1)     = Statistics.cov(chains.traces[chain])
+Statistics.cov(chains::PDMPChains, mean_value::AbstractVector; chain::Integer=1) = Statistics.cov(chains.traces[chain], mean_value)
 Statistics.cor(chains::PDMPChains; chain::Integer=1)     = Statistics.cor(chains.traces[chain])
 Statistics.median(chains::PDMPChains; kwargs...)          = Statistics.median(chains.traces[1]; kwargs...)
 
@@ -33,6 +36,7 @@ end
 
 cdf(chains::PDMPChains, q::Real; chain::Integer=1, kwargs...) = cdf(chains.traces[chain], q; kwargs...)
 ess(chains::PDMPChains; chain::Integer=1, kwargs...)           = ess(chains.traces[chain]; kwargs...)
+ess(chains::PDMPChains, mean_value::AbstractVector, var_value::AbstractVector; chain::Integer=1, kwargs...) = ess(chains.traces[chain], mean_value, var_value; kwargs...)
 inclusion_probs(chains::PDMPChains; chain::Integer=1)          = inclusion_probs(chains.traces[chain])
 
 PDMPDiscretize(chains::PDMPChains, dt; chain::Integer=1) = PDMPDiscretize(chains.traces[chain], dt)
@@ -103,4 +107,19 @@ function Base.show(io::IO, chains::PDMPChains)
     nc = n_chains(chains)
     n_events = [length(chains.traces[i]) for i in 1:nc]
     print(io, "PDMPChains with $nc chain$(nc == 1 ? "" : "s") ($(join(n_events, ", ")) events)")
+
+    total_lazy_low_tightness = sum(stat.lazy_fallback_low_tightness for stat in chains.stats)
+    total_lazy_bound_violation = sum(stat.lazy_fallback_bound_violation for stat in chains.stats)
+    total_lazy_attempts = sum(stat.lazy_proposal_attempts for stat in chains.stats)
+    total_lazy_rejections = sum(stat.lazy_proposal_rejections for stat in chains.stats)
+    total_grid_resets = sum(stat.grid_resets_from_dynamics_adaptation for stat in chains.stats)
+
+    if total_lazy_low_tightness > 0 || total_lazy_bound_violation > 0 || total_lazy_attempts > 0 || total_grid_resets > 0
+        print(io,
+            " | lazy_fallbacks(low_tightness=", total_lazy_low_tightness,
+            ", bound_violation=", total_lazy_bound_violation,
+            ") | lazy_proposals=", total_lazy_attempts,
+            "/", total_lazy_rejections,
+            " rejected | grid_resets=", total_grid_resets)
+    end
 end

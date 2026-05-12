@@ -376,7 +376,7 @@ import QuadGK
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         # Run WITHOUT adaptation (NoAdaptation) to keep reference fixed
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 2000.0;
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
                                progress=false, adapter=PDMPSamplers.NoAdaptation())
 
         m = mean(trace)

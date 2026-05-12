@@ -249,6 +249,76 @@ import DifferentiationInterface as DI
         @test alg.N[] == 16
     end
 
+    @testset "_to_internal allows refinement beyond initial N" begin
+        d = 2
+        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
+        flow = BouncyParticle(d, 0.0)
+        model = PDMPModel(d, FullGradient((out, x) -> (out .= x)))
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
+        cache = (; z=zeros(d), ∇ϕx=zeros(d))
+        stats = PDMPSamplers.StatisticCounter()
+
+        alg = PDMPSamplers._to_internal(strat, Random.default_rng(), flow, model, state, cache, stats)
+        @test alg.N[] == 20
+        @test alg.N_max > alg.N[]
+
+        PDMPSamplers._increase_grid_N!(alg)
+        @test alg.N[] > 20
+    end
+
+    @testset "lazy fallback disables pathological lazy searches until reset" begin
+        function x7_grad!(out, x)
+            out[1] = 7 * x[1]^6
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(x7_grad!))
+        flow = BouncyParticle(1, 0.0)
+        strat = GridThinningStrategy(; N=20, t_max=5.0, safety_limit=10, lazy=true)
+        ξ0 = SkeletonPoint([0.0], [2.0])
+        rng = Xoshiro(1004)
+
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, strat, 0.0, ξ0)
+
+        @test alg_.lazy_enabled[]
+
+        τ, event_type, _ = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, true)
+
+        @test isfinite(τ)
+        @test event_type == :reflect
+        @test !alg_.lazy_enabled[]
+        @test stats.lazy_fallback_low_tightness == 1
+        @test stats.lazy_fallback_bound_violation == 0
+        @test stats.lazy_proposal_attempts > 0
+        @test stats.lazy_proposal_rejections > 0
+
+        PDMPSamplers.reset_grid_scale!(alg_, strat.t_max)
+        @test alg_.lazy_enabled[]
+    end
+
+    @testset "dynamics adaptation reset increments stats and restores lazy mode" begin
+        state = PDMPState(0.0, SkeletonPoint(zeros(2), ones(2)))
+        flow = PreconditionedBPS(2; refresh_rate=1.0)
+        strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0, lazy=true)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 12, 5, Inf)
+        stats = PDMPSamplers.StatisticCounter()
+        adapter = PDMPSamplers.PreconditionerAdapter(10.0, 0.0, 0, :default, true)
+
+        alg.lazy_enabled[] = false
+        alg.has_cached_gradient[] = true
+        alg.t_max[] = 0.5
+        alg.N[] = 8
+        PDMPSamplers.recompute_time_grid!(alg)
+
+        PDMPSamplers._handle_dynamics_adaptation!(Random.default_rng(), adapter, alg, state, flow, stats)
+
+        @test stats.grid_resets_from_dynamics_adaptation == 1
+        @test alg.lazy_enabled[]
+        @test !alg.has_cached_gradient[]
+        @test alg.t_max[] == strat.t_max
+        @test alg.N[] == alg.N_max
+    end
+
     @testset "reset_grid_scale!" begin
         d = 3
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))

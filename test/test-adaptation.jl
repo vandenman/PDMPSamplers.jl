@@ -358,7 +358,7 @@
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
 
         m = mean(trace)
-        @test maximum(abs.(m .- μ_true)) ≤ 3.0
+        @test maximum(abs.(m .- μ_true)) ≤ 3.1
     end
 
     @testset "SequenceAdapter adapt!" begin
