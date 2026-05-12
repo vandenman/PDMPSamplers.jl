@@ -51,6 +51,9 @@ include("dynamics/preconditioned.jl")
 # Gradient strategies
 # include("gradient_strategies.jl") # This line was moved up
 
+# Support-boundary types (needed by poisson time strategies)
+include("support_boundary.jl")
+
 # Algorithms
 include("poisson_time_strategies/interface.jl")
 include("poisson_time_strategies/gridthinning.jl")
@@ -202,6 +205,10 @@ export
     last_event_time,
     ess,
     n_chains,
+
+    # Support-boundary handling
+    SupportBoundaryOptions,
+    SupportBoundaryError,
 
     # Parameter transforms
     ParameterTransform,

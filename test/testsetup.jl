@@ -11,6 +11,7 @@ import PDMats
 import MCMCDiagnosticTools
 import StatsBase
 import LogExpFunctions
+import ForwardDiff
 using Printf
 
 const TEST_DIR = @__DIR__
