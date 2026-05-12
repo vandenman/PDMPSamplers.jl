@@ -91,6 +91,74 @@
         # Boundary should be near x[1] = 1.0 => t ≈ 0.5
         @test tau_star ≈ 0.5 atol=1e-3
     end
+
+    @testset "_localize_support_boundary! — FullGradient/SubsampledGradient path" begin
+        full_calls = Ref(0)
+        grad_sub_calls = Ref(0)
+
+        function _counted_boundary_grad!(out, x)
+            full_calls[] += 1
+            x[1] < 1.0 || error("Outside support: x[1] = $(x[1]) >= 1.0")
+            out .= x
+            return out
+        end
+
+        function _counted_subsampled_grad!(out, x)
+            grad_sub_calls[] += 1
+            x[1] < 1.0 || error("Outside support: x[1] = $(x[1]) >= 1.0")
+            out .= x
+            return out
+        end
+
+        function _noop_resample_indices!(args...)
+            return nothing
+        end
+
+        function _noop_update_anchor!(args...)
+            return nothing
+        end
+
+        model = PDMPModel(
+            d_boundary,
+            SubsampledGradient(_counted_subsampled_grad!, _noop_resample_indices!, _noop_update_anchor!, _counted_boundary_grad!, 1, 0, false),
+        )
+        ctx = PDMPSamplers.BoundaryContext(
+            [0.0, 0.0], [1.0, 0.0], 0.0, 2.0, ErrorException("test"), BouncyParticle, SubsampledGradient,
+        )
+        opts = SupportBoundaryOptions(; clip_fraction=0.8, time_rtol=1e-12, time_atol=1e-12)
+
+        tau_star, tau_safe = PDMPSamplers._localize_support_boundary!(model.grad, model, ctx, opts)
+
+        @test tau_star ≈ 1.0 atol=1e-6
+        @test tau_safe ≈ 0.8 atol=1e-6
+        @test grad_sub_calls[] > 0
+        @test full_calls[] == 0
+    end
+
+    @testset "_localize_support_boundary! — CoordinateWiseGradient path" begin
+        coord_calls = Int[]
+
+        function _boundary_partial(x, i)
+            push!(coord_calls, i)
+            (x[1] < 1.0 || i == 1) || error("Outside support: x[1] = $(x[1]) >= 1.0")
+            return x[i]
+        end
+
+        model = PDMPModel(d_boundary, CoordinateWiseGradient(_boundary_partial))
+        ctx = PDMPSamplers.BoundaryContext(
+            [0.25, 0.0], [1.0, 0.0], 0.0, 1.5, ErrorException("test"), ZigZag, CoordinateWiseGradient,
+        )
+        opts = SupportBoundaryOptions(; clip_fraction=0.5, time_rtol=1e-12, time_atol=1e-12)
+
+        tau_star, tau_safe = PDMPSamplers._localize_support_boundary!(model.grad, model, ctx, opts)
+
+        @test tau_star ≈ 0.75 atol=1e-6
+        @test tau_safe ≈ 0.375 atol=1e-6
+        @test !isempty(coord_calls)
+        @test length(coord_calls) % d_boundary == 0
+        @test all(coord_calls[((k - 1) * d_boundary + 1):(k * d_boundary)] == [1, 2]
+            for k in 1:(length(coord_calls) ÷ d_boundary))
+    end
     
     @testset "pdmp_sample — :error mode throws SupportBoundaryError" begin
         model = _make_boundary_model()

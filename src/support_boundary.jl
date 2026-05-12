@@ -118,13 +118,11 @@ function localize_support_boundary!(model::PDMPModel, ctx::BoundaryContext, opts
     return _localize_support_boundary!(model.grad, model, ctx, opts)
 end
 
-function _localize_support_boundary!(::FullGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
+function _localize_support_boundary_global!(grad_f, d::Int, ctx::BoundaryContext, opts::SupportBoundaryOptions)
     x0 = ctx.x0
     v = ctx.v
     t_lo = ctx.t_valid
     t_hi = ctx.t_invalid
-    d = model.d
-    grad_f = model.grad.f
 
     x_mid = Vector{Float64}(undef, d)
     grad_buf = Vector{Float64}(undef, d)
@@ -157,9 +155,13 @@ function _localize_support_boundary!(::FullGradient, model::PDMPModel, ctx::Boun
     return estimated_boundary_time, safe_time
 end
 
+function _localize_support_boundary!(::FullGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
+    return _localize_support_boundary_global!(model.grad.f, model.d, ctx, opts)
+end
+
 function _localize_support_boundary!(::SubsampledGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
     # SubsampledGradient: use the same calling convention as FullGradient
-    return _localize_support_boundary!(FullGradient, model, ctx, opts)
+    return _localize_support_boundary_global!(model.grad.f, model.d, ctx, opts)
 end
 
 function _localize_support_boundary!(::CoordinateWiseGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
