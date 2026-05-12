@@ -22,13 +22,16 @@ mutable struct PreconditionerAdapter <: AbstractAdapter
     last_update::Float64
     no_updates_done::Int
     scheme::Symbol
+    did_update::Bool
 end
 
 function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
+    ad.did_update = false
     if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
         update_preconditioner!(rng, flow, get_warmup_trace(trace_mgr), state, iszero(ad.no_updates_done))
         ad.last_update = state.t[]
         ad.no_updates_done += 1
+        ad.did_update = true
     end
 end
 
@@ -122,7 +125,7 @@ default_dynamics_adapter(::ContinuousDynamics, args...) = NoAdaptation()
 
 # Specific:
 function default_dynamics_adapter(::PreconditionedDynamics, precond_dt, t0, t_warmup=0.0)
-    return PreconditionerAdapter(precond_dt, t0, 0, :default)
+    return PreconditionerAdapter(precond_dt, t0, 0, :default, false)
 end
 
 
@@ -486,6 +489,7 @@ adapt!(::Random.AbstractRNG, ::BoomerangAdapter, state, flow, grad, trace_mgr; k
 
 # --- Query whether dynamics adaptation occurred (for sticky time invalidation) ---
 did_dynamics_adapt(::AbstractAdapter) = false
+did_dynamics_adapt(ad::PreconditionerAdapter) = ad.did_update
 did_dynamics_adapt(ad::BoomerangAdapter) = ad.did_update
 did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 

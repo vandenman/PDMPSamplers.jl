@@ -202,12 +202,7 @@ function _run_phase!(
         if model_.grad isa SubsampledGradient
             _invalidate_cached_gradient!(alg_)
         end
-        if did_dynamics_adapt(adapter)
-            _reset_inner_grid!(alg_)
-            if alg_ isa StickyLoopState
-                update_all_stick_times!(rng, alg_, state, flow)
-            end
-        end
+        _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats)
 
         if phase === :main
             _maybe_simplify_counter += 1
@@ -220,6 +215,25 @@ function _run_phase!(
         check_health!(health, stats)
         _update_progress!(progress, prg, tstop, T, progress_stops, state)
     end
+end
+
+function _handle_dynamics_adaptation!(
+    rng::Random.AbstractRNG,
+    adapter::AbstractAdapter,
+    alg_::PoissonTimeStrategy,
+    state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    stats::StatisticCounter,
+)
+
+    !did_dynamics_adapt(adapter) && return nothing
+
+    _reset_inner_grid!(alg_)
+    stats.grid_resets_from_dynamics_adaptation += 1
+
+    alg_ isa StickyLoopState && update_all_stick_times!(rng, alg_, state, flow)
+
+    return nothing
 end
 
 function _pdmp_sample_single(

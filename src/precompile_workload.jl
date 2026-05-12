@@ -21,6 +21,9 @@ PrecompileTools.@compile_workload begin
     mean(chains_bps); var(chains_bps); std(chains_bps); cov(chains_bps); cor(chains_bps)
     quantile(chains_bps, 0.5; coordinate=1); median(chains_bps; coordinate=1)
     cdf(chains_bps, 0.0; coordinate=1); ess(chains_bps)
+    trace_bps = chains_bps.traces[1]
+    moments_bps = _trace_moments(trace_bps)
+    var(trace_bps, moments_bps.mean); cov(trace_bps, moments_bps.mean); ess(trace_bps, moments_bps.mean, moments_bps.var)
 
     # Compile adaptive discretization helpers on a slightly longer trace.
     chains_bps_long = pdmp_sample(x0, flow_bps, model_global, alg, 0.0, T; stop=EventCountCriterion(40), progress=false)
