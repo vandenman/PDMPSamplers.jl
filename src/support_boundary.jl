@@ -258,10 +258,6 @@ function _localize_support_boundary!(grad::FullGradient, model::PDMPModel, ctx::
     return _localization_from_bracket(t_lo, t_hi, opts)
 end
 
-function _localize_support_boundary!(::FullGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
-    return _localize_support_boundary_global!(model.grad.f, model.d, ctx, opts)
-end
-
 function _localize_support_boundary!(grad::SubsampledGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
     return _localize_support_boundary!(grad.full, model, ctx, opts)
 end
