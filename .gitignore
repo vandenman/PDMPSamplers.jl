@@ -3,3 +3,4 @@ Manifest.toml
 Manifest-v*.toml
 AGENTS.md
 playground
+*.so

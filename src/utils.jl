@@ -17,6 +17,10 @@ mutable struct StatisticCounter
     reflections_accepted::Int
     refreshment_events::Int
     sticky_events::Int
+    boundary_reflections::Int
+    support_boundary_events::Int
+    support_boundary_refresh_attempts::Int
+    support_boundary_refresh_failures::Int
     ∇f_calls::Int
     ∇²f_calls::Int
     last_rejected::Bool
@@ -35,7 +39,7 @@ mutable struct StatisticCounter
     elapsed_time::Float64
     stop_reason::Symbol
 end
-StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, :none)
+StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, :none)
 
 
 

@@ -22,11 +22,11 @@ Base.iterate(::PDMPChains, ::Val{:done}) = nothing
 
 Statistics.mean(chains::PDMPChains; chain::Integer=1)    = Statistics.mean(chains.traces[chain])
 Statistics.var(chains::PDMPChains; chain::Integer=1)     = Statistics.var(chains.traces[chain])
-Statistics.var(chains::PDMPChains, mean_value::AbstractVector; chain::Integer=1) = Statistics.var(chains.traces[chain], mean_value)
+Statistics.var(chains::PDMPChains, means::AbstractVector; chain::Integer=1) = Statistics.var(chains.traces[chain], means)
 Statistics.std(chains::PDMPChains; chain::Integer=1)     = Statistics.std(chains.traces[chain])
-Statistics.std(chains::PDMPChains, mean_value::AbstractVector; chain::Integer=1) = Statistics.std(chains.traces[chain], mean_value)
+Statistics.std(chains::PDMPChains, means::AbstractVector; chain::Integer=1) = Statistics.std(chains.traces[chain], means)
 Statistics.cov(chains::PDMPChains; chain::Integer=1)     = Statistics.cov(chains.traces[chain])
-Statistics.cov(chains::PDMPChains, mean_value::AbstractVector; chain::Integer=1) = Statistics.cov(chains.traces[chain], mean_value)
+Statistics.cov(chains::PDMPChains, means::AbstractVector; chain::Integer=1) = Statistics.cov(chains.traces[chain], means)
 Statistics.cor(chains::PDMPChains; chain::Integer=1)     = Statistics.cor(chains.traces[chain])
 Statistics.median(chains::PDMPChains; kwargs...)          = Statistics.median(chains.traces[1]; kwargs...)
 
@@ -36,7 +36,7 @@ end
 
 cdf(chains::PDMPChains, q::Real; chain::Integer=1, kwargs...) = cdf(chains.traces[chain], q; kwargs...)
 ess(chains::PDMPChains; chain::Integer=1, kwargs...)           = ess(chains.traces[chain]; kwargs...)
-ess(chains::PDMPChains, mean_value::AbstractVector, var_value::AbstractVector; chain::Integer=1, kwargs...) = ess(chains.traces[chain], mean_value, var_value; kwargs...)
+ess(chains::PDMPChains, means::AbstractVector, variances::AbstractVector; chain::Integer=1, kwargs...) = ess(chains.traces[chain], means, variances; kwargs...)
 inclusion_probs(chains::PDMPChains; chain::Integer=1)          = inclusion_probs(chains.traces[chain])
 
 PDMPDiscretize(chains::PDMPChains, dt; chain::Integer=1) = PDMPDiscretize(chains.traces[chain], dt)

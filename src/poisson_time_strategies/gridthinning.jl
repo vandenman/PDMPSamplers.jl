@@ -63,7 +63,14 @@ end
 
 function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
     return function (x)
-        compute_gradient!(x, θ, gradient_strategy, flow, cache)
+        try
+            gradient = compute_gradient!(x, θ, gradient_strategy, flow, cache)
+            _gradient_probe_is_finite(gradient) || throw(_NonfiniteGradientProbe())
+            return gradient
+        catch err
+            err isa _ProbeFailureException && rethrow()
+            throw(_GradientProbeFailure(err))
+        end
         # compute_gradient_uncorrected!(x, θ, gradient_strategy, flow, cache)
     end
 end
@@ -81,6 +88,27 @@ function make_hvp_func(::AbstractPDMPState, flow::ContinuousDynamics, gradient_s
     return make_hvp_func(flow, gradient_strategy, cache)
 end
 
+function _get_rate_and_deriv_or_throw(
+    probe_failure_handler,
+    state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    grad_and_hess_or_grad_and_hvp,
+    add_rate::Bool,
+    args...;
+    t_valid::Float64,
+    t_invalid::Float64
+)
+    try
+        return get_rate_and_deriv(state, flow, grad_and_hess_or_grad_and_hvp, add_rate, args...)
+    catch err
+        err isa _ProbeFailureException && rethrow()
+        if err isa _GradientProbeFailure
+            probe_failure_handler === nothing && throw(err.original_error)
+            probe_failure_handler(state, t_valid, t_invalid, err.original_error)
+        end
+        rethrow()
+    end
+end
 
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::FL,
@@ -88,7 +116,8 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     cached_y0::Float64=NaN, cached_d0::Float64=NaN,
     early_stop_threshold::Float64=Inf, stats::Union{StatisticCounter,Nothing}=nothing,
     state_cache::Union{AbstractPDMPState,Nothing}=nothing,
-    max_time::Float64=Inf) where {FL<:ContinuousDynamics}
+    max_time::Float64=Inf,
+    probe_failure_handler=nothing) where {FL<:ContinuousDynamics}
 
     t_grid = pcb.t_grid
     Λ_vals = pcb.Λ_vals
@@ -99,7 +128,9 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
     @assert iszero(t_grid[1])
     if isnan(cached_y0)
-        y_vals[1], d_vals[1] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
+        y_vals[1], d_vals[1] = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
+            t_valid=0.0, t_invalid=0.0)
     else
         y_vals[1] = cached_y0
         d_vals[1] = cached_d0
@@ -124,7 +155,9 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
 
         Δt = t_grid[i] - t_grid[i-1]
         move_forward_time!(state_t, Δt, flow)
-        y_vals[i], d_vals[i] = get_rate_and_deriv(state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate)
+        y_vals[i], d_vals[i] = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
+            t_valid=t_grid[i-1], t_invalid=t_grid[i])
 
         # Compute bound for interval [i-1] immediately so we can track cumulative integral
         _compute_cell_bound!(Λ_vals, t_grid, y_vals, d_vals, i - 1)
@@ -515,7 +548,30 @@ end
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
 _adjust_early_stop(::SubsampledGradient, ::Float64) = Inf
 
-_effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64) = min(t_max, τ_refresh, max_horizon)
+function _effective_grid_horizon(
+    ::GradientStrategy,
+    t_max::Float64,
+    τ_refresh::Float64,
+    max_horizon::Float64,
+    max_horizon_event::Symbol=:horizon_hit,
+)
+    if τ_refresh <= t_max && τ_refresh <= max_horizon
+        return τ_refresh, :refresh
+    elseif max_horizon <= t_max
+        return max_horizon, max_horizon_event
+    end
+    return t_max, :horizon_hit
+end
+
+function _return_grid_horizon!(alg, stats::StatisticCounter, t_max::Float64, effective_horizon::Float64, horizon_event::Symbol, max_t_max::Float64, default_return)
+    if horizon_event === :horizon_hit
+        alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
+        recompute_time_grid!(alg)
+        stats.grid_grows += 1
+        return t_max, :horizon_hit, default_return
+    end
+    return effective_horizon, horizon_event, default_return
+end
 
 function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
     return _build_grid_adaptive_state(strat, state, N_base, N_min, N_base, est)
@@ -597,7 +653,8 @@ end
 function _constant_bound_event_time(
     rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache,
-    stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool
+    stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool,
+    max_horizon_event::Symbol=:horizon_hit,
 )
     λ_bound = alg.constant_bound_rate[]
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
@@ -606,7 +663,7 @@ function _constant_bound_event_time(
 
     state_ = alg.state_cache
     copyto!(state_, state)
-    t_max = min(alg.t_max[], max_horizon)
+    t_max, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
 
     cumulative_exp = 0.0
     for _ in 1:alg.safety_limit
@@ -614,10 +671,7 @@ function _constant_bound_event_time(
         τ_proposal = cumulative_exp / λ_bound
 
         if τ_proposal >= t_max
-            if τ_refresh < t_max
-                return τ_refresh, :refresh, default_return
-            end
-            return t_max, :horizon_hit, default_return
+            return t_max, horizon_event, default_return
         end
 
         if τ_refresh < τ_proposal
@@ -629,13 +683,14 @@ function _constant_bound_event_time(
         ∇ϕx = try
             compute_gradient!(state_, model.grad, flow, cache)
         catch err
-            _throw_grid_boundary_error(state_, state, flow, model, err)
+            _throw_grid_boundary_error(state_, state, flow, model, err;
+                t_valid=0.0, t_invalid=τ_proposal, algorithm_type=GridThinningStrategy)
         end
         l_actual = λ(state_.ξ, ∇ϕx, flow)
 
         if l_actual > λ_bound
             alg.constant_bound_rate[] = NaN
-            return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+            return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
         end
 
         if rand(rng) * λ_bound <= l_actual
@@ -645,11 +700,11 @@ function _constant_bound_event_time(
     end
 
     alg.constant_bound_rate[] = NaN
-    return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+    return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
 end
 
-function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool)
-    return _constant_bound_event_time(Random.default_rng(), model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter, max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit)
+    return _constant_bound_event_time(Random.default_rng(), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
 end
 
 
@@ -672,10 +727,10 @@ function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynami
 end
 
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
-    max_horizon::Float64=Inf, include_refresh::Bool=true) where {FL<:ContinuousDynamics}
+    max_horizon::Float64=Inf, include_refresh::Bool=true, max_horizon_event::Symbol=:horizon_hit) where {FL<:ContinuousDynamics}
 
     if isfinite(alg.constant_bound_rate[])
-        return _constant_bound_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        return _constant_bound_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
     end
 
     state_ = alg.state_cache
@@ -686,20 +741,21 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
 
     # Function barrier: specialized on the concrete type of grad_and_hvp
     if alg.lazy_enabled[]
-        return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+        return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
     end
-    return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+    return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
 end
 
 function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
-    max_horizon::Float64, include_refresh::Bool) where {P, FL<:ContinuousDynamics}
+    max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit) where {P, FL<:ContinuousDynamics}
 
     pcb = alg.pcb
     state_ = alg.state_cache
     state2_ = alg.state_cache2
     copyto!(state_, state)
     copyto!(state2_, state)
+    probe_failure_handler = _grid_probe_failure_handler(state, flow, model, GridThinningStrategy)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
@@ -707,27 +763,21 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
     # Draw refresh time FIRST so we can cap grid construction (Phase 1A)
     τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
-    effective_horizon = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon)
+    effective_horizon, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
 
     # Build grid once for this event, capped at effective horizon
     if alg.has_cached_gradient[]
-        cached_y0, cached_d0 = try
-            get_rate_and_deriv(state_, flow, grad_and_hvp, false, alg.cached_gradient)
-        catch err
-            _throw_grid_boundary_error(state_, state2_, flow, model, err)
-        end
+        cached_y0, cached_d0 = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
+            t_valid=0.0, t_invalid=0.0)
         alg.has_cached_gradient[] = false
     else
         cached_y0, cached_d0 = NaN, NaN
     end
-    try
-        construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
-            cached_y0, cached_d0,
-            early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
-            max_time=effective_horizon)
-    catch err
-        _throw_grid_boundary_error(state_, state2_, flow, model, err)
-    end
+    construct_upper_bound_grad_and_hess!(pcb, state_, flow, grad_and_hvp, false;
+        cached_y0, cached_d0,
+        early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
+        max_time=effective_horizon, probe_failure_handler)
     stats.grid_N_current = alg.N[]
 
     # Cumulative exponential sum for correct sequential thinning.
@@ -747,18 +797,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         if τ_reflection >= effective_horizon
 
-            if effective_horizon < alg.t_max[]
-                # Grid was capped by refresh or max_horizon: return refresh
-                return τ_refresh, :refresh, default_return
-            end
-
-            t_max = alg.t_max[]
-            new_t_max = alg.t_max[] * alg.α⁺
-            alg.t_max[] = min(new_t_max, max_t_max)
-            recompute_time_grid!(alg)
-            stats.grid_grows += 1
-
-            return t_max, :horizon_hit, default_return
+            return _return_grid_horizon!(alg, stats, alg.t_max[], effective_horizon, horizon_event, max_t_max, default_return)
         end
 
         if τ_refresh < τ_reflection
@@ -772,7 +811,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         ∇ϕx = try
             compute_gradient!(state_, model.grad, flow, cache)
         catch err
-            _throw_grid_boundary_error(state_, state2_, flow, model, err)
+            _throw_grid_boundary_error(state_, state2_, flow, model, err;
+                t_valid=0.0, t_invalid=τ_reflection, algorithm_type=GridThinningStrategy)
         end
 
         l_reflection = λ(state_.ξ, ∇ϕx, flow)
@@ -801,10 +841,10 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             # cumulative_exp, indicating most of the domain has zero rate.
             _shrink_t_max_on_rejection!(alg, pcb, cumulative_exp, model.grad)
 
-            effective_horizon = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon)
+            effective_horizon, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
             construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
                 early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
-                max_time=effective_horizon)
+                max_time=effective_horizon, probe_failure_handler)
             cumulative_exp = 0.0
             rejection_count = 0
             max_rejections = min(max_rejections * 2, alg.safety_limit)
@@ -813,7 +853,12 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         safety_limit -= 1
     end
 
-    error("Safety limit reached")
+    if isfinite(τ_refresh) && τ_refresh <= min(alg.t_max[], max_horizon)
+        return τ_refresh, :refresh, default_return
+    end
+
+    _throw_grid_safety_limit_error(state2_, flow, model;
+        t_invalid=effective_horizon, message="Safety limit reached")
 end
 
 _metric_scale_extrema(::ContinuousDynamics) = (NaN, NaN)
@@ -881,12 +926,13 @@ end
 
 function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::StatisticCounter,
-    max_horizon::Float64, include_refresh::Bool) where {P, FL<:ContinuousDynamics}
+    max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit) where {P, FL<:ContinuousDynamics}
 
     state_ = alg.state_cache
     state2_ = alg.state_cache2
     copyto!(state_, state)
     copyto!(state2_, state)
+    probe_failure_handler = _grid_probe_failure_handler(state, flow, model, GridThinningStrategy)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     default_return = GradientMeta(alg.empty_∇ϕx)
@@ -895,25 +941,21 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
     N = alg.N[]
     t_max = alg.t_max[]
-    effective_horizon = _effective_grid_horizon(model.grad, t_max, τ_refresh, max_horizon)
+    effective_horizon, horizon_event = _effective_grid_horizon(model.grad, t_max, τ_refresh, max_horizon, max_horizon_event)
     Δt = effective_horizon / N
     max_t_max = max_grid_horizon(flow)
 
     # Evaluate initial grid point (k=0)
     if alg.has_cached_gradient[]
         # Reuse cached gradient from previous event (2C): skip one gradient call.
-        y_left, d_left = try
-            get_rate_and_deriv(state_, flow, grad_and_hvp, false, alg.cached_gradient)
-        catch err
-            _throw_grid_boundary_error(state_, state2_, flow, model, err)
-        end
+        y_left, d_left = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
+            t_valid=0.0, t_invalid=0.0)
         alg.has_cached_gradient[] = false
     else
-        y_left, d_left = try
-            get_rate_and_deriv(state_, flow, grad_and_hvp, false)
-        catch err
-            _throw_grid_boundary_error(state_, state2_, flow, model, err)
-        end
+        y_left, d_left = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_, flow, grad_and_hvp, false;
+            t_valid=0.0, t_invalid=0.0)
     end
     t_left = 0.0
 
@@ -957,24 +999,14 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         if Δt_cell <= 0.0
             # Reached the horizon
-            if effective_horizon < t_max
-                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-                return τ_refresh, :refresh, default_return
-            end
-            alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
-            recompute_time_grid!(alg)
-            stats.grid_grows += 1
-            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-            return t_max, :horizon_hit, default_return
+            return _return_grid_horizon!(alg, stats, t_max, effective_horizon, horizon_event, max_t_max, default_return)
         end
 
         # Move state_cache forward by Δt_cell to evaluate the right endpoint
         move_forward_time!(state_, Δt_cell, flow)
-        y_right, d_right = try
-            get_rate_and_deriv(state_, flow, grad_and_hvp, false)
-        catch err
-            _throw_grid_boundary_error(state_, state2_, flow, model, err)
-        end
+        y_right, d_right = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_, flow, grad_and_hvp, false;
+            t_valid=t_left, t_invalid=t_right)
         stats.grid_points_evaluated += 1
 
         # Compute piecewise constant bound for this interval
@@ -1000,15 +1032,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
             # Check if we've exhausted the horizon
             if t_right >= effective_horizon
-                if effective_horizon < t_max
-                    _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-                    return τ_refresh, :refresh, default_return
-                end
-                alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
-                recompute_time_grid!(alg)
-                stats.grid_grows += 1
-                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-                return t_max, :horizon_hit, default_return
+                return _return_grid_horizon!(alg, stats, t_max, effective_horizon, horizon_event, max_t_max, default_return)
             end
             continue
         end
@@ -1031,7 +1055,8 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         ∇ϕx = try
             compute_gradient!(state2_, model.grad, flow, cache)
         catch err
-            _throw_grid_boundary_error(state2_, state, flow, model, err)
+            _throw_grid_boundary_error(state2_, state, flow, model, err;
+                t_valid=t_left, t_invalid=τ_proposal, algorithm_type=GridThinningStrategy)
         end
 
         l_actual = λ(state2_.ξ, ∇ϕx, flow)
@@ -1052,7 +1077,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             alg.has_cached_gradient[] = false
             _increase_grid_N!(alg)
             recompute_time_grid!(alg)
-            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
         end
 
         if rand(rng) * pos(Λ_cell) <= l_actual
@@ -1094,23 +1119,26 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             alg.has_cached_gradient[] = false
             _increase_grid_N!(alg)
             recompute_time_grid!(alg)
-            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh)
+            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
         end
         copyto!(state_, state2_)
-        y_left, d_left = try
-            get_rate_and_deriv(state_, flow, grad_and_hvp, false, ∇ϕx)
-        catch err
-            _throw_grid_boundary_error(state_, state, flow, model, err)
-        end
+        y_left, d_left = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_, flow, grad_and_hvp, false, ∇ϕx;
+            t_valid=τ_proposal, t_invalid=τ_proposal + eps(Float64))
         t_left = τ_proposal
         cumulative_area = 0.0
         exp_target = rand(rng, Exponential())
     end
 
-    error(_lazy_grid_failure_message(; alg, flow, state_time=state.t[], effective_horizon, Δt, no_event_cells,
+    if isfinite(τ_refresh) && τ_refresh <= min(t_max, max_horizon)
+        return τ_refresh, :refresh, default_return
+    end
+
+    message = _lazy_grid_failure_message(; alg, flow, state_time=state.t[], effective_horizon, Δt, no_event_cells,
         proposal_attempts, proposal_rejections, tightness_sum, min_tightness, max_tightness,
         last_t_left, last_t_right, last_y_left, last_y_right, last_d_left, last_d_right,
-        last_Λ_cell, last_exp_target, last_cumulative_area, last_τ_proposal, last_l_actual))
+        last_Λ_cell, last_exp_target, last_cumulative_area, last_τ_proposal, last_l_actual)
+    _throw_grid_safety_limit_error(state, flow, model; t_invalid=effective_horizon, message)
 end
 
 function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)
@@ -1183,19 +1211,34 @@ end
 
 # ── Support-boundary helpers for grid thinning ───────────────────────────────
 
+function _grid_probe_failure_handler(
+    original_state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    model::PDMPModel,
+    algorithm_type::Type
+)
+    return (current_state, t_valid, t_invalid, err) -> _throw_grid_boundary_error(
+        current_state, original_state, flow, model, err;
+        t_valid, t_invalid, algorithm_type)
+end
+
 function _throw_grid_boundary_error(
     current_state::AbstractPDMPState,
     original_state::AbstractPDMPState,
     flow::ContinuousDynamics,
     model::PDMPModel,
-    err::Exception
+    err::Exception;
+    t_valid::Float64=0.0,
+    t_invalid::Float64=current_state.t[] - original_state.t[],
+    algorithm_type::Type=GridThinningStrategy
 )
     x0 = copy(original_state.ξ.x)
     v = copy(original_state.ξ.θ)
-    t_invalid = current_state.t[] - original_state.t[]
+    t_valid = max(t_valid, 0.0)
+    t_invalid = max(t_invalid, t_valid + eps(Float64))
     ctx = BoundaryContext(
-        x0, v, 0.0, max(t_invalid, eps(Float64)),
-        err, typeof(flow), typeof(model.grad),
+        x0, v, Float64(original_state.t[]), t_valid, t_invalid,
+        err, typeof(flow), algorithm_type,
     )
     throw(_ProbeFailureException(ctx))
 end
@@ -1205,7 +1248,24 @@ function _throw_grid_boundary_error(
     original_state::AbstractPDMPState,
     flow::ContinuousDynamics,
     model::PDMPModel,
-    err::_ProbeFailureException
+    err::_ProbeFailureException;
+    kwargs...
 )
     rethrow(err)
+end
+
+function _throw_grid_safety_limit_error(
+    original_state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    model::PDMPModel;
+    t_invalid::Float64,
+    message::String,
+    algorithm_type::Type=GridThinningStrategy
+)
+    t_invalid = max(t_invalid, eps(Float64))
+    ctx = BoundaryContext(
+        copy(original_state.ξ.x), copy(original_state.ξ.θ), Float64(original_state.t[]),
+        0.0, t_invalid, ErrorException(message), typeof(flow), algorithm_type,
+    )
+    throw(_GridSafetyLimitException(ctx))
 end
