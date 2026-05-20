@@ -148,9 +148,8 @@ function _step!(
     phase::Symbol,
     support_boundary_options::SupportBoundaryOptions=SupportBoundaryOptions()
 ) where {FL<:ContinuousDynamics}
-    try
-        return _step_inner!(rng, state, model_, flow, alg_, cache, stats, trace_manager;
-            phase, support_boundary_options)
+    τ, event_type, meta = try
+        next_event_time(rng, model_, flow, alg_, state, cache, stats)
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
@@ -162,22 +161,6 @@ function _step!(
             rethrow()
         end
     end
-end
-
-function _step_inner!(
-    rng::Random.AbstractRNG,
-    state::AbstractPDMPState,
-    model_::PDMPModel,
-    flow::FL,
-    alg_::PoissonTimeStrategy,
-    cache::NamedTuple,
-    stats::StatisticCounter,
-    trace_manager::TraceManager;
-    phase::Symbol,
-    support_boundary_options::SupportBoundaryOptions
-) where {FL<:ContinuousDynamics}
-
-    τ, event_type, meta = next_event_time(rng, model_, flow, alg_, state, cache, stats)
 
     @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
@@ -1035,7 +1018,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
             else
                 ∇ϕx = try
-                    compute_gradient!(state, gradient_strategy, flow, cache)
+                    _check_gradient_probe_finite(compute_gradient!(state, gradient_strategy, flow, cache))
                 catch err
                     ctx = _boundary_context_after_forward_move(state, flow, alg, τ, err)
                     ctx === nothing && rethrow()
@@ -1053,7 +1036,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 ∇ϕx = meta.∇ϕx
             else
                 ∇ϕx = try
-                    compute_gradient_for_reflection!(state, gradient_strategy, flow, cache)
+                    _check_gradient_probe_finite(compute_gradient_for_reflection!(state, gradient_strategy, flow, cache))
                 catch err
                     ctx = _boundary_context_after_forward_move(state, flow, alg, τ, err)
                     ctx === nothing && rethrow()
@@ -1139,7 +1122,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Coo
     move_forward_time!(state, τ, flow)
 
     ∇ϕ_i₀ = try
-        compute_gradient!(gradient_strategy, ξ.x, i₀, cache)
+        _check_gradient_probe_finite(compute_gradient!(gradient_strategy, ξ.x, i₀, cache))
     catch err
         x0 = copy(ξ.x)
         v = copy(ξ.θ)
