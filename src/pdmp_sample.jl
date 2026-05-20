@@ -1035,7 +1035,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
             else
                 ∇ϕx = try
-                    _check_gradient_probe_finite(compute_gradient!(state, gradient_strategy, flow, cache))
+                    compute_gradient!(state, gradient_strategy, flow, cache)
                 catch err
                     ctx = _boundary_context_after_forward_move(state, flow, alg, τ, err)
                     ctx === nothing && rethrow()
@@ -1053,7 +1053,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 ∇ϕx = meta.∇ϕx
             else
                 ∇ϕx = try
-                    _check_gradient_probe_finite(compute_gradient_for_reflection!(state, gradient_strategy, flow, cache))
+                    compute_gradient_for_reflection!(state, gradient_strategy, flow, cache)
                 catch err
                     ctx = _boundary_context_after_forward_move(state, flow, alg, τ, err)
                     ctx === nothing && rethrow()
@@ -1139,7 +1139,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Coo
     move_forward_time!(state, τ, flow)
 
     ∇ϕ_i₀ = try
-        _check_gradient_probe_finite(compute_gradient!(gradient_strategy, ξ.x, i₀, cache))
+        compute_gradient!(gradient_strategy, ξ.x, i₀, cache)
     catch err
         x0 = copy(ξ.x)
         v = copy(ξ.θ)
