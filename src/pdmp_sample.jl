@@ -37,48 +37,12 @@ function pdmp_sample(
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
-
-    if n_chains == 1
-        rng = _make_rng(seed)
-        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup;
-            progress, adapter, stop, warmup_stop, support_boundary_options)
-        return PDMPChains([trace], [stats])
+    return _pdmp_sample_multi(ξ₀, flow, alg, t₀, T, t_warmup;
+        n_chains, threaded, progress, adapter, seed, stop, warmup_stop,
+        support_boundary_options) do i
+        _copy_model(model)
     end
-
-    if threaded
-        tasks = map(1:n_chains) do chain_i
-            Threads.@spawn begin
-                rng_i = _make_chain_rng(seed, chain_i)
-                flow_i = _copy_flow(flow)
-                model_i = _copy_model(model)
-                stop_i = _maybe_copy_criterion(stop)
-                warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup;
-                    progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i,
-                    support_boundary_options)
-            end
-        end
-        results = fetch.(tasks)
-    else
-        results = map(1:n_chains) do chain_i
-            rng_i = _make_chain_rng(seed, chain_i)
-            flow_i = _copy_flow(flow)
-            model_i = _copy_model(model)
-            stop_i = _maybe_copy_criterion(stop)
-            warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup;
-                progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i,
-                support_boundary_options)
-        end
-    end
-
-    traces = [r[1] for r in results]
-    all_stats = [r[2] for r in results]
-    return PDMPChains(traces, all_stats)
 end
-
-_make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
-_make_chain_rng(seed::Integer, chain_i::Int) = Random.Xoshiro(seed + chain_i - 1)
 
 function pdmp_sample(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, models::AbstractVector{<:PDMPModel},
@@ -95,40 +59,63 @@ function pdmp_sample(
     n_chains = length(models)
     n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
+    return _pdmp_sample_multi(ξ₀, flow, alg, t₀, T, t_warmup;
+        n_chains, threaded, progress, adapter, seed, stop, warmup_stop,
+        support_boundary_options) do i
+        models[i]
+    end
+end
 
+_make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
+_make_chain_rng(seed::Integer, chain_i::Int) = Random.Xoshiro(seed + chain_i - 1)
+
+# Private helper that runs the shared multi-chain logic.
+# The `get_model` closure (passed via do-block) provides the model for each chain.
+function _pdmp_sample_multi(
+    get_model::Function,
+    ξ₀::SkeletonPoint, flow::ContinuousDynamics, alg::PoissonTimeStrategy,
+    t₀::Real, T::Real, t_warmup::Real;
+    n_chains::Int, threaded::Bool, progress::Bool,
+    adapter::AbstractAdapter, seed::Union{Integer,Nothing},
+    stop::Union{StoppingCriterion,Nothing},
+    warmup_stop::Union{StoppingCriterion,Nothing},
+    support_boundary_options::SupportBoundaryOptions,
+)
     if n_chains == 1
         rng = _make_rng(seed)
-        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup;
+        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, get_model(1), alg, t₀, T, t_warmup;
             progress, adapter, stop, warmup_stop, support_boundary_options)
         return PDMPChains([trace], [stats])
     end
 
     if threaded
-        tasks = map(1:n_chains) do i
+        tasks = map(1:n_chains) do chain_i
             Threads.@spawn begin
-                rng_i        = _make_chain_rng(seed, i)
-                flow_i        = _copy_flow(flow)
-                stop_i        = _maybe_copy_criterion(stop)
+                rng_i = _make_chain_rng(seed, chain_i)
+                flow_i = _copy_flow(flow)
+                model_i = get_model(chain_i)
+                stop_i = _maybe_copy_criterion(stop)
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
+                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup;
                     progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i,
                     support_boundary_options)
             end
         end
         results = fetch.(tasks)
     else
-        results = map(1:n_chains) do i
-            rng_i        = _make_chain_rng(seed, i)
-            flow_i        = _copy_flow(flow)
-            stop_i        = _maybe_copy_criterion(stop)
+        results = map(1:n_chains) do chain_i
+            rng_i = _make_chain_rng(seed, chain_i)
+            flow_i = _copy_flow(flow)
+            model_i = get_model(chain_i)
+            stop_i = _maybe_copy_criterion(stop)
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup;
+            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup;
                 progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i,
                 support_boundary_options)
         end
     end
 
-    traces    = [r[1] for r in results]
+    traces = [r[1] for r in results]
     all_stats = [r[2] for r in results]
     return PDMPChains(traces, all_stats)
 end
