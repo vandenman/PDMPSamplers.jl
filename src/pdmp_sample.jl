@@ -228,7 +228,13 @@ function _handle_step_boundary!(
     if opts.mode === :line_search_truncated_refresh
         return _line_search_truncated_refresh_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase)
     end
-    _handle_boundary!(model, ctx, opts)
+    if opts.mode === :line_search && !_linear_boundary_flow(flow)
+        # :line_search probes along a linear ray x0 + t * v, which is incorrect for
+        # non-linear flows such as Boomerang. Fall back to :error mode.
+        _handle_boundary!(model, ctx, SupportBoundaryOptions(; mode=:error))
+    else
+        _handle_boundary!(model, ctx, opts)
+    end
 end
 
 function _throw_grid_safety_support_error(model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions; message::String)
@@ -316,8 +322,13 @@ function _handle_grid_safety_limit!(
     elseif opts.mode === :line_search_truncated_refresh
         return _line_search_truncated_refresh_from_current_state!(rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase)
     elseif opts.mode === :line_search
-        _throw_grid_safety_support_error(model, ctx, opts;
-            message="Grid thinning reached its safety limit while support-boundary diagnostics were enabled.")
+        if _linear_boundary_flow(flow)
+            _throw_grid_safety_support_error(model, ctx, opts;
+                message="Grid thinning reached its safety limit while support-boundary diagnostics were enabled.")
+        else
+            # :line_search mode uses linear probing which is incorrect for non-linear flows.
+            throw(ctx.original_error)
+        end
     end
     throw(ArgumentError("Unknown support-boundary mode: $(opts.mode)"))
 end
@@ -326,6 +337,7 @@ _public_algorithm_type(alg::PoissonTimeStrategy) = typeof(alg)
 _public_algorithm_type(::GridAdaptiveState) = GridThinningStrategy
 _public_algorithm_type(::StickyLoopState) = Sticky
 
+# TODO: the plan to add LinearDynamics would clean this up quite a bit...
 _linear_boundary_flow(::ContinuousDynamics) = false
 _linear_boundary_flow(::BouncyParticle) = true
 _linear_boundary_flow(::ZigZag) = true

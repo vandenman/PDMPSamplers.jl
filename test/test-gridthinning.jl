@@ -40,9 +40,17 @@ import DifferentiationInterface as DI
         τ2, lb2 = PDMPSamplers.propose_event_time(pcb, 100.0, 0.0)
         @test isinf(τ2)
 
-        # With refresh_rate
+        # With refresh_rate: cell 0 has Λ=2.0, total rate = 3.0
+        # u=0.5 should give τ = 0.5 / 3.0 ≈ 0.1667
         τ3, lb3 = PDMPSamplers.propose_event_time(pcb, 0.5, 1.0)
-        @test τ3 ≤ τ  # higher total rate → earlier event
+        @test τ3 ≈ 0.5 / 3.0 atol=1e-14
+        @test lb3 ≈ 3.0
+
+        # refresh_rate with zero Λ_val: avoid divide-by-zero
+        pcb_zero = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [0.0])
+        τ4, lb4 = PDMPSamplers.propose_event_time(pcb_zero, 0.25, 1.0)
+        @test τ4 ≈ 0.25 / 1.0 atol=1e-14
+        @test lb4 ≈ 1.0
     end
 
     @testset "_compute_cell_bound!" begin

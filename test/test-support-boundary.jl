@@ -559,4 +559,131 @@
         end
     end
 
+    # ── Regression tests for PR #20 review findings ────────────────────────────
+
+    @testset ":line_search falls back to :error for non-linear flows (Boomerang)" begin
+        # Boomerang with a bounded coordinate: gradient errors for x[1] >= 0.9.
+        # The true Boomerang hit time is asin(0.9), while linear localizer reports ≈0.9.
+        d_boom = 1
+        function boom_boundary_grad!(out, x)
+            if x[1] >= 0.9
+                error("Outside support: x[1] = $(x[1]) >= 0.9")
+            end
+            out .= x
+            return out
+        end
+        model = PDMPModel(d_boom, FullGradient(boom_boundary_grad!))
+        flow = Boomerang(ones(1, 1), zeros(1))
+        alg = GridThinningStrategy(; N=20, t_max=3.0)
+        x0 = [0.0]
+
+        # :line_search should NOT localize for Boomerang — it should fall back to :error
+        try
+            pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+            @test false
+        catch err
+            @test err isa SupportBoundaryError
+            @test !err.localized  # would be true if linear localizer were used incorrectly
+            @test err.flow_type <: Boomerang
+        end
+    end
+
+    @testset ":line_search falls back to :error for non-linear flows (MutableBoomerang)" begin
+        d_boom = 1
+        function boom_boundary_grad!(out, x)
+            if x[1] >= 0.9
+                error("Outside support: x[1] = $(x[1]) >= 0.9")
+            end
+            out .= x
+            return out
+        end
+        model = PDMPModel(d_boom, FullGradient(boom_boundary_grad!))
+        flow = MutableBoomerang(ones(1, 1), zeros(1))
+        alg = GridThinningStrategy(; N=20, t_max=3.0)
+        x0 = [0.0]
+
+        try
+            pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+            @test false
+        catch err
+            @test err isa SupportBoundaryError
+            @test !err.localized
+            @test err.flow_type <: MutableBoomerang
+        end
+    end
+
+    @testset "grid probe at initial point surfaces genuine gradient bugs (not SupportBoundaryError)" begin
+        # A model where the gradient throws at the initial point (not a boundary issue)
+        d = 2
+        function buggy_grad!(out, x)
+            if x[1] == 0.0  # fails at the initial point
+                throw(BoundsError(x, 1))
+            end
+            out .= x
+            return out
+        end
+        model = PDMPModel(d, FullGradient(buggy_grad!))
+        flow = BouncyParticle(Matrix{Float64}(I, d, d), zeros(d))
+        alg = GridThinningStrategy()
+        x0 = zeros(d)
+
+        # Should throw the original BoundsError, not wrap it in SupportBoundaryError
+        @test_throws BoundsError begin
+            pdmp_sample(x0, flow, model, alg, 0.0, 10.0, 0.0;
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+        end
+    end
+
+    @testset "grid probe at initial point surfaces MethodError gradient bug" begin
+        d = 2
+        function buggy_grad!(out, x)
+            if x[1] == 0.0
+                # Wrong number of arguments to simulate a MethodError-like bug
+                error("buggy gradient: dimension mismatch")
+            end
+            out .= x[end:-1:1]  # reverse for some valid response
+            return out
+        end
+        model = PDMPModel(d, FullGradient(buggy_grad!))
+        flow = BouncyParticle(Matrix{Float64}(I, d, d), zeros(d))
+        alg = GridThinningStrategy()
+        x0 = zeros(d)
+
+        # Should surface the original error even in :line_search mode
+        @test_throws ErrorException("buggy gradient: dimension mismatch") begin
+            pdmp_sample(x0, flow, model, alg, 0.0, 10.0, 0.0;
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+        end
+    end
+
+    @testset "grid probe at later point still captures real boundary failures" begin
+        # Validate that valid-start but later-boundary failures are still captured
+        d = 2
+        function boundary_grad!(out, x)
+            if x[1] >= 1.0
+                error("Outside support: x[1] = $(x[1]) >= 1.0")
+            end
+            out .= x
+            return out
+        end
+        model = PDMPModel(d, FullGradient(boundary_grad!))
+        flow = BouncyParticle(Matrix{Float64}(I, d, d), zeros(d))
+        alg = GridThinningStrategy()
+        x0 = [0.5, 0.0]  # valid start, but will hit boundary at x[1] = 1.0
+
+        # :line_search should still localize for this real boundary case
+        try
+            pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+            @test false
+        catch err
+            @test err isa SupportBoundaryError
+            @test err.localized
+            @test err.estimated_boundary_time !== nothing
+            @test err.estimated_boundary_time > 0.0
+        end
+    end
+
 end

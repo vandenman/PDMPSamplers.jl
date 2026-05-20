@@ -9,9 +9,12 @@
 Configuration for support-boundary handling.
 
 # Fields
-- `mode::Symbol`: Boundary handling mode. One of `:error`, `:line_search`, or `:line_search_truncated_refresh`. The truncated-refresh mode
-    localizes the support boundary, reruns event search up to a safe interior time, handles an ordinary event if one occurs first, and otherwise
-    applies a BPS-family velocity refresh fallback.
+- `mode::Symbol`: Boundary handling mode. One of `:error`, `:line_search`, or `:line_search_truncated_refresh`.
+    The `:line_search` and `:line_search_truncated_refresh` modes probe along a linear ray `x0 + t * v` and are
+    therefore only valid for BPS/ZigZag-family flows with linear dynamics. For non-linear flows (e.g., Boomerang)
+    these modes fall back to `:error` behavior. The truncated-refresh mode localizes the support boundary, reruns
+    event search up to a safe interior time, handles an ordinary event if one occurs first, and otherwise applies a
+    BPS-family velocity refresh fallback.
 - `max_bisection_steps::Int`: Maximum number of bisection iterations.
 - `time_rtol::Float64`: Relative tolerance for time localization.
 - `time_atol::Float64`: Absolute tolerance for time localization.

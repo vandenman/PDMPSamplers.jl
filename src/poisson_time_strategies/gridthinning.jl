@@ -104,6 +104,12 @@ function _get_rate_and_deriv_or_throw(
         err isa _ProbeFailureException && rethrow()
         if err isa _GradientProbeFailure
             probe_failure_handler === nothing && throw(err.original_error)
+            if t_valid == t_invalid
+                # The gradient errored at the initial point (t_valid == t_invalid == 0.0),
+                # not after entering a forbidden region. This is a genuine gradient bug,
+                # not a support boundary crossing. Surface the original error.
+                throw(err.original_error)
+            end
             probe_failure_handler(state, t_valid, t_invalid, err.original_error)
         end
         rethrow()
@@ -503,16 +509,21 @@ function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound
     # Get the properties of this segment
     t_start = pcb.t_grid[segment_idx]
     Λ_val = pos(pcb.Λ_vals[segment_idx])
+    total_rate = Λ_val + refresh_rate
+
+    if total_rate <= 0.0
+        return (Inf, 0.0)
+    end
 
     # This is how much of the random draw `u` we need to "spend" inside this segment
     u_remaining = u - area_before
 
-    # Calculate the time into the segment: time = distance / speed
-    time_in_segment = u_remaining / Λ_val
+    # Calculate the time into the segment using the same total rate used for cell selection.
+    time_in_segment = u_remaining / total_rate
 
     τ_proposed = t_start + time_in_segment
 
-    return τ_proposed, Λ_val
+    return τ_proposed, total_rate
 
 end
 
