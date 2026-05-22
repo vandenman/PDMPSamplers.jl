@@ -246,7 +246,7 @@ function _line_search_truncated_refresh_from_current_state!(
         state.t[] = t_current
 
         try
-            _check_gradient_probe_finite(compute_gradient!(state, model.grad, flow, cache))
+            compute_gradient!(state, model.grad, flow, cache)
         catch
             _throw_grid_safety_support_error(model, ctx, opts;
                 message="Grid thinning reached its safety limit, and the current state is not a valid refresh point.")
@@ -344,11 +344,6 @@ _supports_line_search_truncated_refresh_state(::StickyPDMPState, ::ContinuousDyn
 _supports_capped_boundary_search(::PoissonTimeStrategy) = false
 _supports_capped_boundary_search(::GridAdaptiveState) = true
 
-function _check_gradient_probe_finite(gradient)
-    _gradient_probe_is_finite(gradient) || throw(_NonfiniteGradientProbe())
-    return gradient
-end
-
 _boundary_probe_state(::PoissonTimeStrategy, state::AbstractPDMPState) = copy(state)
 _boundary_probe_state(alg::GridAdaptiveState, state::AbstractPDMPState) = (copyto!(alg.state_cache, state); alg.state_cache)
 
@@ -388,7 +383,8 @@ function _short_forward_probe_is_valid!(
     copyto!(state_probe, state)
     try
         move_forward_time!(state_probe, probe_time, flow)
-        _check_gradient_probe_finite(compute_gradient!(state_probe, model.grad, flow, cache))
+        gradient = compute_gradient!(state_probe, model.grad, flow, cache)
+        all(isfinite, gradient) || return false
         return true
     catch
         return false
@@ -433,7 +429,8 @@ function _try_move_to_valid_boundary_safe_point!(
 )
     _move_to_boundary_safe_point!(state, flow, ctx, safe_time)
     try
-        _check_gradient_probe_finite(compute_gradient!(state, model.grad, flow, cache))
+        gradient = compute_gradient!(state, model.grad, flow, cache)
+        all(isfinite, gradient) || return false
         return true
     catch
         return false
@@ -555,7 +552,8 @@ function _trace_event_gradient_is_valid(
     copyto!(state_probe.ξ.θ, event.velocity)
     state_probe.t[] = event.time
     try
-        _check_gradient_probe_finite(compute_gradient!(state_probe, model.grad, flow, cache))
+        gradient = compute_gradient!(state_probe, model.grad, flow, cache)
+        all(isfinite, gradient) || return false
         return true
     catch
         return false
@@ -1017,13 +1015,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 i = meta.i
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
             else
-                ∇ϕx = try
-                    _check_gradient_probe_finite(compute_gradient!(state, gradient_strategy, flow, cache))
-                catch err
-                    ctx = _boundary_context_after_forward_move(state, flow, alg, τ, err)
-                    ctx === nothing && rethrow()
-                    throw(_ProbeFailureException(ctx))
-                end
+                ∇ϕx = compute_gradient!(state, gradient_strategy, flow, cache)
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
             end
             needs_saving = true
@@ -1036,10 +1028,21 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 ∇ϕx = meta.∇ϕx
             else
                 ∇ϕx = try
-                    _check_gradient_probe_finite(compute_gradient_for_reflection!(state, gradient_strategy, flow, cache))
+                    compute_gradient_for_reflection!(state, gradient_strategy, flow, cache)
                 catch err
-                    ctx = _boundary_context_after_forward_move(state, flow, alg, τ, err)
-                    ctx === nothing && rethrow()
+                    if err isa _ProbeFailureException
+                        rethrow()
+                    end
+                    # Gradient error outside the hot path — this is likely a support
+                    # boundary crossing (not a genuine gradient bug) since the
+                    # event time was proposed by the thinning algorithm.
+                    ctx = BoundaryContext(
+                        copy(state.ξ.x), copy(state.ξ.θ),
+                        Float64(state.t[]),
+                        max(zero(Float64), Float64(state.t[])),
+                        Float64(state.t[]) + τ,
+                        err, typeof(flow), typeof(alg),
+                    )
                     throw(_ProbeFailureException(ctx))
                 end
             end
@@ -1121,16 +1124,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Coo
     abc_i₀_old = ab_i(i₀, ξ, alg, flow, cache)
     move_forward_time!(state, τ, flow)
 
-    ∇ϕ_i₀ = try
-        _check_gradient_probe_finite(compute_gradient!(gradient_strategy, ξ.x, i₀, cache))
-    catch err
-        x0 = copy(ξ.x)
-        v = copy(ξ.θ)
-        _rewind_linear_boundary_position!(x0, v, τ, flow)
-        throw(_ProbeFailureException(BoundaryContext(
-            x0, v, Float64(state.t[] - τ), 0.0, max(Float64(τ), eps(Float64)),
-            err, typeof(flow), _public_algorithm_type(alg))))
-    end
+    ∇ϕ_i₀ = compute_gradient!(gradient_strategy, ξ.x, i₀, cache)
     # partial derivative
     l_i₀ = λ_i(i₀, ξ, ∇ϕ_i₀, flow)
 

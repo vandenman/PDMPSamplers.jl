@@ -1,4 +1,5 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
+using LinearAlgebra
 
 @testset "Support-boundary handling" begin
 
