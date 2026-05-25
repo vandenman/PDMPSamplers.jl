@@ -27,6 +27,7 @@ Configuration for support-boundary handling.
 - `min_safe_time::Float64`: Minimum time gap used when clipping away from the localized boundary.
 """
 Base.@kwdef struct SupportBoundaryOptions
+    detect_boundaries::Bool = false
     mode::Symbol = :error
     max_bisection_steps::Int = 60
     time_rtol::Float64 = 1e-8
@@ -344,12 +345,37 @@ function _handle_boundary!(model::PDMPModel, ctx::BoundaryContext, opts::Support
     mode = opts.mode
     if mode === :error
         throw(_build_boundary_error(ctx, opts))
-    elseif mode === :line_search || mode === :line_search_truncated_refresh
-        localization = localize_support_boundary!(model, ctx, opts)
-        throw(_build_boundary_error(ctx, opts; localized=true, localization))
+    elseif mode === :line_search
+        if _flow_has_linear_dynamics(ctx.flow_type)
+            localization = localize_support_boundary!(model, ctx, opts)
+            throw(_build_boundary_error(ctx, opts; localized=true, localization))
+        else
+            throw(_build_boundary_error(ctx, opts))
+        end
+    elseif mode === :line_search_truncated_refresh
+        if _is_bps_family_flow(ctx.flow_type)
+            localization = localize_support_boundary!(model, ctx, opts)
+            throw(_build_boundary_error(ctx, opts; localized=true, localization))
+        else
+            msg = "line_search_truncated_refresh is only supported for BPS-family flows (BouncyParticle, PreconditionedBPS). " *
+                   "Got $(ctx.flow_type). Use :error or :line_search mode instead."
+            throw(_build_boundary_error(ctx, opts; message=msg))
+        end
     else
         throw(ArgumentError("Unknown support-boundary mode: $mode"))
     end
 end
+
+# Line-search-based boundary localization requires linear dynamics (x(t) = x0 + t*v).
+# This is true for BouncyParticle, ZigZag, and their preconditioned variants.
+_flow_has_linear_dynamics(::Type{<:BouncyParticle}) = true
+_flow_has_linear_dynamics(::Type{<:ZigZag}) = true
+_flow_has_linear_dynamics(::Type{<:PreconditionedDynamics{P,D}}) where {P,D} = _flow_has_linear_dynamics(D)
+_flow_has_linear_dynamics(::Type) = false
+
+# The truncated-refresh mode is BPS-specific (requires refresh mechanism).
+_is_bps_family_flow(::Type{<:BouncyParticle}) = true
+_is_bps_family_flow(::Type{<:PreconditionedDynamics{P,D}}) where {P,D} = _is_bps_family_flow(D)
+_is_bps_family_flow(::Type) = false
 
 

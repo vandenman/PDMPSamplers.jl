@@ -27,7 +27,7 @@ using LinearAlgebra
     end
 
     @testset "SupportBoundaryOptions — mode field" begin
-        opts = SupportBoundaryOptions(; mode=:line_search_truncated_refresh, max_refresh_attempts=7, refresh_probe_time=1e-5)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=7, refresh_probe_time=1e-5)
         @test opts.mode === :line_search_truncated_refresh
         @test opts.max_refresh_attempts == 7
         @test opts.refresh_probe_time == 1e-5
@@ -110,12 +110,12 @@ using LinearAlgebra
 
         @test_throws SupportBoundaryError begin
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         end
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         catch err
             @test err isa SupportBoundaryError
             @test err.localized == false
@@ -132,12 +132,12 @@ using LinearAlgebra
 
         @test_throws SupportBoundaryError begin
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
         end
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
         catch err
             @test err isa SupportBoundaryError
             @test err.localized == true
@@ -154,7 +154,7 @@ using LinearAlgebra
         alg = _make_boundary_alg()
         x0 = zeros(d_boundary)
 
-        opts = SupportBoundaryOptions(; mode=:line_search)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search)
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
@@ -171,7 +171,7 @@ using LinearAlgebra
         alg = _make_boundary_alg()
         x0 = zeros(d_boundary)
 
-        opts = SupportBoundaryOptions(; mode=:line_search, max_bisection_steps=10, time_rtol=1e-6, time_atol=1e-8)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search, max_bisection_steps=10, time_rtol=1e-6, time_atol=1e-8)
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
@@ -190,12 +190,12 @@ using LinearAlgebra
 
         @test_throws SupportBoundaryError begin
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         end
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
         catch err
             @test err isa SupportBoundaryError
             @test err.localized == true
@@ -208,7 +208,7 @@ using LinearAlgebra
         flow = _make_boundary_flow()
         alg = _make_boundary_alg(; N=20, t_max=2.0)
         x0 = zeros(d_boundary)
-        opts = SupportBoundaryOptions(; mode=:line_search_truncated_refresh, max_refresh_attempts=200, refresh_probe_time=1e-4)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=200, refresh_probe_time=1e-4)
 
         result = pdmp_sample(x0, flow, model, alg, 0.0, 20.0, 0.0;
             progress=false, seed=42, support_boundary_options=opts)
@@ -223,7 +223,7 @@ using LinearAlgebra
         flow = PreconditionedBPS(Matrix{Float64}(I, d_boundary, d_boundary), zeros(d_boundary))
         alg = _make_boundary_alg(; N=20, t_max=2.0)
         x0 = zeros(d_boundary)
-        opts = SupportBoundaryOptions(; mode=:line_search_truncated_refresh, max_refresh_attempts=200, refresh_probe_time=1e-4)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=200, refresh_probe_time=1e-4)
 
         result = pdmp_sample(x0, flow, model, alg, 0.0, 20.0, 0.0;
             progress=false, seed=42, support_boundary_options=opts)
@@ -250,7 +250,7 @@ using LinearAlgebra
             copy(state.ξ.x), copy(state.ξ.θ), state.t[],
             0.0, eps(Float64), ErrorException("test"), BouncyParticle, GridThinningStrategy,
         )
-        opts = SupportBoundaryOptions(; mode=:line_search_truncated_refresh, max_refresh_attempts=1, refresh_probe_time=0.0)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=1, refresh_probe_time=0.0)
 
         result = PDMPSamplers._line_search_truncated_refresh_boundary!(
             rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase=:main,
@@ -373,7 +373,7 @@ using LinearAlgebra
         try
             PDMPSamplers._handle_grid_safety_limit!(
                 rng, state, model, flow, alg, cache, stats, trace_manager, ctx,
-                SupportBoundaryOptions(; mode=:line_search); phase=:main,
+                SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search); phase=:main,
             )
             @test false
         catch err
@@ -389,7 +389,7 @@ using LinearAlgebra
         try
             PDMPSamplers._handle_grid_safety_limit!(
                 rng, state, model, flow, alg, cache, stats, trace_manager, ctx_valid_horizon,
-                SupportBoundaryOptions(; mode=:line_search); phase=:main,
+                SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search); phase=:main,
             )
             @test false
         catch err
@@ -400,7 +400,7 @@ using LinearAlgebra
             @test !occursin("Hint: use support_boundary_options", String(take!(io)))
         end
 
-        opts = SupportBoundaryOptions(; mode=:line_search_truncated_refresh, max_refresh_attempts=1, refresh_probe_time=0.0)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=1, refresh_probe_time=0.0)
         result = PDMPSamplers._handle_grid_safety_limit!(
             rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase=:main,
         )
@@ -415,7 +415,7 @@ using LinearAlgebra
         flow = ZigZag(Matrix{Float64}(I, d_boundary, d_boundary), zeros(d_boundary))
         alg = _make_boundary_alg(; N=20, t_max=2.0)
         x0 = zeros(d_boundary)
-        opts = SupportBoundaryOptions(; mode=:line_search_truncated_refresh)
+        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh)
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
@@ -443,11 +443,11 @@ using LinearAlgebra
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 10.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
             @test false
         catch err
             @test !(err isa SupportBoundaryError)
-            @test occursin("bad hvp", sprint(showerror, err))
+            @test occursin("MethodError", sprint(showerror, err))
         end
     end
 
@@ -459,14 +459,14 @@ using LinearAlgebra
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         catch err
             @test err isa SupportBoundaryError
         end
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
         catch err
             @test err isa SupportBoundaryError
             @test err.localized == true
@@ -479,8 +479,8 @@ using LinearAlgebra
         alg = _make_boundary_alg()
         x0 = zeros(d_boundary)
 
-        # Default behavior should be :error
-        @test_throws SupportBoundaryError begin
+        # Default behavior (detect_boundaries=false): boundary errors propagate as-is
+        @test_throws ErrorException begin
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
                 progress=false, seed=42)
         end
@@ -538,12 +538,12 @@ using LinearAlgebra
         x0 = randn(d)
 
         result = pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 5.0;
-            progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+            progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         @test result isa PDMPChains
         @test length(result.traces) == 1
 
         result2 = pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 5.0;
-            progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+            progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
         @test result2 isa PDMPChains
     end
 
@@ -556,7 +556,7 @@ using LinearAlgebra
         # Multi-chain with :error mode
         @test_throws SupportBoundaryError begin
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 10.0;
-                progress=false, seed=42, n_chains=2, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+                progress=false, seed=42, n_chains=2, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         end
     end
 
@@ -581,7 +581,7 @@ using LinearAlgebra
         # :line_search should NOT localize for Boomerang — it should fall back to :error
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
             @test false
         catch err
             @test err isa SupportBoundaryError
@@ -606,7 +606,7 @@ using LinearAlgebra
 
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
             @test false
         catch err
             @test err isa SupportBoundaryError
@@ -633,7 +633,7 @@ using LinearAlgebra
         # Should throw the original BoundsError, not wrap it in SupportBoundaryError
         @test_throws BoundsError begin
             pdmp_sample(x0, flow, model, alg, 0.0, 10.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:error))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:error))
         end
     end
 
@@ -652,10 +652,10 @@ using LinearAlgebra
         alg = GridThinningStrategy()
         x0 = zeros(d)
 
-        # Should surface the original error even in :line_search mode
+        # Without detect_boundaries, gradient bugs surface as-is (default behavior)
         @test_throws ErrorException("buggy gradient: dimension mismatch") begin
             pdmp_sample(x0, flow, model, alg, 0.0, 10.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42)
         end
     end
 
@@ -677,7 +677,7 @@ using LinearAlgebra
         # :line_search should still localize for this real boundary case
         try
             pdmp_sample(x0, flow, model, alg, 0.0, 100.0, 0.0;
-                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; mode=:line_search))
+                progress=false, seed=42, support_boundary_options=SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search))
             @test false
         catch err
             @test err isa SupportBoundaryError
