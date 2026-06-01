@@ -240,7 +240,7 @@ using LinearAlgebra
         previous_state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
         state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
         trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
-        PDMPSamplers.record_event!(trace_manager, previous_state, flow, nothing; phase=:main)
+        PDMPSamplers.record_event!(trace_manager, previous_state, flow, nothing, :main)
 
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,

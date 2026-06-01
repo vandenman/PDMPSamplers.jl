@@ -37,42 +37,16 @@ function pdmp_sample(
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
-
-    model_use = model
-
     if n_chains == 1
         rng = _make_rng(seed)
-        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, model_use, alg, t₀, T, t_warmup;
-            progress, adapter, stop, warmup_stop, support_boundary_options, original_model=model)
+        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup,
+            progress, adapter, stop, warmup_stop, support_boundary_options, model)
         return PDMPChains([trace], [stats])
     end
-
-    if threaded
-        tasks = map(1:n_chains) do chain_i
-            Threads.@spawn begin
-                rng_i = _make_chain_rng(seed, chain_i)
-                flow_i = _copy_flow(flow)
-                model_i = _copy_model(model_use)
-                stop_i = _maybe_copy_criterion(stop)
-                warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i, support_boundary_options, original_model=model)
-            end
-        end
-        results = fetch.(tasks)
-    else
-        results = map(1:n_chains) do chain_i
-            rng_i = _make_chain_rng(seed, chain_i)
-            flow_i = _copy_flow(flow)
-            model_i = _copy_model(model_use)
-            stop_i = _maybe_copy_criterion(stop)
-            warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, model_i, alg, t₀, T, t_warmup; progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i, support_boundary_options, original_model=model)
-        end
-    end
-
-    traces = [r[1] for r in results]
-    all_stats = [r[2] for r in results]
-    return PDMPChains(traces, all_stats)
+    models = [_copy_model(model) for _ in 1:n_chains]
+    return pdmp_sample(ξ₀, flow, models, alg, t₀, T, t_warmup;
+        stop, warmup_stop, threaded, progress, adapter, seed,
+        support_boundary_options)
 end
 
 _make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
@@ -84,8 +58,7 @@ struct BoundaryHandling{M} <: BoundaryPolicy
     opts::SupportBoundaryOptions
 end
 
-_boundary_policy(opts::SupportBoundaryOptions) =
-    opts.detect_boundaries ? BoundaryHandling{opts.mode}(opts) : NoBoundaryHandling()
+_boundary_policy(opts::SupportBoundaryOptions) = opts.detect_boundaries ? BoundaryHandling{opts.mode}(opts) : NoBoundaryHandling()
 
 function pdmp_sample(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, models::AbstractVector{<:PDMPModel},
@@ -102,11 +75,11 @@ function pdmp_sample(
     n_chains = length(models)
     n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
-    models_use = models
 
     if n_chains == 1
         rng = _make_rng(seed)
-        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, models_use[1], alg, t₀, T, t_warmup; progress, adapter, stop, warmup_stop, support_boundary_options, original_model=models[1])
+        trace, stats = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup,
+            progress, adapter, stop, warmup_stop, support_boundary_options, models[1])
         return PDMPChains([trace], [stats])
     end
 
@@ -117,8 +90,8 @@ function pdmp_sample(
                 flow_i        = _copy_flow(flow)
                 stop_i        = _maybe_copy_criterion(stop)
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models_use[i], alg, t₀, T, t_warmup;
-                    progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i, support_boundary_options, original_model=models[i])
+                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup,
+                    false, adapter, stop_i, warmup_stop_i, support_boundary_options, models[i])
             end
         end
         results = fetch.(tasks)
@@ -128,8 +101,8 @@ function pdmp_sample(
             flow_i        = _copy_flow(flow)
             stop_i        = _maybe_copy_criterion(stop)
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models_use[i], alg, t₀, T, t_warmup;
-                progress=false, adapter, stop=stop_i, warmup_stop=warmup_stop_i, support_boundary_options, original_model=models[i])
+            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup,
+                false, adapter, stop_i, warmup_stop_i, support_boundary_options, models[i])
         end
     end
 
@@ -194,10 +167,10 @@ function _step!(
     alg_::PoissonTimeStrategy,
     cache::NamedTuple,
     stats::StatisticCounter,
-    trace_manager::TraceManager;
+    trace_manager::TraceManager,
     phase::Symbol
 ) where {FL<:ContinuousDynamics}
-    return _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager, NoBoundaryHandling(); phase)
+    return _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager, NoBoundaryHandling(), phase)
 end
 
 # The default hot path deliberately has no support-boundary try/catch or option
@@ -211,14 +184,14 @@ function _step!(
     cache::NamedTuple,
     stats::StatisticCounter,
     trace_manager::TraceManager,
-    ::NoBoundaryHandling;
+    ::NoBoundaryHandling,
     phase::Symbol
 ) where {FL<:ContinuousDynamics}
     τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling())
     @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
     needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
-    needs_saving && record_event!(trace_manager, state, flow, saving_args; phase)
+    needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
 
     return event_type
 end
@@ -232,12 +205,19 @@ function _step!(
     cache::NamedTuple,
     stats::StatisticCounter,
     trace_manager::TraceManager,
-    boundary_policy::BoundaryHandling;
+    boundary_policy::BoundaryHandling,
     phase::Symbol
 ) where {FL<:ContinuousDynamics}
     support_boundary_options = boundary_policy.opts
-    τ, event_type, meta = try
-        _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy)
+    try
+        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy)
+
+        @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+
+        needs_saving, saving_args = handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+        needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+
+        return event_type
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
@@ -249,25 +229,6 @@ function _step!(
             rethrow()
         end
     end
-
-    @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
-
-    needs_saving, saving_args = try
-        handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
-    catch err
-        if err isa _ProbeFailureException
-            return _handle_step_boundary!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
-        elseif err isa _GridSafetyLimitException
-            return _handle_grid_safety_limit!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
-        elseif err isa SupportBoundaryError
-            rethrow(err)
-        else
-            rethrow()
-        end
-    end
-    needs_saving && record_event!(trace_manager, state, flow, saving_args; phase)
-
-    return event_type
 end
 
 function _handle_step_boundary!(
@@ -347,7 +308,7 @@ function _line_search_truncated_refresh_from_current_state!(
             stats.refreshment_events += 1
             stats.last_rejected = false
             _invalidate_cached_gradient!(alg)
-            record_event!(trace_manager, state, flow, nothing; phase)
+            record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end
 
@@ -714,7 +675,7 @@ function _handle_capped_boundary_event!(
     trace_manager::TraceManager,
     τ::Float64,
     event_type::Symbol,
-    meta;
+    meta,
     phase::Symbol,
     support_boundary_options::SupportBoundaryOptions,
 )
@@ -722,16 +683,16 @@ function _handle_capped_boundary_event!(
         handle_event!(rng, τ, model.grad, flow, alg, state, cache, event_type, meta, stats)
     catch err
         if err isa _ProbeFailureException
-            return _handle_step_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
+            return _handle_step_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options, phase)
         elseif err isa _GridSafetyLimitException
-            return _handle_grid_safety_limit!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
+            return _handle_grid_safety_limit!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options, phase)
         elseif err isa SupportBoundaryError
             rethrow(err)
         else
             rethrow()
         end
     end
-    needs_saving && record_event!(trace_manager, state, flow, saving_args; phase)
+    needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
     return event_type
 end
 
@@ -764,7 +725,7 @@ function _boundary_refresh_from_localization!(
             stats.refreshment_events += 1
             stats.last_rejected = false
             _invalidate_cached_gradient!(alg)
-            record_event!(trace_manager, state, flow, nothing; phase)
+            record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end
 
@@ -821,7 +782,7 @@ function _line_search_truncated_refresh_boundary!(
         if event_type !== :support_boundary
             _restore_boundary_start!(state, ctx)
             return _handle_capped_boundary_event!(rng, state, model, flow, alg, cache, stats, trace_manager,
-                Float64(τ), event_type, meta; phase, support_boundary_options=opts)
+                Float64(τ), event_type, meta, phase, opts)
         end
     end
 
@@ -846,15 +807,15 @@ function _run_phase!(
     cache::NamedTuple,
     trace_manager::TraceManager,
     stats::StatisticCounter,
-    health::HealthMonitor;
+    health::HealthMonitor,
     phase::Symbol,
-    adapter::AbstractAdapter=NoAdaptation(),
-    progress::Bool=false,
-    prg=nothing,
-    tstop::Base.RefValue{Float64}=Ref(Inf),
-    T::Float64=0.0,
-    progress_stops::Int=300,
-    boundary_policy::BoundaryPolicy=NoBoundaryHandling()
+    adapter::AbstractAdapter,
+    progress::Bool,
+    prg,
+    tstop::Base.RefValue{Float64},
+    T::Float64,
+    progress_stops::Int,
+    boundary_policy::BoundaryPolicy
 ) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
 
@@ -866,7 +827,7 @@ function _run_phase!(
             return nothing
         end
 
-        event_type = _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager, boundary_policy; phase)
+        event_type = _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager, boundary_policy, phase)
         update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, model_.grad, trace_manager; phase, stats)
@@ -905,17 +866,74 @@ function _handle_dynamics_adaptation!(
     return nothing
 end
 
+function _run_phase_with_boundary_policy!(
+    rng::Random.AbstractRNG,
+    criterion::StoppingCriterion,
+    state::AbstractPDMPState,
+    model_::PDMPModel,
+    flow::ContinuousDynamics,
+    alg_::PoissonTimeStrategy,
+    cache::NamedTuple,
+    trace_manager::TraceManager,
+    stats::StatisticCounter,
+    health::HealthMonitor,
+    phase::Symbol,
+    adapter::AbstractAdapter,
+    progress::Bool,
+    prg,
+    tstop::Base.RefValue{Float64},
+    T::Float64,
+    progress_stops::Int,
+    boundary_policy::NoBoundaryHandling,
+    original_model::PDMPModel,
+    support_boundary_options::SupportBoundaryOptions,
+)
+    return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats, health,
+        phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy)
+end
+
+function _run_phase_with_boundary_policy!(
+    rng::Random.AbstractRNG,
+    criterion::StoppingCriterion,
+    state::AbstractPDMPState,
+    model_::PDMPModel,
+    flow::ContinuousDynamics,
+    alg_::PoissonTimeStrategy,
+    cache::NamedTuple,
+    trace_manager::TraceManager,
+    stats::StatisticCounter,
+    health::HealthMonitor,
+    phase::Symbol,
+    adapter::AbstractAdapter,
+    progress::Bool,
+    prg,
+    tstop::Base.RefValue{Float64},
+    T::Float64,
+    progress_stops::Int,
+    boundary_policy::BoundaryHandling,
+    original_model::PDMPModel,
+    support_boundary_options::SupportBoundaryOptions,
+)
+    try
+        return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats, health,
+            phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy)
+    catch err
+        if err isa _ProbeFailureException
+            _handle_boundary!(original_model, err.ctx, support_boundary_options)
+        else
+            rethrow()
+        end
+    end
+end
+
 function _pdmp_sample_single(
     rng::Random.AbstractRNG,
     ξ₀::SkeletonPoint, flow::FL, model::PDMPModel,
     alg::PoissonTimeStrategy,
-    t₀::Real=0.0, T::Real=10_000, t_warmup::Real=0.0;
-    progress::Bool=true,
-    adapter::AbstractAdapter=NoAdaptation(),
-    stop::Union{StoppingCriterion,Nothing}=nothing,
-    warmup_stop::Union{StoppingCriterion,Nothing}=nothing,
-    support_boundary_options::SupportBoundaryOptions=SupportBoundaryOptions(),
-    original_model::PDMPModel=model
+    t₀::Real, T::Real, t_warmup::Real,
+    progress::Bool, adapter::AbstractAdapter,
+    stop::Union{StoppingCriterion,Nothing}, warmup_stop::Union{StoppingCriterion,Nothing},
+    support_boundary_options::SupportBoundaryOptions, original_model::PDMPModel
 ) where {FL<:ContinuousDynamics}
 
     # TODO: it's possible to sample to have t_warmup < T...
@@ -966,111 +984,16 @@ function _pdmp_sample_single(
         tstop = Ref(Inf)
     end
 
-    if boundary_policy isa NoBoundaryHandling
-        _run_phase!(
-            rng,
-            warmup_criterion,
-            state,
-            model_,
-            flow,
-            alg_,
-            cache,
-            trace_manager,
-            stats,
-            health;
-            phase=:warmup,
-            adapter,
-            progress,
-            prg,
-            tstop,
-            T=Float64(T),
-            progress_stops,
-            boundary_policy
-        )
-    else
-        try
-            _run_phase!(
-                rng,
-                warmup_criterion,
-                state,
-                model_,
-                flow,
-                alg_,
-                cache,
-                trace_manager,
-                stats,
-                health;
-                phase=:warmup,
-                adapter,
-                progress,
-                prg,
-                tstop,
-                T=Float64(T),
-                progress_stops,
-                boundary_policy
-            )
-        catch err
-            if err isa _ProbeFailureException
-                _handle_boundary!(original_model, err.ctx, support_boundary_options)
-            else
-                rethrow()
-            end
-        end
-    end
+    T_float = Float64(T)
+    _run_phase_with_boundary_policy!(rng, warmup_criterion, state, model_, flow, alg_, cache,
+        trace_manager, stats, health, :warmup, adapter, progress, prg, tstop, T_float,
+        progress_stops, boundary_policy, original_model, support_boundary_options)
 
     _maybe_activate_constant_bound!(alg_, stats)
 
-    if boundary_policy isa NoBoundaryHandling
-        _run_phase!(
-            rng,
-            stop_criterion,
-            state,
-            model_,
-            flow,
-            alg_,
-            cache,
-            trace_manager,
-            stats,
-            health;
-            phase=:main,
-            adapter,
-            progress,
-            prg,
-            tstop,
-            T=Float64(T),
-            progress_stops,
-            boundary_policy
-        )
-    else
-        try
-            _run_phase!(
-                rng,
-                stop_criterion,
-                state,
-                model_,
-                flow,
-                alg_,
-                cache,
-                trace_manager,
-                stats,
-                health;
-                phase=:main,
-                adapter,
-                progress,
-                prg,
-                tstop,
-                T=Float64(T),
-                progress_stops,
-                boundary_policy
-            )
-        catch err
-            if err isa _ProbeFailureException
-                _handle_boundary!(original_model, err.ctx, support_boundary_options)
-            else
-                rethrow()
-            end
-        end
-    end
+    _run_phase_with_boundary_policy!(rng, stop_criterion, state, model_, flow, alg_, cache,
+        trace_manager, stats, health, :main, adapter, progress, prg, tstop, T_float,
+        progress_stops, boundary_policy, original_model, support_boundary_options)
 
     stats.elapsed_time = (time_ns() - t_start) / 1e9
 
