@@ -546,7 +546,7 @@ function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound
 
     # Get the properties of this segment
     t_start = pcb.t_grid[segment_idx]
-    Λ_val = pos(pcb.Λ_vals[segment_idx])
+    Λ_val = pos(pcb.Λ_vals[segment_idx] + refresh_rate)
     # This is how much of the random draw `u` we need to "spend" inside this segment
     u_remaining = u - area_before
 
