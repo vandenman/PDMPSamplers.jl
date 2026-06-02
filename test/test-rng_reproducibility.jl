@@ -58,4 +58,22 @@
             @test Matrix(result1.traces[i].velocities) == Matrix(result2.traces[i].velocities)
         end
     end
+
+    @testset "RNG seed source is reproducible" begin
+        rng = Random.Xoshiro(2024)
+        result1 = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; seed=rng, n_chains=2, progress=false)
+        result2 = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; seed=rng, n_chains=2, progress=false)
+
+        @test result1.traces[1].times == result2.traces[1].times
+        @test result1.traces[2].times == result2.traces[2].times
+    end
+
+    @testset "Vector integer seeds are deterministic" begin
+        seeds = [11, 22]
+        result1 = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; seed=seeds, n_chains=2, progress=false)
+        result2 = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; seed=seeds, n_chains=2, progress=false)
+
+        @test result1.traces[1].times == result2.traces[1].times
+        @test result1.traces[2].times == result2.traces[2].times
+    end
 end

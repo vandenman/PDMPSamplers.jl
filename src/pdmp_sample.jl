@@ -1,9 +1,67 @@
-pdmp_sample(d::Integer, args...; seed::Union{Integer,Nothing}=nothing, kwargs...) = pdmp_sample(randn(_make_rng(seed), d), args...; seed, kwargs...)
+const SeedSpec = Union{
+    Nothing,
+    Integer,
+    AbstractVector{<:Integer},
+    Random.AbstractRNG,
+    AbstractVector{<:Random.AbstractRNG},
+}
+
+function pdmp_sample(d::Integer, args...; seed::SeedSpec=nothing, kwargs...)
+    n_chains = _infer_n_chains(args, kwargs)
+    x₀ = randn(_make_initial_rng(seed, n_chains), d)
+    return pdmp_sample(x₀, args...; seed, kwargs...)
+end
+
 pdmp_sample(x₀::AbstractVector, θ₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; kwargs...)
-pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; seed::Union{Integer,Nothing}=nothing, kwargs...) = pdmp_sample(SkeletonPoint(x₀, initialize_velocity(_make_rng(seed), flow, length(x₀))), flow, args...; seed, kwargs...)
+function pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; seed::SeedSpec=nothing, kwargs...)
+    n_chains = _infer_n_chains(args, kwargs)
+    θ₀ = initialize_velocity(_make_initial_rng(seed, n_chains), flow, length(x₀))
+    return pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; seed, kwargs...)
+end
 
 _make_rng(::Nothing) = Random.default_rng()
 _make_rng(seed::Integer) = Random.Xoshiro(seed)
+_make_rng(seed::Random.AbstractRNG) = Random.Xoshiro(_rng_seed(seed, 1))
+
+function _infer_n_chains(args, kwargs)
+    if haskey(kwargs, :n_chains)
+        return Int(kwargs[:n_chains])
+    elseif !isempty(args) && args[1] isa AbstractVector{<:PDMPModel}
+        return length(args[1])
+    end
+    return 1
+end
+
+_validate_seed_spec(::Nothing, n_chains::Int) = nothing
+_validate_seed_spec(::Integer, n_chains::Int) = nothing
+_validate_seed_spec(::Random.AbstractRNG, n_chains::Int) = nothing
+
+function _validate_seed_spec(seeds::AbstractVector{<:Integer}, n_chains::Int)
+    length(seeds) == n_chains || throw(ArgumentError("seed vector length must match n_chains ($n_chains), got $(length(seeds))"))
+    return nothing
+end
+
+function _validate_seed_spec(rngs::AbstractVector{<:Random.AbstractRNG}, n_chains::Int)
+    length(rngs) == n_chains || throw(ArgumentError("seed RNG vector length must match n_chains ($n_chains), got $(length(rngs))"))
+    return nothing
+end
+
+function _make_initial_rng(seed::SeedSpec, n_chains::Int)
+    _validate_seed_spec(seed, n_chains)
+    if seed isa Nothing
+        return _make_rng(seed)
+    end
+    return _make_chain_rng(seed, 1)
+end
+
+function _rng_seed(rng::Random.AbstractRNG, draw_i::Int)
+    rng_copy = Random.copy(rng)
+    seed = zero(UInt)
+    for _ in 1:draw_i
+        seed = rand(rng_copy, UInt)
+    end
+    return seed
+end
 
 """
     pdmp_sample(ξ₀, flow, model, alg, t₀=0.0, T=10_000, t_warmup=0.0;
@@ -32,13 +90,14 @@ function pdmp_sample(
     n_chains::Int=1, threaded::Bool=false,
     progress::Bool=true,
     adapter::AbstractAdapter=NoAdaptation(),
-    seed::Union{Integer,Nothing}=nothing,
+    seed::SeedSpec=nothing,
     support_boundary_options::SupportBoundaryOptions=SupportBoundaryOptions()
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
+    _validate_seed_spec(seed, n_chains)
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
     if n_chains == 1
-        rng = _make_rng(seed)
+        rng = _make_initial_rng(seed, n_chains)
         trace, stats = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, model)
         return PDMPChains([trace], [stats])
@@ -51,6 +110,9 @@ end
 
 _make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
 _make_chain_rng(seed::Integer, chain_i::Int) = Random.Xoshiro(seed + chain_i - 1)
+_make_chain_rng(seeds::AbstractVector{<:Integer}, chain_i::Int) = Random.Xoshiro(seeds[chain_i])
+_make_chain_rng(rng::Random.AbstractRNG, chain_i::Int) = Random.Xoshiro(_rng_seed(rng, chain_i))
+_make_chain_rng(rngs::AbstractVector{<:Random.AbstractRNG}, chain_i::Int) = Random.Xoshiro(_rng_seed(rngs[chain_i], 1))
 
 abstract type BoundaryPolicy end
 struct NoBoundaryHandling <: BoundaryPolicy end
@@ -69,15 +131,16 @@ function pdmp_sample(
     threaded::Bool=false,
     progress::Bool=true,
     adapter::AbstractAdapter=NoAdaptation(),
-    seed::Union{Integer,Nothing}=nothing,
+    seed::SeedSpec=nothing,
     support_boundary_options::SupportBoundaryOptions=SupportBoundaryOptions()
 )
     n_chains = length(models)
     n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
+    _validate_seed_spec(seed, n_chains)
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
 
     if n_chains == 1
-        rng = _make_rng(seed)
+        rng = _make_initial_rng(seed, n_chains)
         trace, stats = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, models[1])
         return PDMPChains([trace], [stats])
