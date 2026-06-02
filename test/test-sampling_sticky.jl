@@ -44,10 +44,10 @@
                     end
 
                     # Use a stable seed for target generation so all samplers face the same target
-                    Random.seed!(hash((data_type, data_arg)))
+                    Random.seed!(stable_test_seed(:target, data_type, data_arg))
                     D, κ, slab_target = gen_data(data_type, data_arg...)
                     # Re-seed for the sampler run (initial conditions, etc.)
-                    Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
+                    Random.seed!(stable_test_seed(:sampler, pdmp_type, gradient_type, algorithm, data_type, data_arg))
 
                     d = first(data_arg)
                     T = if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}

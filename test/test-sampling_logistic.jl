@@ -60,7 +60,7 @@ end
     @testset "Full gradient" begin
         @testset "$pdmp_type" for pdmp_type in pdmp_types
 
-            Random.seed!(hash((pdmp_type, :logistic_full)))
+            Random.seed!(stable_test_seed(pdmp_type, :logistic_full))
 
             T = 15_000.0
 
@@ -91,7 +91,7 @@ end
     end
 
     @testset "Subsampled gradient (ZigZag)" begin
-        Random.seed!(hash((:zigzag, :logistic_sub)))
+        Random.seed!(stable_test_seed(:zigzag, :logistic_sub))
 
         nsub = n ÷ 10
         T = 20_000.0
@@ -113,7 +113,7 @@ end
     end
 
     @testset "Subsampled gradient multi-chain independence (ZigZag)" begin
-        Random.seed!(hash((:zigzag, :logistic_sub_multichain)))
+        Random.seed!(stable_test_seed(:zigzag, :logistic_sub_multichain))
 
         nsub = n ÷ 10
         T = 5_000.0
@@ -158,7 +158,7 @@ end
         κ = (p0 / (1 - p0)) .* slab_pdf_zero
         κ[1] = Inf  # intercept never sticks
 
-        Random.seed!(hash((:zigzag, :logistic_sticky)))
+        Random.seed!(stable_test_seed(:zigzag, :logistic_sticky))
 
         T = 20_000.0
         flow = ZigZag(Matrix(1.0I(d_s)), zeros(d_s))
@@ -190,7 +190,7 @@ end
     end
 
     @testset "CV-subsampled gradient and HVP unbiasedness (MC)" begin
-        Random.seed!(hash(:logistic_mc_unbiasedness))
+        Random.seed!(stable_test_seed(:logistic_mc_unbiasedness))
 
         d_mc, n_mc = 4, 300
         nsub = n_mc ÷ 10
