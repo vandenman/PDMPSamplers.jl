@@ -1,7 +1,6 @@
 import PrecompileTools
 
 PrecompileTools.@compile_workload begin
-
     d = 2
     ∇f! = (out, x) -> (out .= x; out)
     ∇²f! = (out, x, v) -> (out .= v; out)
@@ -9,10 +8,9 @@ PrecompileTools.@compile_workload begin
     # GridThinningStrategy requires GlobalGradientModel (FullGradient) for all flows,
     # including ZigZag, since the grid-based algorithm dispatches on GlobalGradientStrategy.
     model_global = PDMPModel(d, FullGradient(∇f!), ∇²f!)
-
     alg = GridThinningStrategy()
     T = 50.0   # upper bound fallback for event-budgeted runs
-    stop_precompile = EventCountCriterion(10)
+    stop_precompile = EventCountCriterion(3)
     x0 = ones(d)
 
     # ── 1. BouncyParticle ────────────────────────────────────────────────────

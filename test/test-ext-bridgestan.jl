@@ -147,6 +147,36 @@ else
                 @test norm(sample_cov_hvp - Σ) < 0.75
             end
 
+            @testset "brms diamonds support-boundary regression" begin
+                fixture_dir = joinpath(@__DIR__, "fixtures")
+                brms_stan_file = joinpath(fixture_dir, "brms_diamonds_gaussian.stan")
+                brms_data_file = joinpath(fixture_dir, "diamonds.json")
+                brms_model = PDMPModel(brms_stan_file, brms_data_file; hvp=false)
+
+                @test brms_model.d == 26
+
+                x_start = zeros(brms_model.d)
+                gradient_at_start = similar(x_start)
+                PDMPSamplers.compute_gradient!(brms_model.grad, x_start, gradient_at_start)
+                @test all(isfinite, gradient_at_start)
+
+                velocity = zeros(brms_model.d)
+                velocity[end] = -1.0
+                ctx = PDMPSamplers.BoundaryContext(
+                    x_start, velocity, 0.0, 1000.0,
+                    ErrorException("directed sigma underflow"), BouncyParticle, GridThinningStrategy,
+                )
+                opts = SupportBoundaryOptions(; mode=:line_search, max_bisection_steps=80, time_atol=1e-8)
+                loc = PDMPSamplers.localize_support_boundary!(brms_model, ctx, opts)
+
+                @test loc.estimated_boundary_time > 0.0
+                @test loc.safe_time < loc.estimated_boundary_time
+
+                gradient_at_safe = similar(x_start)
+                PDMPSamplers.compute_gradient!(brms_model.grad, x_start .+ loc.safe_time .* velocity, gradient_at_safe)
+                @test all(isfinite, gradient_at_safe)
+            end
+
         finally
             rm(model_dir, recursive=true, force=true)
         end

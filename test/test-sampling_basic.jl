@@ -39,11 +39,11 @@
                     pdmp_type <: Union{AnyBoomerang, PreconditionedDynamics{<:Any, Boomerang}} && data_type === Distributions.MvTDist && continue
 
                     # Use a stable seed for target generation so all samplers face the same target
-                    Random.seed!(hash((data_type, data_arg)))
+                    Random.seed!(stable_test_seed(:target, data_type, data_arg))
                     target = gen_data(data_type, data_arg...)
                     D = target.D
                     # Re-seed for the sampler run (initial conditions, etc.)
-                    Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg)))
+                    Random.seed!(stable_test_seed(:sampler, pdmp_type, gradient_type, algorithm, data_type, data_arg))
 
                     d = first(data_arg)
                     T = data_type === Distributions.MvTDist ? 400_000.0 : 50_000.0
@@ -87,7 +87,7 @@
                     # If the stochastic test would fail (e.g., due to a convergence fluke),
                     # retry once with a different seed before registering @test results.
                     if !test_approximation(trace, D; check_only=true)
-                        Random.seed!(hash((pdmp_type, gradient_type, algorithm, data_type, data_arg, :retry)))
+                        Random.seed!(stable_test_seed(:sampler, pdmp_type, gradient_type, algorithm, data_type, data_arg, :retry))
                         x0 = mean(D) + randn(d)
                         θ0 = PDMPSamplers.initialize_velocity(flow, d)
                         ξ0 = SkeletonPoint(x0, θ0)

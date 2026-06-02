@@ -365,7 +365,7 @@ import QuadGK
     # ──────────────────────────────────────────────────────────────────────
     # 6. Public estimator non-regression
     # ──────────────────────────────────────────────────────────────────────
-    @testset "MutableBoomerang mean(trace) unchanged" begin
+    @testset "MutableBoomerang mean(trace) matches exact segment accumulation" begin
         Random.seed!(42)
         d = 2
         flow = AdaptiveBoomerang(d; scheme=:diagonal)
@@ -379,9 +379,15 @@ import QuadGK
         trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
                                progress=false, adapter=PDMPSamplers.NoAdaptation())
 
-        m = mean(trace)
-        @test all(isfinite, m)
-        @test m ≈ mean(target.D)  atol=0.5
+        ws_trace = PDMPSamplers.WelfordBoomerangStats(d)
+        for k in eachindex(trace.times)
+            PDMPSamplers.welford_update!(ws_trace, trace.positions[:, k], trace.velocities[:, k], trace.times[k], flow)
+        end
+
+        m_public = mean(trace)
+        m_exact = PDMPSamplers.stats_mean(ws_trace)
+        @test all(isfinite, m_public)
+        @test m_public ≈ m_exact atol=0.15
     end
 
     # ──────────────────────────────────────────────────────────────────────
