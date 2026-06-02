@@ -90,6 +90,8 @@ end
 GridBoundaryProbeHandler(original_state::S, flow::F, model::M, ::Type{A}) where {S,F,M,A} =
     GridBoundaryProbeHandler{S,F,M,A}(original_state, flow, model)
 
+_is_bridgestan_probe_error(err) = err isa ErrorException && startswith(err.msg, "BridgeStan gradient failed")
+
 function _get_rate_and_deriv_or_throw(
     ::NoGridBoundaryProbe,
     state::AbstractPDMPState,
@@ -120,7 +122,31 @@ function _get_rate_and_deriv_or_throw(
         if err isa ErrorException && err.msg == "bad hvp"
             throw(MethodError(get_rate_and_deriv, (state, flow, grad_and_hess_or_grad_and_hvp, add_rate, args...)))
         end
-        t_valid == t_invalid && rethrow()
+        if t_valid == t_invalid
+            # If the current state itself is already invalid, keep routing the
+            # failure through support-boundary recovery with a tiny forward
+            # bracket so truncated-refresh can fall back to the last valid
+            # trace event instead of leaking the raw model error.
+            t_invalid = max(t_valid + eps(Float64), eps(Float64))
+            try
+                _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
+            catch boundary_err
+                if boundary_err isa MethodError && boundary_err.f === _throw_grid_boundary_error
+                    if _is_bridgestan_probe_error(err)
+                        x0 = copy(probe_failure_handler.original_state.ξ.x)
+                        v = copy(probe_failure_handler.original_state.ξ.θ)
+                        ctx = BoundaryContext(
+                            x0, v, Float64(probe_failure_handler.original_state.t[]),
+                            max(t_valid, 0.0), max(t_invalid, eps(Float64)),
+                            err, typeof(flow), typeof(probe_failure_handler).parameters[4],
+                        )
+                        throw(_ProbeFailureException(ctx))
+                    end
+                    throw(err)
+                end
+                rethrow()
+            end
+        end
         _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
     end
 end
@@ -1303,6 +1329,9 @@ function _throw_grid_boundary_error(
         x0, v, Float64(original_state.t[]), t_valid, t_invalid,
         err, typeof(flow), algorithm_type,
     )
+    if _is_bridgestan_probe_error(err)
+        throw(_ProbeFailureException(ctx))
+    end
     if _support_boundary_probe_is_valid(model, ctx, t_invalid)
         if err isa ErrorException && occursin("Outside support", err.msg)
             throw(_ProbeFailureException(ctx))

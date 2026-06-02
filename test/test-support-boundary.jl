@@ -33,6 +33,19 @@ using LinearAlgebra
         @test opts.refresh_probe_time == 1e-5
     end
 
+    @testset "_validate_support_boundary_options auto-enables detection for recovery modes" begin
+        opts = PDMPSamplers._validate_support_boundary_options(
+            SupportBoundaryOptions(; mode=:line_search_truncated_refresh, max_refresh_attempts=7)
+        )
+        @test opts.detect_boundaries === true
+        @test opts.mode === :line_search_truncated_refresh
+        @test opts.max_refresh_attempts == 7
+
+        opts_error = PDMPSamplers._validate_support_boundary_options(SupportBoundaryOptions())
+        @test opts_error.detect_boundaries === false
+        @test opts_error.mode === :error
+    end
+
     @testset "localize_support_boundary! — basic bisection" begin
         model = _make_boundary_model()
         x0 = [0.0, 0.0]   # valid starting point
@@ -261,6 +274,87 @@ using LinearAlgebra
         @test state.ξ.x[1] < 1.0
         @test stats.support_boundary_events == 1
         @test stats.support_boundary_refresh_attempts == 1
+    end
+
+    @testset "_get_rate_and_deriv_or_throw converts current-invalid zero bracket into probe failure" begin
+        rng = PDMPSamplers.Random.Xoshiro(7)
+        model = _make_boundary_model()
+        flow = _make_boundary_flow()
+        alg = _make_boundary_alg(; N=20, t_max=2.0)
+        state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
+        cache = PDMPSamplers.add_gradient_to_cache(
+            PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
+        )
+        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model.grad, cache)
+        grad_and_hvp = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d_boundary), zeros(d_boundary), zeros(d_boundary))
+        probe = PDMPSamplers.GridBoundaryProbeHandler(copy(state), flow, model, GridThinningStrategy)
+
+        err = try
+            PDMPSamplers._get_rate_and_deriv_or_throw(
+                probe, state, flow, grad_and_hvp, false; t_valid=0.0, t_invalid=0.0,
+            )
+            nothing
+        catch err
+            err
+        end
+
+        @test err isa PDMPSamplers._ProbeFailureException
+        @test err.ctx.t_invalid > err.ctx.t_valid
+    end
+
+    @testset "_get_rate_and_deriv_or_throw treats BridgeStan-style zero-bracket failures as probe failures" begin
+        rng = PDMPSamplers.Random.Xoshiro(8)
+        function bridgestan_like_grad!(out, x)
+            x[1] == 1.0 && error("BridgeStan gradient failed (code -1)")
+            out .= x
+            return out
+        end
+        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        flow = _make_boundary_flow()
+        alg = _make_boundary_alg(; N=20, t_max=2.0)
+        state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
+        cache = PDMPSamplers.add_gradient_to_cache(
+            PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
+        )
+        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model.grad, cache)
+        grad_and_hvp = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d_boundary), zeros(d_boundary), zeros(d_boundary))
+        probe = PDMPSamplers.GridBoundaryProbeHandler(copy(state), flow, model, GridThinningStrategy)
+
+        err = try
+            PDMPSamplers._get_rate_and_deriv_or_throw(
+                probe, state, flow, grad_and_hvp, false; t_valid=0.0, t_invalid=0.0,
+            )
+            nothing
+        catch err
+            err
+        end
+
+        @test err isa PDMPSamplers._ProbeFailureException
+        @test err.ctx.t_invalid > err.ctx.t_valid
+    end
+
+    @testset "_throw_grid_boundary_error treats BridgeStan-style positive-bracket failures as probe failures" begin
+        function bridgestan_like_grad!(out, x)
+            out .= x
+            return out
+        end
+        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        flow = _make_boundary_flow()
+        original_state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
+        current_state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
+
+        err = try
+            PDMPSamplers._throw_grid_boundary_error(
+                current_state, original_state, flow, model, ErrorException("BridgeStan gradient failed (code -1)");
+                t_valid=0.25, t_invalid=1.0,
+            )
+            nothing
+        catch err
+            err
+        end
+
+        @test err isa PDMPSamplers._ProbeFailureException
+        @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
     @testset "line_search_truncated_refresh backtracks from invalid clipped safe point" begin

@@ -49,6 +49,19 @@ function _validate_support_boundary_options(opts::SupportBoundaryOptions)
     opts.max_refresh_attempts >= 0 || throw(ArgumentError("max_refresh_attempts must be non-negative"))
     opts.refresh_probe_time >= 0.0 || throw(ArgumentError("refresh_probe_time must be non-negative"))
     opts.min_safe_time >= 0.0 || throw(ArgumentError("min_safe_time must be non-negative"))
+    if !opts.detect_boundaries && opts.mode !== :error
+        return SupportBoundaryOptions(;
+            detect_boundaries=true,
+            mode=opts.mode,
+            max_bisection_steps=opts.max_bisection_steps,
+            time_rtol=opts.time_rtol,
+            time_atol=opts.time_atol,
+            clip_fraction=opts.clip_fraction,
+            max_refresh_attempts=opts.max_refresh_attempts,
+            refresh_probe_time=opts.refresh_probe_time,
+            min_safe_time=opts.min_safe_time,
+        )
+    end
     return opts
 end
 
@@ -377,5 +390,4 @@ _flow_has_linear_dynamics(::Type) = false
 _is_bps_family_flow(::Type{<:BouncyParticle}) = true
 _is_bps_family_flow(::Type{<:PreconditionedDynamics{P,D}}) where {P,D} = _is_bps_family_flow(D)
 _is_bps_family_flow(::Type) = false
-
 
