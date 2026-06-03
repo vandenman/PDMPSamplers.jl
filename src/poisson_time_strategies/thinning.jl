@@ -3,6 +3,16 @@ struct ThinningStrategy{T<:BoundStrategy} <: PoissonTimeStrategy
 end
 _to_internal(x::ThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, args...) = x
 
+function initialize_cache(rng::Random.AbstractRNG, flow::ZigZag, ::CoordinateWiseGradient, thinningstrategy::ThinningStrategy, t::Real, ξ::SkeletonPoint)
+    pq = PriorityQueue{Int,Float64}()
+    for i in eachindex(ξ.x)
+        abc_i = ab_i(i, ξ, thinningstrategy, flow, nothing)
+        t_event = t + poisson_time(abc_i[1], abc_i[2], rand(rng))
+        push!(pq, i => t_event)
+    end
+    return (; pq)
+end
+
 function poisson_time(a::Number, u::Number)
     !ispositive(a) && return Inf
     -log(u) / a

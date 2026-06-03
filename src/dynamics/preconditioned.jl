@@ -164,6 +164,14 @@ end
 
 subflow(pd::PreconditionedDynamics, free::BitVector) = PreconditionedDynamics(subpreconditioner(pd.metric, free), subflow(pd.dynamics, free))
 
+function initialize_cache(rng::Random.AbstractRNG, flow::PreconditionedDynamics, grad::GlobalGradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint)
+    return initialize_cache(rng, flow.dynamics, grad, alg, t, ξ)
+end
+
+function initialize_cache(::Random.AbstractRNG, ::PreconditionedDynamics{DensePreconditioner}, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
+    return (; z=similar(ξ.x))
+end
+
 # --- Dense-preconditioned ZigZag overrides ---
 # In canonical space z = L⁻¹x, the rate decomposes coordinate-wise.
 # Canonical gradient: ∇z = L' ∇x. Rate: Σ pos(v_i * ∇z_i).

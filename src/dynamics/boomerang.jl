@@ -8,6 +8,32 @@ struct Boomerang{U, T, S, LT} <: NonFactorizedDynamics
 end
 
 """
+    MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+
+Mutable version of `Boomerang` for adaptation during warmup.
+Same fields as `Boomerang` plus `eigen_cache` for dense/low-rank Γ (Phase 2+).
+Created via the `AdaptiveBoomerang` convenience constructors.
+"""
+mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+    Γ::U
+    μ::T
+    λref::S
+    const ρ::S
+    L::LT
+    ΣL::LT
+    eigen_cache::ET  # nothing for diagonal Γ; reserved for Phase 2+
+end
+
+"""
+    AnyBoomerang
+
+Union type matching both `Boomerang` and `MutableBoomerang`.
+All Boomerang dynamics methods dispatch on this type.
+"""
+const AnyBoomerang = Union{Boomerang, MutableBoomerang}
+
+
+"""
     LowRankPrecision{T<:Real}
 
 Represents a precision matrix Γ = Σ⁻¹ via a low-rank covariance decomposition:
@@ -186,30 +212,9 @@ end
 Boomerang(d::Integer) = Boomerang(I(d), zeros(d), 0.1)
 Boomerang(d::Integer, λref::Real) = Boomerang(I(d), zeros(d), λref)
 
-"""
-    MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
-
-Mutable version of `Boomerang` for adaptation during warmup.
-Same fields as `Boomerang` plus `eigen_cache` for dense/low-rank Γ (Phase 2+).
-Created via the `AdaptiveBoomerang` convenience constructors.
-"""
-mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
-    Γ::U
-    μ::T
-    λref::S
-    const ρ::S
-    L::LT
-    ΣL::LT
-    eigen_cache::ET  # nothing for diagonal Γ; reserved for Phase 2+
+function initialize_cache(::Random.AbstractRNG, ::AnyBoomerang, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
+    return (; z=similar(ξ.x))
 end
-
-"""
-    AnyBoomerang
-
-Union type matching both `Boomerang` and `MutableBoomerang`.
-All Boomerang dynamics methods dispatch on this type.
-"""
-const AnyBoomerang = Union{Boomerang, MutableBoomerang}
 
 function Base.copy(flow::MutableBoomerang)
     MutableBoomerang(
