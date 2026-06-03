@@ -134,6 +134,7 @@ end
 
         model = PDMPModel(d, grad, backend, true)
         @test model.vhv !== nothing
+        @test model.joint !== nothing
 
         x_test = [1.0, 2.0, 3.0]
         v_test = [0.5, -0.3, 0.8]
@@ -142,6 +143,10 @@ end
         expected = dot(w_test, v_test)
         actual = model.vhv(x_test, v_test, w_test)
         @test actual ≈ expected atol=1e-6
+
+        dphi, d2phi = model.joint(x_test, v_test)
+        @test dphi ≈ dot(v_test, x_test) atol=1e-6
+        @test d2phi ≈ dot(v_test, v_test) atol=1e-6
     end
 
     @testset "with_stats wraps vhv" begin
@@ -176,5 +181,20 @@ end
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0)
         @test length(trace) > 10
         @test all(isfinite, mean(trace))
+    end
+
+    @testset "GridThinning prefers JointProvider for FullGradient backend BPS" begin
+        d = 4
+        f_grad!(out, x) = (out .= x)
+        grad = FullGradient(f_grad!)
+        model = PDMPModel(d, grad, DI.AutoForwardDiff(), true)
+        flow = BouncyParticle(d, 1.0)
+        alg = GridThinningStrategy(; N=10, t_max=2.0)
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        rng = Random.Xoshiro(2026)
+        state, model_, alg_, cache, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model_.grad, cache)
+        provider = PDMPSamplers._make_grad_provider(grad_func, model_, flow, alg_)
+        @test provider isa PDMPSamplers.JointProvider
     end
 end

@@ -75,6 +75,9 @@ include("adaptation/anchor_bank.jl")
 include("adaptation/adaptation.jl")
 include("stopping_criteria.jl")
 
+include("sampler_cache.jl")
+include("support_boundary_runtime.jl")
+include("sampler_event_handling.jl")
 include("pdmp_sample.jl")
 include("chains.jl")
 

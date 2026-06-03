@@ -14,6 +14,7 @@ ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
 
 refresh_rate(::ZigZag) = 0.0
 initialize_velocity(rng::Random.AbstractRNG, ::ZigZag, d::Integer) = rand(rng, (-1., 1.), d)
+refresh_velocity!(::Random.AbstractRNG, ::SkeletonPoint, ::ZigZag) = nothing
 refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
 function reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
 

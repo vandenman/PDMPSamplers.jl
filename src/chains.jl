@@ -12,13 +12,25 @@ Base.length(chains::PDMPChains) = n_chains(chains)
 Base.eachindex(chains::PDMPChains) = eachindex(chains.traces)
 
 function Base.iterate(chains::PDMPChains)
-    n_chains(chains) == 0 && return nothing
-    return chains.traces[1], Val(:stats)
+    nchains = n_chains(chains)
+    iszero(nchains) && return nothing
+    isone(nchains) && return chains.traces[1], Val(:stats)
+    return (chains.traces[1], chains.stats[1]), 2
+end
+function Base.iterate(chains::PDMPChains, i::Int)
+    i > n_chains(chains) && return nothing
+    return (chains.traces[i], chains.stats[i]), i + 1
 end
 function Base.iterate(chains::PDMPChains, ::Val{:stats})
     return chains.stats[1], Val(:done)
 end
 Base.iterate(::PDMPChains, ::Val{:done}) = nothing
+
+function Base.only(chains::PDMPChains)
+    nchains = n_chains(chains)
+    isone(nchains) || throw(ArgumentError("only(chains) requires exactly one chain, got $nchains"))
+    return chains[1]
+end
 
 Statistics.mean(chains::PDMPChains; chain::Integer=1)    = Statistics.mean(chains.traces[chain])
 Statistics.var(chains::PDMPChains; chain::Integer=1)     = Statistics.var(chains.traces[chain])
@@ -106,7 +118,7 @@ end
 function Base.show(io::IO, chains::PDMPChains)
     nc = n_chains(chains)
     n_events = [length(chains.traces[i]) for i in 1:nc]
-    print(io, "PDMPChains with $nc chain$(nc == 1 ? "" : "s") ($(join(n_events, ", ")) events)")
+    print(io, "PDMPChains with $nc chain$(isone(nc) ? "" : "s") ($(join(n_events, ", ")) events)")
 
     total_lazy_low_tightness = sum(stat.lazy_fallback_low_tightness for stat in chains.stats)
     total_lazy_bound_violation = sum(stat.lazy_fallback_bound_violation for stat in chains.stats)
