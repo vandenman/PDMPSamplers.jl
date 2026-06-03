@@ -161,6 +161,12 @@ function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, state::AbstractPDMPS
 end
 Base.push!(trace::FactorizedTrace, event::FactorizedEvent)   = push!(trace.events, event)
 
+function Base.push!(trace::FactorizedTrace, state::AbstractPDMPState)
+    trace.initial_state.time < zero(trace.initial_state.time) || error("Cannot append a full state to an initialized FactorizedTrace without a changed coordinate index")
+    trace.initial_state = PDMPEvent(state)
+    return trace
+end
+
 function Base.push!(trace::FactorizedTrace, event::AbstractPDMPState, i::Integer)
     # TODO: this needs to figure out which index i changed... but it's much easier to have the caller provide it...
     if trace.initial_state.time >= zero(trace.initial_state.time)
@@ -185,7 +191,7 @@ function _to_next_event!(x::AbstractVector, θ::AbstractVector, event::Factorize
 end
 
 Base.length(trace::PDMPTrace)       = length(trace.times)
-Base.length(trace::FactorizedTrace) = length(trace.events) + 1
+Base.length(trace::FactorizedTrace) = trace.initial_state.time < zero(trace.initial_state.time) ? 0 : length(trace.events) + 1
 
 function Base.iterate(trace::PDMPTrace)
     isempty(trace.times) && return nothing
@@ -206,7 +212,7 @@ function Base.iterate(trace::PDMPTrace, (t, x, θ, k))
 end
 
 function Base.iterate(trace::FactorizedTrace)
-    isempty(trace.events) && return nothing
+    trace.initial_state.time < zero(trace.initial_state.time) && return nothing
     e1 = trace.initial_state
     t, x, θ = e1.time, copy(e1.position), copy(e1.velocity)
     return t => copy(x), (t, x, θ, 1)
@@ -223,13 +229,13 @@ end
 Base.collect(trace::AbstractPDMPTrace) = collect(t => x for (t, x) in trace)
 
 event_times(trace::PDMPTrace) = trace.times
-event_times(trace::FactorizedTrace) = [trace.initial_state.time; [e.time for e in trace.events]]
+event_times(trace::FactorizedTrace) = trace.initial_state.time < zero(trace.initial_state.time) ? typeof(trace.initial_state.time)[] : [trace.initial_state.time; [e.time for e in trace.events]]
 
 first_event_time(trace::PDMPTrace) = trace.times[1]
 first_event_time(trace::FactorizedTrace) = trace.initial_state.time
 
 last_event_time(trace::PDMPTrace) = trace.times[end]
-last_event_time(trace::FactorizedTrace) = trace.events[end].time
+last_event_time(trace::FactorizedTrace) = isempty(trace.events) ? trace.initial_state.time : trace.events[end].time
 
 # could be a separate file from here?
 # shouldn't T1 and T2 always be identical?

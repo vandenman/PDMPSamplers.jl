@@ -187,7 +187,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
 
         c_copy = copy(c)
         @test c !== c_copy
-        @test c.start_ns !== c_copy.start_ns
+        @test c.start_ns === c_copy.start_ns
         @test c.start_ns[] == c_copy.start_ns[]
     end
 
@@ -265,8 +265,8 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :warmup)
         PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :main)
 
-        @test length(PDMPSamplers.get_warmup_trace(trace_manager)) == 1
-        @test length(PDMPSamplers.get_main_trace(trace_manager)) == 1
+        @test isone(length(PDMPSamplers.get_warmup_trace(trace_manager)))
+        @test isone(length(PDMPSamplers.get_main_trace(trace_manager)))
 
         base_stop = AnyCriterion(EventCountCriterion(30), WallTimeCriterion(5.0))
         chains = pdmp_sample(

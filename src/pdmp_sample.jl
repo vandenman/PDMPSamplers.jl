@@ -96,7 +96,7 @@ function pdmp_sample(
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
     _validate_seed_spec(seed, n_chains)
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
-    if n_chains == 1
+    if isone(n_chains)
         rng = _make_initial_rng(seed, n_chains)
         trace, stats = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, model)
@@ -139,7 +139,7 @@ function pdmp_sample(
     _validate_seed_spec(seed, n_chains)
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
 
-    if n_chains == 1
+    if isone(n_chains)
         rng = _make_initial_rng(seed, n_chains)
         trace, stats = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, models[1])
@@ -180,6 +180,8 @@ _maybe_copy_criterion(c::StoppingCriterion) = copy(c)
 _copy_flow(flow::ContinuousDynamics) = flow
 _copy_flow(flow::MutableBoomerang) = copy(flow)
 _copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metric), _copy_flow(pd.dynamics))
+
+initialize_flow_state!(::AbstractPDMPState, ::ContinuousDynamics) = nothing
 
 function _copy_model(model::PDMPModel)
     grad_new = copy(model.grad)
@@ -881,6 +883,7 @@ function _run_phase!(
     boundary_policy::BoundaryPolicy
 ) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
+    phase === :main && record_event!(trace_manager, state, flow, nothing, phase)
 
     _maybe_simplify_counter = 0
 
@@ -1069,6 +1072,7 @@ function initialize_state(rng::Random.AbstractRNG, flow::ContinuousDynamics, mod
     t = t₀
     stats = StatisticCounter()
     state = alg isa Sticky ? StickyPDMPState(t, ξ) : PDMPState(t, ξ)
+    initialize_flow_state!(state, flow)
     cache = add_gradient_to_cache(initialize_cache(rng, flow, model.grad, alg, t, ξ), ξ)
     alg_ = _to_internal(alg, rng, flow, model, state, cache, stats)
     model_ = with_stats(model, stats)

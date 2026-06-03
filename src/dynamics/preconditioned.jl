@@ -104,6 +104,11 @@ function transform_velocity!(v, M::DensePreconditioner)
     mul!(v, M.L, M.v_canonical)
 end
 
+function _sync_canonical_velocity!(ξ::SkeletonPoint, pd::PreconditionedDynamics{DensePreconditioner, <:ZigZag})
+    mul!(pd.metric.v_canonical, pd.metric.Linv, ξ.θ)
+    return ξ
+end
+
 
 # 1. Trajectory Movement (Kinematics are invariant)
 move_forward_time!(ξ::SkeletonPoint, τ, pd::PreconditionedDynamics) = move_forward_time!(ξ, τ, pd.dynamics)
@@ -144,6 +149,17 @@ function refresh_velocity!(rng::Random.AbstractRNG, ξ::SkeletonPoint, pd::Preco
     refresh_velocity!(rng, ξ, pd.dynamics)
     # 2. Apply the preconditioner again
     transform_velocity!(ξ.θ, pd.metric)
+end
+
+refresh_velocity!(::Random.AbstractRNG, ::SkeletonPoint, ::PreconditionedDynamics{<:AbstractPreconditioner, <:ZigZag}) = nothing
+function refresh_velocity!(::Random.AbstractRNG, ξ::SkeletonPoint, pd::PreconditionedDynamics{DensePreconditioner, <:ZigZag})
+    _sync_canonical_velocity!(ξ, pd)
+    return nothing
+end
+
+function initialize_flow_state!(state::AbstractPDMPState, pd::PreconditionedDynamics{DensePreconditioner, <:ZigZag})
+    _sync_canonical_velocity!(state.ξ, pd)
+    return nothing
 end
 
 subflow(pd::PreconditionedDynamics, free::BitVector) = PreconditionedDynamics(subpreconditioner(pd.metric, free), subflow(pd.dynamics, free))

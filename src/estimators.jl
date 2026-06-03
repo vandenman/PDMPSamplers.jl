@@ -88,6 +88,7 @@ function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
 end
 
 function cdf(trace::FactorizedTrace, q::Real; coordinate::Integer)
+    isempty(trace.events) && error("Cannot compute CDF on a trace with fewer than 2 events")
     j = coordinate
     initial = trace.initial_state
     xj = Float64(initial.position[j])
@@ -131,19 +132,29 @@ function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
 end
 
 function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
-    lo, hi = Inf, -Inf
     base = _underlying_flow(trace.flow)
-    is_boom = base isa AnyBoomerang
+    base isa AnyBoomerang && return _trace_coordinate_bounds(PDMPTrace(trace), j)
 
-    for event in trace.events
-        xj = event.position[j]
-        lo = min(lo, xj)
-        hi = max(hi, xj)
-        if is_boom
-            R = hypot(xj - base.μ[j], event.velocity[j])
-            lo = min(lo, base.μ[j] - R)
-            hi = max(hi, base.μ[j] + R)
+    initial = trace.initial_state
+    xj = Float64(initial.position[j])
+    θj = Float64(initial.velocity[j])
+    t_prev = Float64(initial.time)
+    lo, hi = xj, xj
+
+    @inbounds for event in trace.events
+        τ = event.time - t_prev
+        if τ > 0
+            xj += θj * τ
+            lo = min(lo, xj)
+            hi = max(hi, xj)
         end
+        if event.index == j
+            xj = Float64(event.position)
+            θj = Float64(event.velocity)
+            lo = min(lo, xj)
+            hi = max(hi, xj)
+        end
+        t_prev = event.time
     end
     return lo, hi
 end
@@ -209,6 +220,7 @@ function _collect_sweep_events(trace::PDMPTrace, j::Integer)
 end
 
 function _collect_sweep_events(trace::FactorizedTrace, j::Integer)
+    isempty(trace.events) && error("Cannot compute quantile on a trace with fewer than 2 events")
     initial = trace.initial_state
     xj = Float64(initial.position[j])
     θj = Float64(initial.velocity[j])
