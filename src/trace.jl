@@ -73,17 +73,49 @@ mutable struct FactorizedTrace{T<:FactorizedEvent, U<:ContinuousDynamics, V<:PDM
     const events::Vector{T}
     const flow::U
     initial_state::V
+    last_state::V
+    last_state_valid::Bool
+    bounds_cache::Dict{Int, Tuple{Float64, Float64}}
 end
 
 function FactorizedTrace(state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(state)
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
-    FactorizedTrace(events, flow, initial_state)
+    FactorizedTrace(events, flow, initial_state, initial_state, true, Dict{Int, Tuple{Float64, Float64}}())
 end
 function make_empty_trace(::Type{<:FactorizedTrace}, state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(-one(state.t[]), state.ξ.x, state.ξ.θ)
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
-    FactorizedTrace(events, flow, initial_state)
+    FactorizedTrace(events, flow, initial_state, initial_state, false, Dict{Int, Tuple{Float64, Float64}}())
+end
+
+function _invalidate_factorized_caches!(trace::FactorizedTrace)
+    empty!(trace.bounds_cache)
+    return trace
+end
+
+function _replay_last_state(trace::FactorizedTrace)
+    e1 = trace.initial_state
+    x, θ = copy(e1.position), copy(e1.velocity)
+    t = e1.time
+    for event in trace.events
+        Δt = event.time - t
+        move_forward_time!(SkeletonPoint(x, θ), Δt, trace.flow)
+        _to_next_event!(x, θ, event)
+        t = event.time
+    end
+    return PDMPEvent(t, x, θ)
+end
+
+function _advance_last_state(trace::FactorizedTrace, event::FactorizedEvent)
+    trace.last_state_valid || return trace
+    e = trace.last_state
+    x, θ = copy(e.position), copy(e.velocity)
+    Δt = event.time - e.time
+    move_forward_time!(SkeletonPoint(x, θ), Δt, trace.flow)
+    _to_next_event!(x, θ, event)
+    trace.last_state = PDMPEvent(event.time, x, θ)
+    return trace
 end
 
 # TODO: use this to test that PDMPTrace and FactorizedTrace give the same results!
@@ -134,17 +166,11 @@ function Base.last(trace::PDMPTrace)
     PDMPEvent(trace.times[n], trace.positions[:, n], trace.velocities[:, n])
 end
 function Base.last(trace::FactorizedTrace)
-    # Reconstruct the full last state by replaying all events
-    e1 = trace.initial_state
-    x, θ = copy(e1.position), copy(e1.velocity)
-    t = e1.time
-    for event in trace.events
-        Δt = event.time - t
-        move_forward_time!(SkeletonPoint(x, θ), Δt, trace.flow)
-        _to_next_event!(x, θ, event)
-        t = event.time
+    if !trace.last_state_valid
+        trace.last_state = _replay_last_state(trace)
+        trace.last_state_valid = true
     end
-    PDMPEvent(t, x, θ)
+    trace.last_state
 end
 
 function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, event::PDMPEvent) where {T,U}
@@ -159,11 +185,20 @@ function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, state::AbstractPDMPS
     append!(trace.velocities, state.ξ.θ)
     trace
 end
-Base.push!(trace::FactorizedTrace, event::FactorizedEvent)   = push!(trace.events, event)
+function Base.push!(trace::FactorizedTrace, event::FactorizedEvent)
+    push!(trace.events, event)
+    _advance_last_state(trace, event)
+    _invalidate_factorized_caches!(trace)
+    return trace
+end
 
 function Base.push!(trace::FactorizedTrace, state::AbstractPDMPState)
     trace.initial_state.time < zero(trace.initial_state.time) || error("Cannot append a full state to an initialized FactorizedTrace without a changed coordinate index")
-    trace.initial_state = PDMPEvent(state)
+    event = PDMPEvent(state)
+    trace.initial_state = event
+    trace.last_state = event
+    trace.last_state_valid = true
+    _invalidate_factorized_caches!(trace)
     return trace
 end
 
@@ -171,10 +206,16 @@ function Base.push!(trace::FactorizedTrace, event::AbstractPDMPState, i::Integer
     # TODO: this needs to figure out which index i changed... but it's much easier to have the caller provide it...
     if trace.initial_state.time >= zero(trace.initial_state.time)
         push!(trace.events, FactorizedEvent(i, event.t[], event.ξ.x[i], event.ξ.θ[i]))
+        trace.last_state = PDMPEvent(event)
+        trace.last_state_valid = true
     else
         # @info "setting initial event to " event
-        trace.initial_state = PDMPEvent(event)
+        e = PDMPEvent(event)
+        trace.initial_state = e
+        trace.last_state = e
+        trace.last_state_valid = true
     end
+    _invalidate_factorized_caches!(trace)
     # avoid returning a type unstable value
     return trace
 end

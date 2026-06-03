@@ -104,7 +104,13 @@ function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADTy
         nothing
     end
 
-    return PDMPModel(d, grad, hvp_f, vhv_f, true, true)
+    joint_f = if needs_hvp
+        _make_joint_from_grad(grad.f, d, backend)
+    else
+        nothing
+    end
+
+    return PDMPModel(d, grad, hvp_f, vhv_f, true, true, joint_f)
 end
 
 """
@@ -301,4 +307,36 @@ end
 
 function _copy_callable(c::_JointCallable)
     _make_joint_callable(c.logp, length(c.x_buf), c.backend)
+end
+
+struct _JointFromGradCallable{G,F,P,B<:ADTypes.AbstractADType}
+    grad_f::G
+    phi::F
+    prep::P
+    backend::B
+    x_buf::Vector{Float64}
+    v_buf::Vector{Float64}
+end
+
+function _make_joint_from_grad(grad_f!, d::Integer, backend::ADTypes.AbstractADType)
+    x_buf = zeros(d)
+    v_buf = zeros(d)
+    phi = t -> begin
+        xt = x_buf .+ t .* v_buf
+        buf = similar(xt)
+        grad_f!(buf, xt)
+        dot(v_buf, buf)
+    end
+    prep = DI.prepare_derivative(phi, backend, zero(Float64))
+    return _JointFromGradCallable(grad_f!, phi, prep, backend, x_buf, v_buf)
+end
+
+function (c::_JointFromGradCallable)(x::AbstractVector, v::AbstractVector)
+    copyto!(c.x_buf, x)
+    copyto!(c.v_buf, v)
+    return DI.value_and_derivative(c.phi, c.prep, c.backend, zero(eltype(x)))
+end
+
+function _copy_callable(c::_JointFromGradCallable)
+    _make_joint_from_grad(c.grad_f, length(c.x_buf), c.backend)
 end

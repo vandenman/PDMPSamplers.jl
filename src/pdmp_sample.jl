@@ -1156,7 +1156,7 @@ function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
             end
             needs_saving = true
-            (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+            (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
         else
 
             if meta isa GradientMeta && length(meta.∇ϕx) == length(state.ξ.x)
@@ -1170,7 +1170,7 @@ function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
                 needs_saving = true
 
-                (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+                (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
             else
                 stats.last_rejected = true
             end
@@ -1182,7 +1182,7 @@ function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_
         needs_saving = true
         stats.refreshment_events += 1
 
-        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
 
@@ -1197,7 +1197,7 @@ function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_
 
     elseif event_type == :horizon_hit
 
-        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
         stats.last_rejected = true
     end
 
@@ -1289,7 +1289,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
             end
             needs_saving = true
-            (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+            (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
             # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
         else
 
@@ -1314,7 +1314,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
                 # @show "after reflect", state
                 needs_saving = true
 
-                (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+                (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
                 # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
             else
                 # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
@@ -1337,7 +1337,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
 
@@ -1355,7 +1355,7 @@ function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::Glo
         # alg isa StickyLoopState && update_all_stick_times!(alg, state, flow)
         # should be only the unfreeze times?
         # alg isa StickyLoopState && update_all_freeze_times!(alg, state, flow)
-        (alg isa StickyLoopState && state isa StickyPDMPState) && update_all_stick_times!(rng, alg, state, flow)
+        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
         # for now only when horizon is reached.
         stats.last_rejected = true
     end

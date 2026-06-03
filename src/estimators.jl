@@ -132,8 +132,13 @@ function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
 end
 
 function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
+    haskey(trace.bounds_cache, j) && return trace.bounds_cache[j]
     base = _underlying_flow(trace.flow)
-    base isa AnyBoomerang && return _trace_coordinate_bounds(PDMPTrace(trace), j)
+    if base isa AnyBoomerang
+        bounds = _trace_coordinate_bounds(PDMPTrace(trace), j)
+        trace.bounds_cache[j] = bounds
+        return bounds
+    end
 
     initial = trace.initial_state
     xj = Float64(initial.position[j])
@@ -156,7 +161,9 @@ function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
         end
         t_prev = event.time
     end
-    return lo, hi
+    bounds = (lo, hi)
+    trace.bounds_cache[j] = bounds
+    return bounds
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -219,7 +226,7 @@ function _collect_sweep_events(trace::PDMPTrace, j::Integer)
     return total_time, density_changes, point_masses
 end
 
-function _collect_sweep_events(trace::FactorizedTrace, j::Integer)
+function _compute_sweep_events(trace::FactorizedTrace, j::Integer)
     isempty(trace.events) && error("Cannot compute quantile on a trace with fewer than 2 events")
     initial = trace.initial_state
     xj = Float64(initial.position[j])
@@ -254,6 +261,8 @@ function _collect_sweep_events(trace::FactorizedTrace, j::Integer)
     total_time = trace.events[end].time - initial.time
     return total_time, density_changes, point_masses
 end
+
+_collect_sweep_events(trace::FactorizedTrace, j::Integer) = _compute_sweep_events(trace, j)
 
 """
     _quantile_linear_sweep(total_time, density_changes, point_masses, sorted_targets)
