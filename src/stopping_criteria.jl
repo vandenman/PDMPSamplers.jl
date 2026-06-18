@@ -404,7 +404,7 @@ function Base.copy(c::WallTimeCriterion)
 end
 
 function Base.copy(c::TotalWallTimeCriterion)
-    return TotalWallTimeCriterion(c.max_seconds, Ref(c.start_ns[]))
+    return TotalWallTimeCriterion(c.max_seconds, c.start_ns)
 end
 
 function Base.copy(c::ESSCriterion)

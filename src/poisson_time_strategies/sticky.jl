@@ -42,6 +42,8 @@ struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,Abs
     κ::U
     can_stick::BitVector
     sticky_times::Vector{Float64}  # Absolute times of next freeze/unfreeze event
+    stickable_indices::Vector{Int}
+    sticky_pq::PriorityQueue{Int,Float64}
     empty_∇ϕx::V
 end
 
@@ -52,7 +54,9 @@ accept_reflection_event(alg::StickyLoopState, args...) = accept_reflection_event
 function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
 
     d = length(state.ξ)
-    sticky_times = Vector{Float64}(undef, d)
+    sticky_times = fill(Inf, d)
+    stickable_indices = findall(strat.can_stick)
+    sticky_pq = PriorityQueue{Int,Float64}()
 
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
 
@@ -66,20 +70,19 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     #         end
     #     end
     # end
-    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, similar(state.ξ.x, 0))
+    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, stickable_indices, sticky_pq, similar(state.ξ.x, 0))
     update_all_stick_times!(rng, alg, state, flow)
-
-    # do this once
-    for i in eachindex(alg.sticky_times)
-        if !alg.can_stick[i]
-            alg.sticky_times[i] = Inf
-        end
-    end
     # @show alg.sticky_times
     @assert !any(isnan, alg.sticky_times) "sticky_times contains NaN: $(alg.sticky_times)"
 
     return alg
 
+end
+
+function _set_sticky_time!(alg::StickyLoopState, i::Int, t::Float64)
+    alg.sticky_times[i] = t
+    alg.sticky_pq[i] = t
+    return t
 end
 
 
@@ -155,46 +158,82 @@ get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:RateFunction}, i, a
 function update_all_stick_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
 
     t = state.t[]
-    # TODO: instead of 1:d we should precompute a vector of things that may stick and loop over that
-    # then we don't need to check if alg.can_stick[i]
-    for i in eachindex(alg.can_stick)
-        if alg.can_stick[i]
-            if state.free[i]
-                alg.sticky_times[i] = t + freezing_time(state.ξ, flow, i)
-                # @show "freezing_time", alg.sticky_times[i]
-            else # stuck/ frozen
-                alg.sticky_times[i] = t + unfreeze_time(rng, alg, state, i)
-                # @assert !isinf(alg.sticky_times[i]) "sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])"
-
-                # @show "unsticking_time", alg.sticky_times[i]
-            end
-            @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
+    for i in alg.stickable_indices
+        if state.free[i]
+            _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
+        else # stuck/ frozen
+            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
         end
+        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
     end
 end
 
 function update_all_freeze_times!(alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
-    for i in eachindex(alg.can_stick)
-        if alg.can_stick[i]
-            if state.free[i]
-                alg.sticky_times[i] = t + freezing_time(state.ξ, flow, i)
-                @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
-            end
+    for i in alg.stickable_indices
+        if state.free[i]
+            _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
+            @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
         end
     end
 end
 
 function update_all_unfreeze_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
-    for i in eachindex(alg.can_stick)
-        if alg.can_stick[i]
-            if !state.free[i]
-                alg.sticky_times[i] = t + unfreeze_time(rng, alg, state, i)
-                @assert !isinf(alg.sticky_times[i]) "sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])"
-            end
+    for i in alg.stickable_indices
+        if !state.free[i]
+            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
+            @assert !isinf(alg.sticky_times[i]) "sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])"
         end
     end
+end
+
+_sticky_coordinate_index(meta::CoordinateMeta) = meta.i
+_sticky_coordinate_index(i::Integer) = Int(i)
+
+function _update_sticky_time_at_index!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, i::Int)
+    if !alg.can_stick[i]
+        alg.sticky_times[i] = Inf
+        haskey(alg.sticky_pq, i) && delete!(alg.sticky_pq, i)
+        return nothing
+    end
+    t = state.t[]
+    if state.free[i]
+        _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
+        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
+    else
+        _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
+        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN after unfreezing"
+    end
+    return nothing
+end
+
+function _update_sticky_schedule_after_reflect!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, meta)
+    update_all_stick_times!(rng, alg, state, flow)
+    return nothing
+end
+
+function _update_sticky_schedule_after_reflect!(rng::Random.AbstractRNG, alg::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, state::StickyPDMPState, flow::ZigZag, meta::Union{CoordinateMeta,Integer})
+    _update_sticky_time_at_index!(rng, alg, state, flow, _sticky_coordinate_index(meta))
+    return nothing
+end
+
+function _update_sticky_schedule_after_refresh!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+    update_all_stick_times!(rng, alg, state, flow)
+    return nothing
+end
+
+function _update_sticky_schedule_after_refresh!(::Random.AbstractRNG, ::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, ::StickyPDMPState, ::ZigZag)
+    return nothing
+end
+
+function _update_sticky_schedule_after_horizon_hit!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+    update_all_stick_times!(rng, alg, state, flow)
+    return nothing
+end
+
+function _update_sticky_schedule_after_horizon_hit!(::Random.AbstractRNG, ::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, ::StickyPDMPState, ::ZigZag)
+    return nothing
 end
 
 function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::ContinuousDynamics, alg::StickyLoopState, i::Int)
@@ -218,7 +257,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
         # sticky_times[i] = t - log(rand()) / (κᵢ * abs(θf[i])) # sticky time
 
         if alg.κ isa AbstractVector
-            sticky_times[i] = t + unfreeze_time(rng, alg, state, i)
+            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
             @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN after unfreezing"
         else
             #= TODO: not sure about this design... there are a few cases:
@@ -259,7 +298,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
         state.free[i] = true # mark as not stuck
 
         # update_all_stick_times!(alg, state, flow)
-        sticky_times[i] = t + freezing_time(ξ, flow, i)
+        _set_sticky_time!(alg, i, t + freezing_time(ξ, flow, i))
         @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(sticky_times[i])) after freezing (θ[i] = $(ξ.θ[i]))"
         if !(alg.κ isa AbstractVector)
             update_all_stick_times!(rng, alg, state, flow)
@@ -274,10 +313,14 @@ end
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
 
     t = state.t[]
-    sticky_time = alg.sticky_times
     inner_alg_state = alg.inner_alg_state
 
-    tᶠ, i = findmin(sticky_time) # could be implemented with a queue or a MinHeap
+    if isempty(alg.sticky_pq)
+        i = 0
+        tᶠ = Inf
+    else
+        i, tᶠ = first(alg.sticky_pq)
+    end
     # non_sticky_state = PDMPState(state.t, state.ξ) # or substate, but that messes with dimensionality
 
 

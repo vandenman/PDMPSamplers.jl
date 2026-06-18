@@ -433,15 +433,25 @@ struct FiniteDiffHVP{G}
 end
 FiniteDiffHVP(grad, buf::Vector{Float64}) = FiniteDiffHVP(grad, buf, similar(buf), similar(buf))
 
+function _fd_step_size(xt::AbstractVector, vt::AbstractVector)
+    vnorm = norm(vt)
+    iszero(vnorm) && return vnorm
+    return oftype(vnorm, 1e-5) * max(one(vnorm), norm(xt) / vnorm)
+end
+
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP, add_rate::Bool=true)
     xt, vt = state.ξ.x, state.ξ.θ
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
-    h = 1e-5 * max(1.0, norm(xt) / norm(vt))
-    fd.buf .= xt .+ h .* vt
-    ∇U_shifted = fd.grad(fd.buf)
-    fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
+    h = _fd_step_size(xt, vt)
+    if iszero(h)
+        fill!(fd.hvp_buf, 0.0)
+    else
+        fd.buf .= xt .+ h .* vt
+        ∇U_shifted = fd.grad(fd.buf)
+        fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
+    end
 
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
@@ -456,10 +466,14 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     copyto!(fd.grad_buf, cached_gradient)
 
     xt, vt = state.ξ.x, state.ξ.θ
-    h = 1e-5 * max(1.0, norm(xt) / norm(vt))
-    fd.buf .= xt .+ h .* vt
-    ∇U_shifted = fd.grad(fd.buf)
-    fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
+    h = _fd_step_size(xt, vt)
+    if iszero(h)
+        fill!(fd.hvp_buf, 0.0)
+    else
+        fd.buf .= xt .+ h .* vt
+        ∇U_shifted = fd.grad(fd.buf)
+        fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
+    end
 
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
@@ -479,7 +493,8 @@ FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf
 FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), w_buf)
 
 function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
-    h = 1e-5 * max(1.0, norm(xt) / norm(vt))
+    h = _fd_step_size(xt, vt)
+    iszero(h) && return h
     fd.buf .= xt .+ h .* vt
     ∇U_shifted = fd.grad(fd.buf)
     return (dot(wt, ∇U_shifted) - dot(wt, fd.grad_buf)) / h

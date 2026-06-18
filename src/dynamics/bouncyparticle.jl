@@ -45,6 +45,10 @@ initialize_velocity(rng::Random.AbstractRNG, ::BouncyParticle, d::Integer) = ran
 refresh_velocity!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ::BouncyParticle) = randn!(rng, ξ.θ)
 refresh_rate(flow::BouncyParticle) = flow.λref
 
+function initialize_cache(::Random.AbstractRNG, ::BouncyParticle, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
+    return (; z=similar(ξ.x))
+end
+
 
 # BPS reflection: bounce against the gradient hyperplane
 reflect!(::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::BouncyParticle, cache) = reflect!(ξ, ∇ϕ, flow, cache)
