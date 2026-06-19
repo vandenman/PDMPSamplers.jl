@@ -110,7 +110,7 @@ function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGr
     # i₀, t_event = dequeue_pair!(pq)
     i₀, t_event = Base.popfirst!(pq)
     τ = t_event - state.t[]
-    @assert ispositive(τ) "$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event"
+    ispositive(τ) || error("$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event")
     return τ, nothing, CoordinateMeta(i₀)
 end
 

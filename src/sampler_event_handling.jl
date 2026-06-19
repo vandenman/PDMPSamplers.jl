@@ -3,7 +3,7 @@ function _check_sticky_times!(alg::PoissonTimeStrategy, state::AbstractPDMPState
 end
 
 function _check_sticky_times!(alg::StickyLoopState, state::AbstractPDMPState)
-    @assert all(>=(state.t[]), alg.sticky_times) "some sticky_times are negative!"
+    all(>=(state.t[]), alg.sticky_times) || error("some sticky_times are negative!")
     return nothing
 end
 

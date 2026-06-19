@@ -73,7 +73,7 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, stickable_indices, sticky_pq, similar(state.ξ.x, 0))
     update_all_stick_times!(rng, alg, state, flow)
     # @show alg.sticky_times
-    @assert !any(isnan, alg.sticky_times) "sticky_times contains NaN: $(alg.sticky_times)"
+    any(isnan, alg.sticky_times) && error("sticky_times contains NaN: $(alg.sticky_times)")
 
     return alg
 
@@ -164,7 +164,7 @@ function update_all_stick_times!(rng::Random.AbstractRNG, alg::StickyLoopState, 
         else # stuck/ frozen
             _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
         end
-        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
     end
 end
 
@@ -173,7 +173,7 @@ function update_all_freeze_times!(alg::StickyLoopState, state::StickyPDMPState, 
     for i in alg.stickable_indices
         if state.free[i]
             _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-            @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
+            isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
         end
     end
 end
@@ -183,7 +183,7 @@ function update_all_unfreeze_times!(rng::Random.AbstractRNG, alg::StickyLoopStat
     for i in alg.stickable_indices
         if !state.free[i]
             _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
-            @assert !isinf(alg.sticky_times[i]) "sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])"
+            isinf(alg.sticky_times[i]) && error("sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])")
         end
     end
 end
@@ -200,10 +200,10 @@ function _update_sticky_time_at_index!(rng::Random.AbstractRNG, alg::StickyLoopS
     t = state.t[]
     if state.free[i]
         _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))"
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
     else
         _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
-        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN after unfreezing"
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN after unfreezing")
     end
     return nothing
 end
@@ -246,7 +246,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
     if state.free[i] # if free -> stuck
 
         # deterministic process should have move x[i] to exactly zero, but perhaps this needs a tolerance
-        @assert abs(ξ.x[i]) < tol "freezing but not frozen: x[i] = $(ξ.x[i]) !≈ 0 at $(sticky_times[i]) with tol = $(tol)"
+        abs(ξ.x[i]) < tol || error("freezing but not frozen: x[i] = $(ξ.x[i]) !≈ 0 at $(sticky_times[i]) with tol = $(tol)")
 
         θf[i] = ξ.θ[i] # store speed
         ξ.θ[i] = 0.0 # freeze speed
@@ -291,7 +291,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
 
         # deterministic process should have move x[i] to exactly zero and left it there
         # velocity should be at exactly zero at this point.
-        @assert abs(ξ.x[i]) < tol && iszero(ξ.θ[i]) "unfreezing but not frozen: x[i] = $(ξ.x[i]) ≉ 0 or θ[i] = $(ξ.θ[i]) ≉ 0 at $(sticky_times[i]) with tol = $(tol)"# isfrozen
+        (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) || error("unfreezing but not frozen: x[i] = $(ξ.x[i]) ≉ 0 or θ[i] = $(ξ.θ[i]) ≉ 0 at $(sticky_times[i]) with tol = $(tol)")# isfrozen
 
         ξ.θ[i] = θf[i] # restore speed
         θf[i] = zero(eltype(θf[i])) # perhaps not necessary?
@@ -299,7 +299,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
 
         # update_all_stick_times!(alg, state, flow)
         _set_sticky_time!(alg, i, t + freezing_time(ξ, flow, i))
-        @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN ($(sticky_times[i])) after freezing (θ[i] = $(ξ.θ[i]))"
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(sticky_times[i])) after freezing (θ[i] = $(ξ.θ[i]))")
         if !(alg.κ isa AbstractVector)
             update_all_stick_times!(rng, alg, state, flow)
             # update_all_unfreeze_times!(alg, state, flow)

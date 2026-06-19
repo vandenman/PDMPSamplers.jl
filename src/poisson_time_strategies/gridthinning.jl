@@ -196,7 +196,7 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     d_vals = pcb.d_vals
 
     state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
-    @assert iszero(t_grid[1])
+    iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
     if isnan(cached_y0)
         y_vals[1], d_vals[1] = _get_rate_and_deriv_or_throw(
             probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
@@ -276,7 +276,7 @@ end
 function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, flow::ContinuousDynamics, ∇U!::Function,
     use_hvp::Bool=true)
 
-    @assert use_hvp "Only HVP mode is supported"
+    use_hvp || error("Only HVP mode is supported")
 
     g = similar(state.ξ.x)
     out = similar(g)
@@ -854,9 +854,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
     pcb = alg.pcb
     state_ = alg.state_cache
-    state2_ = alg.state_cache2
     copyto!(state_, state)
-    copyto!(state2_, state)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
@@ -906,11 +904,10 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         end
 
         # Move from original position to proposed time for acceptance test
-        state_.t[] = state2_.t[]
-        copyto!(state_.ξ, state2_.ξ)
+        copyto!(state_, state)
         move_forward_time!(state_, τ_reflection, flow)
         ∇ϕx = _compute_grid_gradient_or_throw!(
-            state_, state2_, flow, model, cache, 0.0, τ_reflection, probe_failure_handler)
+            state_, state, flow, model, cache, 0.0, τ_reflection, probe_failure_handler)
 
         l_reflection = λ(state_.ξ, ∇ϕx, flow)
 
@@ -939,7 +936,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             _shrink_t_max_on_rejection!(alg, pcb, cumulative_exp, model.grad)
 
             effective_horizon, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
-            construct_upper_bound_grad_and_hess!(pcb, state2_, flow, grad_and_hvp, false;
+            construct_upper_bound_grad_and_hess!(pcb, state, flow, grad_and_hvp, false;
                 early_stop_threshold=alg.early_stop_threshold, stats, state_cache=state_,
                 max_time=effective_horizon, probe_failure_handler)
             cumulative_exp = 0.0
@@ -954,7 +951,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         return τ_refresh, :refresh, default_return
     end
 
-    _throw_grid_safety_limit_error(state2_, flow, model;
+    _throw_grid_safety_limit_error(state, flow, model;
         t_invalid=effective_horizon, message="Safety limit reached")
 end
 
@@ -1030,7 +1027,6 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     state_ = alg.state_cache
     state2_ = alg.state_cache2
     copyto!(state_, state)
-    copyto!(state2_, state)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     default_return = GradientMeta(alg.empty_∇ϕx)

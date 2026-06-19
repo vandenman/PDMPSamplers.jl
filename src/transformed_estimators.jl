@@ -17,9 +17,7 @@ function _transformed_mean_segment(
     transform::ParameterTransform, base::ContinuousDynamics,
     x0j::Float64, θ0j::Float64, dt::Float64, μj::Float64
 )
-    _gl5_integrate(dt) do s
-        transform(_interpolate_coord(base, x0j, θ0j, s, μj))
-    end
+    _gl5_integrate_eval(transform, base, x0j, θ0j, dt, μj)
 end
 
 # Identity × Linear: closed-form
@@ -85,9 +83,7 @@ function _transformed_var_segment(
     transform::ParameterTransform, base::ContinuousDynamics,
     x0j::Float64, θ0j::Float64, dt::Float64, μj::Float64, μfj::Float64
 )
-    _gl5_integrate(dt) do s
-        (transform(_interpolate_coord(base, x0j, θ0j, s, μj)) - μfj)^2
-    end
+    _gl5_integrate_var_eval(transform, base, x0j, θ0j, dt, μj, μfj)
 end
 
 # Identity × Linear: closed-form

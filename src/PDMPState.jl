@@ -88,20 +88,20 @@ move_forward_time(state::AbstractPDMPState, τ::Real, flow::ContinuousDynamics) 
 
 function validate_state(state::PDMPState, flow::Union{Nothing, ContinuousDynamics}, msg::AbstractString = "")
     ξ = state.ξ
-    @assert all(isfinite, ξ.x) "state.ξ.x contains non-finite values $(msg): $(ξ.x)"
-    @assert all(isfinite, ξ.θ) "state.ξ.θ contains non-finite values $(msg): $(ξ.θ)"
+    all(isfinite, ξ.x) || error("state.ξ.x contains non-finite values $(msg): $(ξ.x)")
+    all(isfinite, ξ.θ) || error("state.ξ.θ contains non-finite values $(msg): $(ξ.θ)")
 end
 
 function validate_state(state::StickyPDMPState, flow::Union{Nothing, ContinuousDynamics}, msg::AbstractString = "")
     ξ = state.ξ
-    @assert all(isfinite, ξ.x) "state.ξ.x contains non-finite values $(msg): $(ξ.x)"
-    @assert all(isfinite, ξ.θ) "state.ξ.θ contains non-finite values $(msg): $(ξ.θ)"
+    all(isfinite, ξ.x) || error("state.ξ.x contains non-finite values $(msg): $(ξ.x)")
+    all(isfinite, ξ.θ) || error("state.ξ.θ contains non-finite values $(msg): $(ξ.θ)")
 
     free = state.free
     for i in eachindex(free)
         if !free[i]
-            @assert iszero(ξ.x[i]) "state.ξ.x[$i] is frozen but not zero! contains non-finite values $(msg): $(ξ.x)"
-            @assert iszero(ξ.θ[i]) "state.ξ.θ[$i] is frozen but not zero! contains non-finite values $(msg): $(ξ.θ)"
+            iszero(ξ.x[i]) || error("state.ξ.x[$i] is frozen but not zero! $(msg): $(ξ.x)")
+            iszero(ξ.θ[i]) || error("state.ξ.θ[$i] is frozen but not zero! $(msg): $(ξ.θ)")
         end
     end
 end

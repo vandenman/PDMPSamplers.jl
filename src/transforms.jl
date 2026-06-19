@@ -73,7 +73,9 @@ is_increasing(::DoubleBoundTransform) = true
 # ──────────────────────────────────────────────────────────────────────────────
 # 5-point Gauss-Legendre quadrature on [-1, 1]
 # ──────────────────────────────────────────────────────────────────────────────
-
+# TODO: generate a larger number once with FastGaussQuadrature.jl
+# furthermore, use the fact that this is symmetric so we can get away
+# with just strong half and then adding a minus sign.
 const _GL5_NODES = (
     -0.9061798459386640,
     -0.5384693101056831,
@@ -94,12 +96,46 @@ const _GL5_WEIGHTS = (
     _gl5_integrate(f, dt::Float64)
 
 Integrate `f(s)` over `[0, dt]` using 5-point Gauss-Legendre quadrature.
+Prefer `_gl5_integrate_eval` for hot paths to avoid closure allocation.
 """
 function _gl5_integrate(f, dt::Float64)
     half = dt / 2
     s = 0.0
     @inbounds for k in 1:5
         s += _GL5_WEIGHTS[k] * f(half + half * _GL5_NODES[k])
+    end
+    return s * half
+end
+
+"""
+    _gl5_integrate_eval(transform, base, x0j, θ0j, dt, μj)
+
+Non-allocating 5-point GL quadrature for transformed mean segments.
+Evaluates `transform(interpolate(base, x0j, θ0j, s, μj))` at each node directly.
+"""
+function _gl5_integrate_eval(transform::ParameterTransform, base::ContinuousDynamics,
+                              x0j::Float64, θ0j::Float64, dt::Float64, μj::Float64)
+    half = dt / 2
+    s = 0.0
+    @inbounds for k in 1:5
+        node_t = half + half * _GL5_NODES[k]
+        s += _GL5_WEIGHTS[k] * transform(_interpolate_coord(base, x0j, θ0j, node_t, μj))
+    end
+    return s * half
+end
+
+"""
+    _gl5_integrate_var_eval(transform, base, x0j, θ0j, dt, μj, μfj)
+
+Non-allocating 5-point GL quadrature for transformed variance segments.
+"""
+function _gl5_integrate_var_eval(transform::ParameterTransform, base::ContinuousDynamics,
+                                  x0j::Float64, θ0j::Float64, dt::Float64, μj::Float64, μfj::Float64)
+    half = dt / 2
+    s = 0.0
+    @inbounds for k in 1:5
+        node_t = half + half * _GL5_NODES[k]
+        s += _GL5_WEIGHTS[k] * (transform(_interpolate_coord(base, x0j, θ0j, node_t, μj)) - μfj)^2
     end
     return s * half
 end
