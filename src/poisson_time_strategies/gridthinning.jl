@@ -500,6 +500,17 @@ function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVecto
     return (dot(wt, ∇U_shifted) - dot(wt, fd.grad_buf)) / h
 end
 
+_restore_reference_vhv(vhv::Real, ::AbstractVector, ::ContinuousDynamics) = vhv
+function _restore_reference_vhv(vhv::Real, vt::AbstractVector, flow::AnyBoomerang)
+    # `fd.grad` calls compute_gradient!, so for Boomerang it differentiates
+    # ∇U - Γ(x-μ). The Boomerang ∂λ∂t method expects curvature of the raw
+    # target gradient ∇U and subtracts the reference contribution itself.
+    return vhv + dot(vt, flow.Γ, vt)
+end
+function _restore_reference_vhv(vhv::Real, vt::AbstractVector, flow::LowRankMutableBoomerang)
+    return vhv + lowrank_quadform(flow.Γ, vt)
+end
+
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffVHV, add_rate::Bool=true)
     xt, vt = state.ξ.x, state.ξ.θ
     ∇U_xt = fd.grad(xt)
