@@ -2,7 +2,7 @@ module PDMPSamplersBridgeStanExt
 
 using PDMPSamplers
 using BridgeStan
-using Base.Libc.Libdl: dlsym
+using Base.Libc.Libdl: dlsym, dlpath
 import PDMPSamplers: PDMPModel, FullGradient
 
 # ── FastBridgeStanModel ──────────────────────────────────────────────────────
@@ -29,6 +29,14 @@ function FastBridgeStanModel(sm::BridgeStan.StanModel)
     lp = Ref(0.0)
     err = Ref{Cstring}()
     FastBridgeStanModel(sm, sm.lib, sm.stanmodel, grad_fn, hvp_fn, lp, err, d)
+end
+
+function Base.copy(m::FastBridgeStanModel)
+    # BridgeStan.StanModel is explicitly not thread-safe. PDMP multi-chain
+    # sampling copies the model before spawning chains, so make that copy own a
+    # fresh C++ model instance rather than sharing m.stanmodel.
+    sm = BridgeStan.StanModel(dlpath(m.owner.lib), m.owner.data, m.owner.seed; warn=false)
+    return FastBridgeStanModel(sm)
 end
 
 function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, out::Vector{Float64})
@@ -59,6 +67,33 @@ function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Ve
     end
     return out
 end
+
+struct BridgeStanGradient{M<:FastBridgeStanModel} <: Function
+    model::M
+end
+
+function (g::BridgeStanGradient)(out::Vector{Float64}, x::Vector{Float64})
+    fast_log_density_gradient!(g.model, x, out)
+    out .= .-out
+    return out
+end
+
+Base.copy(g::BridgeStanGradient) = BridgeStanGradient(copy(g.model))
+PDMPSamplers._copy_callable(g::BridgeStanGradient) = copy(g)
+
+struct BridgeStanHVP{M<:FastBridgeStanModel,V<:Vector{Float64}} <: Function
+    model::M
+    out::V
+end
+
+function (h::BridgeStanHVP)(x::Vector{Float64}, v::Vector{Float64})
+    fast_log_density_hvp!(h.model, x, v, h.out)
+    h.out .= .-h.out
+    return h.out
+end
+
+Base.copy(h::BridgeStanHVP) = BridgeStanHVP(copy(h.model), similar(h.out))
+PDMPSamplers._copy_callable(h::BridgeStanHVP) = copy(h)
 
 # ── PDMPModel constructors ───────────────────────────────────────────────────
 
@@ -106,19 +141,10 @@ function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=false)
     fsm = FastBridgeStanModel(sm)
     d = fsm.d
 
-    grad_f! = (out, x) -> begin
-        fast_log_density_gradient!(fsm, x, out)
-        out .= .-out
-        return out
-    end
+    grad_f! = BridgeStanGradient(fsm)
 
     if hvp
-        out_hvp = zeros(d)
-        hvp_f = Base.Fix1((out, x, v) -> begin
-            fast_log_density_hvp!(fsm, x, v, out)
-            out .= .-out
-            return out
-        end, out_hvp)
+        hvp_f = BridgeStanHVP(fsm, zeros(d))
         return PDMPModel(d, FullGradient(grad_f!), hvp_f, false, false)
     end
 

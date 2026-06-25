@@ -12,6 +12,29 @@ end
         @test PDMPSamplers.extract_vhv(v, 42.0) == 42.0
     end
 
+    @testset "finite-difference Boomerang curvature restores reference term" begin
+        d = 3
+        Γ = Diagonal([2.0, 3.0, 5.0])
+        μ = [0.2, -0.1, 0.4]
+        H = Diagonal([7.0, 11.0, 13.0])
+        flow = Boomerang(Γ, μ)
+        x = [0.5, -0.7, 0.9]
+        v = [0.3, -0.4, 0.2]
+        out = zeros(d)
+
+        corrected_grad = y -> begin
+            mul!(out, H, y)
+            out .-= Γ * (y .- μ)
+            out
+        end
+        fd = PDMPSamplers.FiniteDiffVHV(corrected_grad, zeros(d))
+        copyto!(fd.grad_buf, corrected_grad(x))
+        corrected_vhv = PDMPSamplers._fd_vhv_scalar(fd, x, v, v)
+        restored_vhv = PDMPSamplers._restore_reference_vhv(corrected_vhv, v, flow)
+
+        @test restored_vhv ≈ dot(v, H, v) rtol=1e-6
+    end
+
     @testset "∂λ∂t scalar vs vector parity: $pdmp_type" for pdmp_type in (BouncyParticle, Boomerang, ZigZag)
         d = 5
         target = gen_data(MvNormal, d, 1.0)

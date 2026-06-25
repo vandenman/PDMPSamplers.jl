@@ -121,6 +121,12 @@ else
                 out = zeros(d)
                 PDMPSamplers.compute_gradient!(model_unit.grad, x_test, out)
                 @test norm(out - x_test) < 1e-8
+
+                model_copy = PDMPSamplers._copy_model(model_unit)
+                @test model_copy.grad.f.model.stanmodel != model_unit.grad.f.model.stanmodel
+                out_copy = zeros(d)
+                PDMPSamplers.compute_gradient!(model_copy.grad, x_test, out_copy)
+                @test out_copy ≈ out
             end
 
             @testset "fast_log_density_hvp!" begin
@@ -128,6 +134,11 @@ else
                 model_unit_hvp = PDMPModel(sm_unit_hvp; hvp=true)
                 result = model_unit_hvp.hvp(x_test, v_test)
                 @test norm(result - v_test) < 1e-8
+
+                model_copy_hvp = PDMPSamplers._copy_model(model_unit_hvp)
+                @test model_copy_hvp.grad.f.model.stanmodel != model_unit_hvp.grad.f.model.stanmodel
+                @test model_copy_hvp.hvp.model.stanmodel != model_unit_hvp.hvp.model.stanmodel
+                @test model_copy_hvp.hvp(x_test, v_test) ≈ result
             end
 
             @testset "PDMPModel(sm; hvp=true)" begin
