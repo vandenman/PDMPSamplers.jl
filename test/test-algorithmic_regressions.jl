@@ -8,7 +8,7 @@
         free = BitVector([true, false, true, false])
         x = [0.2, 0.0, -0.1, 0.0]
         θ = [0.7, 0.0, -0.4, 0.0]
-        cache = (; z=zeros(d))
+        cache = (; z=zeros(d), tmp=zeros(d))
 
         state_a = StickyPDMPState(0.0, SkeletonPoint(copy(x), copy(θ)), copy(free), zeros(d))
         state_b = copy(state_a)
