@@ -505,7 +505,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
-    vhv_scalar = _fd_vhv_scalar(fd, xt, vt, vt)
+    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
 
@@ -519,7 +519,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     copyto!(fd.grad_buf, cached_gradient)
 
     xt, vt = state.ξ.x, state.ξ.θ
-    vhv_scalar = _fd_vhv_scalar(fd, xt, vt, vt)
+    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
 

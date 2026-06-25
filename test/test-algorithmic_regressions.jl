@@ -2,6 +2,27 @@
 
 @testset "Algorithmic regressions" begin
 
+    @testset "Sticky Boomerang reflection ignores frozen gradients" begin
+        d = 4
+        flow = Boomerang(Diagonal([2.0, 3.0, 4.0, 5.0]), zeros(d))
+        free = BitVector([true, false, true, false])
+        x = [0.2, 0.0, -0.1, 0.0]
+        θ = [0.7, 0.0, -0.4, 0.0]
+        cache = (; z=zeros(d))
+
+        state_a = StickyPDMPState(0.0, SkeletonPoint(copy(x), copy(θ)), copy(free), zeros(d))
+        state_b = copy(state_a)
+        grad_a = [1.0, 2.0, -0.5, 3.0]
+        grad_b = [1.0, 2_000.0, -0.5, -3_000.0]
+
+        PDMPSamplers.reflect!(state_a, grad_a, flow, cache)
+        PDMPSamplers.reflect!(state_b, grad_b, flow, cache)
+
+        @test state_a.ξ.θ[free] ≈ state_b.ξ.θ[free]
+        @test all(iszero, state_a.ξ.θ[.!free])
+        @test all(iszero, state_b.ξ.θ[.!free])
+    end
+
     @testset "StickyLoopState priority queue stays synchronized" begin
         d = 6
         target = gen_data(Distributions.ZeroMeanIsoNormal, d)

@@ -213,7 +213,7 @@ Boomerang(d::Integer) = Boomerang(I(d), zeros(d), 0.1)
 Boomerang(d::Integer, λref::Real) = Boomerang(I(d), zeros(d), λref)
 
 function initialize_cache(::Random.AbstractRNG, ::AnyBoomerang, ::GlobalGradientStrategy, ::PoissonTimeStrategy, ::Real, ξ::SkeletonPoint)
-    return (; z=similar(ξ.x))
+    return (; z=similar(ξ.x), tmp=similar(ξ.x))
 end
 
 function Base.copy(flow::MutableBoomerang)
@@ -328,13 +328,25 @@ end
 
 reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(state, ∇ϕ, flow, cache)
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
-    reflect!(state.ξ, ∇ϕ, flow, cache)
-    # Reflection may set non-zero velocity for frozen coordinates; restore invariant
-    for i in eachindex(state.free)
-        if !state.free[i]
-            state.ξ.θ[i] = 0.0
-        end
-    end
+    free = state.free
+    θ_free = view(state.ξ.θ, free)
+    ∇ϕ_free = view(∇ϕ, free)
+
+    # Active velocities follow N(0, Σ[free, free]), where Σ = Γ⁻¹.
+    # Reflect in that marginal metric. A full-space reflection incorrectly
+    # lets gradients of frozen coordinates weaken active-coordinate bounces.
+    ΣL_free = view(flow.ΣL, free, :)
+    # tmp = similar(state.ξ.θ)
+    tmp = cache.tmp
+    mul!(tmp, transpose(ΣL_free), ∇ϕ_free)
+    z_free = view(cache.z, eachindex(θ_free))
+    mul!(z_free, ΣL_free, tmp)
+
+    denominator = dot(∇ϕ_free, z_free)
+    iszero(denominator) && return nothing
+    reflection_coeff = 2 * dot(θ_free, ∇ϕ_free) / denominator
+    θ_free .-= reflection_coeff .* z_free
+    return nothing
 end
 
 
@@ -493,6 +505,46 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::LowRankMutable
     lowrank_solve!(z, flow.Γ)  # z = Γ⁻¹ ∇ϕ = Σ ∇ϕ
     reflection_coeff = 2 * dot(θ, ∇ϕ) / dot(∇ϕ, z)
     θ .-= reflection_coeff .* z
+    return nothing
+end
+
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::LowRankMutableBoomerang, cache)
+    lrp = flow.Γ
+    free = state.free
+    θ = state.ξ.θ
+    z = cache.z
+    fill!(z, zero(eltype(z)))
+
+    # z_free = Σ[free, free] ∇ϕ_free for Σ = D + VΛV'.
+    coeff = lrp.buf_r1
+    fill!(coeff, zero(eltype(coeff)))
+    for k in eachindex(coeff), i in eachindex(free)
+        free[i] && (coeff[k] += lrp.V[i, k] * ∇ϕ[i])
+    end
+    coeff .*= lrp.Λ
+    for i in eachindex(free)
+        if free[i]
+            zi = lrp.D[i] * ∇ϕ[i]
+            for k in eachindex(coeff)
+                zi += lrp.V[i, k] * coeff[k]
+            end
+            z[i] = zi
+        end
+    end
+
+    numerator = zero(eltype(θ))
+    denominator = zero(eltype(θ))
+    for i in eachindex(free)
+        if free[i]
+            numerator += θ[i] * ∇ϕ[i]
+            denominator += ∇ϕ[i] * z[i]
+        end
+    end
+    iszero(denominator) && return nothing
+    reflection_coeff = 2 * numerator / denominator
+    for i in eachindex(free)
+        free[i] && (θ[i] -= reflection_coeff * z[i])
+    end
     return nothing
 end
 
