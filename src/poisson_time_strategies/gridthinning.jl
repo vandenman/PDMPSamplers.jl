@@ -69,6 +69,12 @@ end
 function make_grad_U_func(state::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
     return make_grad_U_func(state.ξ.θ, flow, gradient_strategy, cache)
 end
+function make_grad_U_func(state::StickyPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
+    return function (x)
+        set_active_set!(gradient_strategy, state.free)
+        return compute_gradient!(x, state.ξ.θ, gradient_strategy, flow, cache)
+    end
+end
 
 function make_hvp_func(flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
     return function (x, θ)
