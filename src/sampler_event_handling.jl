@@ -113,6 +113,7 @@ function _handle_global_event_impl!(
         stats.sticky_events += 1
         i = meta.i
         stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
+        set_active_set!(gradient_strategy, state.free)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true
         if isfactorized(flow)

@@ -37,6 +37,7 @@ include("utils.jl")
 include("PDMPState.jl")
 include("gradient_strategies.jl")
 include("model.jl")
+include("dependent_slabs.jl")
 
 # PDMP types
 # could do
@@ -134,6 +135,23 @@ export
     SubsampledGradient,
     CoordinateWiseGradient,
     compute_gradient!,
+    set_active_set!,
+
+    # Dependent Gaussian slab support
+    AbstractModelPriorOdds,
+    BernoulliModelPriorOdds,
+    BetaBernoulliModelPriorOdds,
+    log_model_add_odds,
+    AbstractGaussianSlabProvider,
+    DenseGaussianSlab,
+    CallbackGaussianSlab,
+    beta_indices,
+    gaussian_slab!,
+    active_logdensity,
+    active_prior_grad!,
+    conditional_logdensity_zero,
+    conditional_density_zero,
+    DependentSlabTarget,
 
     # Hessian control variate
     HCVState,

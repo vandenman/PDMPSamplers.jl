@@ -5,6 +5,24 @@ _try_copy(x) = applicable(copy, x) ? copy(x) : x
 _copy_callable(f::Base.Fix1) = Base.Fix1(_copy_callable(f.f), _try_copy(f.x))
 _copy_callable(f::Base.Fix2) = Base.Fix2(_copy_callable(f.f), _try_copy(f.x))
 
+"""
+    set_active_set!(object, free::BitVector)
+
+Synchronize stateful gradients or targets with the active/free coordinates of
+a `StickyPDMPState`. The default method is a no-op.
+"""
+set_active_set!(object, free::BitVector) = nothing
+function set_active_set!(f::Base.Fix1, free::BitVector)
+    set_active_set!(f.f, free)
+    set_active_set!(f.x, free)
+    return nothing
+end
+function set_active_set!(f::Base.Fix2, free::BitVector)
+    set_active_set!(f.f, free)
+    set_active_set!(f.x, free)
+    return nothing
+end
+
 # Concrete gradient strategies
 struct FullGradient{F} <: GlobalGradientStrategy
     f::F
@@ -66,6 +84,7 @@ struct WithStats{F,S} <: Function
     stats::S
 end
 (ws::WithStats)(args...) = (ws.stats.∇f_calls += 1; ws.f(args...))
+set_active_set!(ws::WithStats, free::BitVector) = set_active_set!(ws.f, free)
 
 
 # struct ControlVariateGradient{F} <: GradientStrategy
@@ -79,8 +98,20 @@ end
 
 # Gradient computation interface
 
+_sync_active_set!(state::AbstractPDMPState, gradient_strategy::GradientStrategy) = nothing
+_sync_active_set!(state::StickyPDMPState, gradient_strategy::GradientStrategy) = set_active_set!(gradient_strategy, state.free)
+
+set_active_set!(strategy::FullGradient, free::BitVector) = set_active_set!(strategy.f, free)
+function set_active_set!(strategy::SubsampledGradient, free::BitVector)
+    set_active_set!(strategy.f, free)
+    set_active_set!(strategy.full, free)
+    return nothing
+end
+set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_set!(strategy.f, free)
+
 # Main entry point: compute gradient from state
 function compute_gradient!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
+    _sync_active_set!(state, gradient_strategy)
     ∇ϕx = compute_gradient!(gradient_strategy, state.ξ.x, cache.∇ϕx)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
     return ∇ϕx
@@ -95,6 +126,7 @@ end
 
 # For reflection events with subsampled gradients, may use full gradient
 function compute_gradient_for_reflection!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
+    _sync_active_set!(state, gradient_strategy)
     ∇ϕx = compute_gradient_for_reflection!(gradient_strategy, state.ξ.x, cache.∇ϕx)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
     return ∇ϕx
