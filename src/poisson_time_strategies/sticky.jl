@@ -59,6 +59,7 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     sticky_pq = PriorityQueue{Int,Float64}()
 
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
+    state isa StickyPDMPState && set_active_set!(model, state.free)
 
     # old_velocity = copy(state.ξ.θ)
     # # zero is problematic because the unfreeze time divides by abs(θf[i]), so divide by zero

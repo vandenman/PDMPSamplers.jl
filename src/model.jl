@@ -171,6 +171,15 @@ function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
     PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
 end
 
+function set_active_set!(model::PDMPModel, free::BitVector)
+    length(free) == model.d || throw(DimensionMismatch("active set length $(length(free)) does not match model dimension $(model.d)"))
+    set_active_set!(model.grad, free)
+    model.hvp !== nothing && set_active_set!(model.hvp, free)
+    model.vhv !== nothing && set_active_set!(model.vhv, free)
+    model.joint !== nothing && set_active_set!(model.joint, free)
+    return nothing
+end
+
 struct InplaceHVP{F, O<:AbstractVector} <: Function
     f::F
     out::O
@@ -180,20 +189,25 @@ function (h::InplaceHVP)(x::AbstractVector, v::AbstractVector)
     return h.out
 end
 _copy_callable(h::InplaceHVP) = InplaceHVP(_copy_callable(h.f), copy(h.out))
+set_active_set!(h::InplaceHVP, free::BitVector) = set_active_set!(h.f, free)
 
 struct WithStatsHVP{F,S} <: Function
     f::F
     stats::S
 end
+
 (ws::WithStatsHVP)(x::AbstractVector, v::AbstractVector) = (_inc_counter_∇²f_calls(ws.stats); ws.f(x, v))
 (ws::WithStatsHVP)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
+set_active_set!(ws::WithStatsHVP, free::BitVector) = set_active_set!(ws.f, free)
 
 struct WithStatsVHV{F,S} <: Function
     f::F
     stats::S
 end
+
 (ws::WithStatsVHV)(x::AbstractVector, v::AbstractVector, w::AbstractVector) = (_inc_counter_∇²f_calls(ws.stats); ws.f(x, v, w))
 (ws::WithStatsVHV)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
+set_active_set!(ws::WithStatsVHV, free::BitVector) = set_active_set!(ws.f, free)
 
 struct WithStatsJoint{F,S} <: Function
     f::F
@@ -203,6 +217,7 @@ function (ws::WithStatsJoint)(x::AbstractVector, v::AbstractVector)
     _inc_counter_∇²f_calls(ws.stats)
     ws.f(x, v)
 end
+set_active_set!(ws::WithStatsJoint, free::BitVector) = set_active_set!(ws.f, free)
 
 """
     _make_vhv_from_grad(grad_f!, d, backend)
