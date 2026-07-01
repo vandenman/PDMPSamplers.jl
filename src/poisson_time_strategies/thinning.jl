@@ -67,7 +67,7 @@ get_bounds(b::GlobalBounds) = FillArrays.Fill(b.c, b.d)
 ab(ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab(ξ, get_bounds(c), flow, cache)
 ab_i(i::Int, ξ::SkeletonPoint, c::PoissonTimeStrategy, flow::ContinuousDynamics, cache) = ab_i(i, ξ, get_bounds(c), flow, cache)
 
-function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::StatisticCounter,
+function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::ThinningStrategy{<:BoundStrategy}, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
     # TODO: these only exist temporarily due to issues/ testing in gridthinning
     ignored1::Any=nothing, ignored2::Any=nothing
 )
@@ -105,7 +105,7 @@ function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:GlobalGradientSt
 
 end
 
-function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::StatisticCounter)
+function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::AbstractStatisticCounter)
     pq = cache.pq # rename for clarity
     # i₀, t_event = dequeue_pair!(pq)
     i₀, t_event = Base.popfirst!(pq)

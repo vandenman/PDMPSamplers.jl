@@ -34,6 +34,7 @@ import ElasticArrays: ElasticArray, ElasticMatrix
 include("abstract_types.jl")
 include("betabernoulli.jl")
 include("utils.jl")
+include("statistic_counters.jl")
 include("PDMPState.jl")
 include("gradient_strategies.jl")
 include("model.jl")
@@ -56,6 +57,7 @@ include("support_boundary.jl")
 
 # Algorithms
 include("poisson_time_strategies/interface.jl")
+include("poisson_time_strategies/piecewise_affine_bound.jl")
 include("poisson_time_strategies/gridthinning.jl")
 include("poisson_time_strategies/thinning.jl")
 include("poisson_time_strategies/sticky.jl")
@@ -165,6 +167,16 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
+    certified_auto_scalar_bps_grid,
+    certified_scalar_bps_grid,
+    certified_flat_scalar_bps_grid,
+    CertifiedUpperCurvature,
+    GlobalCertifiedUpperCurvature,
+    NoCertificate,
+    supports_grid_curvature_bounds,
+    curvature_bounds_for_grid,
+    supports_grid_signed_rate_jets,
+    signed_rate_jets_for_grid,
     # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
     RootsPoissonTimeStrategy,
     Sticky,

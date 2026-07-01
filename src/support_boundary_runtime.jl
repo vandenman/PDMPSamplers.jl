@@ -13,7 +13,7 @@ _next_event_time_for_step(
     alg::PoissonTimeStrategy,
     state::AbstractPDMPState,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     ::NoBoundaryHandling,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats)
 
@@ -24,7 +24,7 @@ _next_event_time_for_step(
     alg::PoissonTimeStrategy,
     state::AbstractPDMPState,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     ::BoundaryHandling,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats)
 
@@ -35,7 +35,7 @@ _next_event_time_for_step(
     alg::GridAdaptiveState,
     state::AbstractPDMPState,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     ::BoundaryHandling,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats, Inf, true, :horizon_hit, true)
 
@@ -48,7 +48,7 @@ function _step!(
     flow::FL,
     alg_::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ::NoBoundaryHandling,
     phase::Symbol
@@ -69,7 +69,7 @@ function _step!(
     flow::FL,
     alg_::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     boundary_policy::BoundaryHandling,
     phase::Symbol
@@ -104,7 +104,7 @@ function _handle_step_boundary!(
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ctx::BoundaryContext,
     opts::SupportBoundaryOptions;
@@ -138,7 +138,7 @@ function _line_search_truncated_refresh_from_current_state!(
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ctx::BoundaryContext,
     opts::SupportBoundaryOptions;
@@ -167,18 +167,18 @@ function _line_search_truncated_refresh_from_current_state!(
         end
 
         refresh_velocity!(rng, state, flow)
-        stats.support_boundary_refresh_attempts += 1
+        _inc_counter_support_boundary_refresh_attempts(stats)
 
         if _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, opts)
-            stats.support_boundary_events += 1
-            stats.refreshment_events += 1
-            stats.last_rejected = false
+            _inc_counter_support_boundary_events(stats)
+            _inc_counter_refreshment_events(stats)
+            _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
             record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end
 
-        stats.support_boundary_refresh_failures += 1
+        _inc_counter_support_boundary_refresh_failures(stats)
     end
 
     copyto!(state.ξ.x, x_current)
@@ -195,7 +195,7 @@ function _handle_grid_safety_limit!(
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ctx::BoundaryContext,
     opts::SupportBoundaryOptions;
@@ -537,7 +537,7 @@ function _handle_capped_boundary_event!(
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     τ::Float64,
     event_type::Symbol,
@@ -569,7 +569,7 @@ function _boundary_refresh_from_localization!(
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ctx::BoundaryContext,
     localization::SupportBoundaryLocalization,
@@ -584,18 +584,18 @@ function _boundary_refresh_from_localization!(
         _move_to_boundary_safe_point!(state, flow, ctx, safe_time)
 
         refresh_velocity!(rng, state, flow)
-        stats.support_boundary_refresh_attempts += 1
+        _inc_counter_support_boundary_refresh_attempts(stats)
 
         if _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, probe_time)
-            stats.support_boundary_events += 1
-            stats.refreshment_events += 1
-            stats.last_rejected = false
+            _inc_counter_support_boundary_events(stats)
+            _inc_counter_refreshment_events(stats)
+            _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
             record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end
 
-        stats.support_boundary_refresh_failures += 1
+        _inc_counter_support_boundary_refresh_failures(stats)
 
         found_valid_time, backtracked_time = _try_backtrack_valid_boundary_time!(
             state, model, flow, cache, ctx, safe_time, opts,
@@ -618,7 +618,7 @@ function _line_search_truncated_refresh_boundary!(
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     cache::NamedTuple,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ctx::BoundaryContext,
     opts::SupportBoundaryOptions;
