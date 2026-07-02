@@ -73,6 +73,99 @@ end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))
 
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    ::BouncyParticle,
+    (grad, hvp)::Tuple{G,H},
+) where {G,H}
+    x = state.ξ.x
+    θ = state.ξ.θ
+    ∇U = grad(x)
+    Hθ = hvp(x, θ)
+    return dot(∇U, θ), extract_vhv(θ, Hθ)
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    ::BouncyParticle,
+    (grad, hvp)::Tuple{G,H},
+    cached_gradient::AbstractVector,
+) where {G,H}
+    θ = state.ξ.θ
+    Hθ = hvp(state.ξ.x, θ)
+    return dot(cached_gradient, θ), extract_vhv(θ, Hθ)
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::BouncyParticle,
+    provider::VHVProvider,
+)
+    x = state.ξ.x
+    θ = state.ξ.θ
+    ∇U = provider.grad(x)
+    return dot(∇U, θ), _compute_vhv_scalar(provider, state, ∇U, flow)
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::BouncyParticle,
+    provider::VHVProvider,
+    cached_gradient::AbstractVector,
+)
+    return (
+        dot(cached_gradient, state.ξ.θ),
+        _compute_vhv_scalar(provider, state, cached_gradient, flow),
+    )
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    ::BouncyParticle,
+    provider::WithStatsJoint,
+)
+    return provider(state.ξ.x, state.ξ.θ)
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    ::BouncyParticle,
+    grad_and_nothing::Tuple{G,Nothing},
+) where {G}
+    ∇U = grad_and_nothing[1](state.ξ.x)
+    return dot(∇U, state.ξ.θ), 0.0
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    ::BouncyParticle,
+    ::Tuple{G,Nothing},
+    cached_gradient::AbstractVector,
+) where {G}
+    return dot(cached_gradient, state.ξ.θ), 0.0
+end
+
+function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, fd::FiniteDiffVHV)
+    x = state.ξ.x
+    θ = state.ξ.θ
+    ∇U = fd.grad(x)
+    copyto!(fd.grad_buf, ∇U)
+    vhv = _restore_reference_vhv(_fd_vhv_scalar(fd, x, θ, θ), θ, flow)
+    return dot(fd.grad_buf, θ), vhv
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::BouncyParticle,
+    fd::FiniteDiffVHV,
+    cached_gradient::AbstractVector,
+)
+    copyto!(fd.grad_buf, cached_gradient)
+    x = state.ξ.x
+    θ = state.ξ.θ
+    vhv = _restore_reference_vhv(_fd_vhv_scalar(fd, x, θ, θ), θ, flow)
+    return dot(fd.grad_buf, θ), vhv
+end
 
 # The canonical freezing_time for BouncyParticle is defined in
 # src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.

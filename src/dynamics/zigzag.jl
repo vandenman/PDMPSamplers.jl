@@ -73,6 +73,39 @@ function move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag)
     ξ.x .+= τ .* ξ.θ
 end
 
+function rate_values_and_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    (grad, hvp)::Tuple{G,H},
+    state::AbstractPDMPState,
+    ::ZigZag,
+    t_grid::AbstractVector,
+    n_points::Integer,
+) where {G,H}
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    n_channels = length(θ)
+    size(values, 1) >= n_channels && size(values, 2) >= n_points ||
+        throw(ArgumentError("values matrix is too small"))
+    size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
+        throw(ArgumentError("derivatives matrix is too small"))
+    for k in 1:n_points
+        x = @view derivatives[:, k]
+        @inbounds for j in 1:n_channels
+            x[j] = x0[j] + t_grid[k] * θ[j]
+        end
+        ∇U = grad(x)
+        Hθ = hvp(x, θ)
+        value_col = @view values[:, k]
+        derivative_col = @view derivatives[:, k]
+        for j in 1:n_channels
+            value_col[j] = θ[j] * ∇U[j]
+            derivative_col[j] = θ[j] * Hθ[j]
+        end
+    end
+    return values, derivatives
+end
+
 # fallbacks for AD (mostly ForwardDiff) that allocates new arrays
 # move_forward_time(ξ::SkeletonPoint, τ::Real, ::ZigZag) = SkeletonPoint(ξ.x .+ τ .* ξ.θ, ξ.θ)
 

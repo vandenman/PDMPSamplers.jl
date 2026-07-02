@@ -402,14 +402,14 @@ end
     grid_budget_exponential_sum::Float64
     grid_budget_tail_restarts::Int
     grid_endpoint_evaluations::Int
-    grid_endpoint_jet_calls::Int
+    grid_endpoint_derivative_calls::Int
     grid_endpoint_gradient_calls::Int
     grid_endpoint_hessian_calls::Int
     grid_cached_endpoint_reuses::Int
     grid_acceptance_tests::Int
     grid_acceptance_gradient_calls::Int
     grid_bound_violations::Int
-    grid_endpoint_jet_points_loaded::Int
+    grid_endpoint_derivative_points_loaded::Int
     grid_resets_from_dynamics_adaptation::Int
 end
 
@@ -425,7 +425,7 @@ end
         grid_budget_extensions,
         grid_budget_tail_restarts,
         grid_endpoint_evaluations,
-        grid_endpoint_jet_calls,
+        grid_endpoint_derivative_calls,
         grid_endpoint_gradient_calls,
         grid_endpoint_hessian_calls,
         grid_cached_endpoint_reuses,
@@ -445,7 +445,7 @@ end
         grid_budget_cells_built,
         grid_budget_area_built,
         grid_budget_exponential_sum,
-        grid_endpoint_jet_points_loaded,
+        grid_endpoint_derivative_points_loaded,
     )
 
     set(grid_N_current)

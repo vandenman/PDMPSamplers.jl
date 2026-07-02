@@ -5,7 +5,6 @@ import DifferentiationInterface as DI
 struct TestBatchCertificate
     calls::Base.RefValue{Int}
 end
-PDMPSamplers.supports_grid_curvature_bounds(::TestBatchCertificate) = true
 function PDMPSamplers.curvature_bounds_for_grid(
     cert::TestBatchCertificate,
     state::PDMPSamplers.AbstractPDMPState,
@@ -17,19 +16,25 @@ function PDMPSamplers.curvature_bounds_for_grid(
     return [(0.0) for _ in 1:n_cells]
 end
 
-struct TestSignedGridJets
+struct TestGridRateDerivatives
     calls::Base.RefValue{Int}
 end
-PDMPSamplers.supports_grid_signed_rate_jets(::TestSignedGridJets) = true
-function PDMPSamplers.signed_rate_jets_for_grid(
-    jets::TestSignedGridJets,
+
+function PDMPSamplers.rate_values_and_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    provider::TestGridRateDerivatives,
     state::PDMPSamplers.AbstractPDMPState,
     flow::PDMPSamplers.ContinuousDynamics,
     t_grid::AbstractVector,
     n_points::Integer,
 )
-    jets.calls[] += 1
-    return [-0.5 + t_grid[i] for i in 1:n_points], ones(Float64, n_points)
+    provider.calls[] += 1
+    for i in 1:n_points
+        values[1, i] = -0.5 + t_grid[i]
+        derivatives[1, i] = 1.0
+    end
+    return values, derivatives
 end
 
 struct TestBoomerangLogisticBound
@@ -708,7 +713,7 @@ end
         @test PDMPSamplers._rate_shape(flow) === :componentwise
         @test PDMPSamplers._can_use_signed_grid(state, flow, (grad, hvp))
         @test !PDMPSamplers._can_use_signed_grid(state, flow, (grad, nothing))
-        G, dG = PDMPSamplers.signed_rate_channel_jets_for_grid(
+        G, dG = PDMPSamplers.rate_values_and_derivatives_for_grid(
             (grad, hvp), state, flow, t_grid, length(t_grid))
         @test size(G) == (2, length(t_grid))
         @test all(dG .≈ 1.0)
@@ -812,7 +817,7 @@ end
         @test PDMPSamplers.total_area(pab_cap) ≈ pcb_cap.Λ_vals[1]
     end
 
-    @testset "Boomerang signed jets use corrected-gradient convention" begin
+    @testset "Boomerang rate derivatives use corrected-gradient convention" begin
         Γ = Diagonal([1.5, 2.0, 2.5])
         μ = [0.2, -0.3, 0.4]
         flow = Boomerang(Γ, μ, 0.0)
@@ -830,7 +835,7 @@ end
         @test dg ≈ 0.0 atol=1e-12
     end
 
-    @testset "Boomerang quadratic residual signed jets and certificate" begin
+    @testset "Boomerang quadratic residual rate derivatives and certificate" begin
         Γ = Diagonal([1.2, 1.6, 2.1])
         μ = [0.1, -0.2, 0.3]
         A = Symmetric([0.7 0.1 -0.05; 0.1 0.5 0.02; -0.05 0.02 0.4])
@@ -1199,7 +1204,7 @@ end
         dzz = PreconditionedZigZag(d; scale=[0.5, 1.5, 2.0])
         @test PDMPSamplers._rate_shape(dzz) === :componentwise
         @test PDMPSamplers._can_use_signed_grid(state, dzz, (grad, hvp))
-        G_diag, dG_diag = PDMPSamplers.signed_rate_channel_jets_for_grid(
+        G_diag, dG_diag = PDMPSamplers.rate_values_and_derivatives_for_grid(
             (grad, hvp), state, dzz, [0.0], 1)
         @test vec(G_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.x
         @test vec(dG_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.θ
@@ -1215,7 +1220,7 @@ end
         zz_state = PDMPState(0.0, SkeletonPoint([0.3, -0.4, 0.2], θ))
         @test PDMPSamplers._rate_shape(flow) === :componentwise
         @test PDMPSamplers._can_use_signed_grid(zz_state, flow, (grad, hvp))
-        G, dG = PDMPSamplers.signed_rate_channel_jets_for_grid(
+        G, dG = PDMPSamplers.rate_values_and_derivatives_for_grid(
             (grad, hvp), zz_state, flow, [0.0], 1)
         η = L' * zz_state.ξ.x
         Hθ_z = L' * θ
@@ -1698,12 +1703,12 @@ end
         @test stats.grid_builds == 1
     end
 
-    @testset "constant BPS grid uses batched signed jets when available" begin
+    @testset "constant BPS grid uses batched rate derivatives when available" begin
         flow = BouncyParticle(1, 0.0)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
         pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 0.5, 1.0], zeros(2))
         stats = PDMPSamplers.DevelStatisticCounter()
-        provider = TestSignedGridJets(Ref(0))
+        provider = TestGridRateDerivatives(Ref(0))
 
         n = PDMPSamplers.construct_upper_bound_grad_and_hess!(
             pcb, state, flow, provider, false;
@@ -1712,7 +1717,7 @@ end
 
         @test n == 2
         @test provider.calls[] == 1
-        @test stats.grid_endpoint_jet_calls == 1
+        @test stats.grid_endpoint_derivative_calls == 1
         @test stats.grid_endpoint_evaluations == 0
         @test stats.grid_endpoint_gradient_calls == 0
         @test stats.grid_endpoint_hessian_calls == 0
@@ -1724,8 +1729,8 @@ end
     @testset "append-only constant budget extension matches full construction" begin
         flow = BouncyParticle(1, 0.0)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
-        provider_full = TestSignedGridJets(Ref(0))
-        provider_append = TestSignedGridJets(Ref(0))
+        provider_full = TestGridRateDerivatives(Ref(0))
+        provider_append = TestGridRateDerivatives(Ref(0))
         t_grid = collect(range(0.0, 1.0, 11))
 
         full = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
@@ -1765,8 +1770,8 @@ end
     @testset "append-only inflated affine budget extension preserves prefix" begin
         flow = BouncyParticle(1, 0.0)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
-        provider_full = TestSignedGridJets(Ref(0))
-        provider_append = TestSignedGridJets(Ref(0))
+        provider_full = TestGridRateDerivatives(Ref(0))
+        provider_append = TestGridRateDerivatives(Ref(0))
         cert = (0.0)
         t_grid = collect(range(0.0, 1.0, 11))
 

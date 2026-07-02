@@ -202,14 +202,14 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
-    used_batched_signed_jets = _supports_constant_grid_signed_jets(flow, grad_and_hess_or_grad_and_hvp) && n_time_cells > 0
+    used_batched_rate_derivatives = _supports_constant_grid_rate_derivatives(flow, grad_and_hess_or_grad_and_hvp) && n_time_cells > 0
 
     loaded_batched_points = start_cell == 1 ? 0 : start_cell
     λ_refresh = add_rate ? refresh_rate(flow) : 0.0
     if start_cell > 1
         move_forward_time!(state_t, t_grid[start_cell], flow)
-    elseif used_batched_signed_jets
-        loaded_batched_points = _load_constant_signed_rate_jets!(
+    elseif used_batched_rate_derivatives
+        loaded_batched_points = _load_constant_rate_derivatives!(
             pcb, grad_and_hess_or_grad_and_hvp, state, flow, 1, n_time_cells + 1,
             loaded_batched_points, λ_refresh, stats)
     elseif isnan(cached_y0)
@@ -245,8 +245,8 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
         end
 
         Δt = t_grid[i] - t_grid[i-1]
-        if used_batched_signed_jets
-            loaded_batched_points = _load_constant_signed_rate_jets!(
+        if used_batched_rate_derivatives
+            loaded_batched_points = _load_constant_rate_derivatives!(
                 pcb, grad_and_hess_or_grad_and_hvp, state, flow, i, n_time_cells + 1,
                 loaded_batched_points, λ_refresh, stats)
         else
@@ -289,18 +289,48 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     return N_evaluated
 end
 
-_supports_constant_grid_signed_jets(::ContinuousDynamics, provider) = false
-_supports_constant_grid_signed_jets(::BouncyParticle, provider) = supports_grid_signed_rate_jets(provider)
-_supports_constant_grid_signed_jets(pd::PreconditionedDynamics, provider) =
-    _supports_constant_grid_signed_jets(pd.dynamics, provider)
+_supports_constant_grid_rate_derivatives(::ContinuousDynamics, provider) = false
+_supports_constant_grid_rate_derivatives(flow::BouncyParticle, provider) =
+    _supports_rate_derivatives(provider, flow)
+_supports_constant_grid_rate_derivatives(pd::PreconditionedDynamics, provider) =
+    _supports_constant_grid_rate_derivatives(pd.dynamics, provider)
 
-function _constant_rate_jet_from_signed(g::Real, dg::Real, λ_refresh::Real)
+function _constant_rate_derivative_from_signed(g::Real, dg::Real, λ_refresh::Real)
     return pos(g) + λ_refresh, ispositive(g) ? dg : zero(dg)
 end
 
-_grid_signed_jet_chunk_points() = 16
+_grid_rate_derivative_chunk_points() = 16
 
-function _load_constant_signed_rate_jets!(
+function _load_rate_derivative_chunk!(
+    pcb::PiecewiseConstantBound,
+    provider,
+    state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    target_point::Integer,
+    max_points::Integer,
+    loaded_points::Integer,
+    stats::Union{AbstractStatisticCounter,Nothing},
+    transform,
+)
+    target_point <= loaded_points && return loaded_points
+    start_point = loaded_points + 1
+    stop_point = min(max_points, max(target_point, loaded_points + _grid_rate_derivative_chunk_points()))
+    n_points = stop_point - start_point + 1
+    if stats !== nothing
+        _inc_counter_grid_endpoint_derivative_calls(stats)
+        _inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points)
+    end
+    values = reshape(@view(pcb.y_vals[start_point:stop_point]), 1, n_points)
+    derivatives = reshape(@view(pcb.d_vals[start_point:stop_point]), 1, n_points)
+    _fill_rate_values_and_derivatives!(
+        values, derivatives, provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points)
+    for (offset, point) in enumerate(start_point:stop_point)
+        pcb.y_vals[point], pcb.d_vals[point] = transform(values[1, offset], derivatives[1, offset])
+    end
+    return stop_point
+end
+
+function _load_constant_rate_derivatives!(
     pcb::PiecewiseConstantBound,
     provider,
     state::AbstractPDMPState,
@@ -311,28 +341,12 @@ function _load_constant_signed_rate_jets!(
     λ_refresh::Real,
     stats::Union{AbstractStatisticCounter,Nothing},
 )
-    target_point <= loaded_points && return loaded_points
-    start_point = loaded_points + 1
-    stop_point = min(max_points, max(target_point, loaded_points + _grid_signed_jet_chunk_points()))
-    n_points = stop_point - start_point + 1
-    if stats !== nothing
-        _inc_counter_grid_endpoint_jet_calls(stats)
-        _inc_counter_grid_endpoint_jet_points_loaded(stats, n_points)
-    end
-    g_values, dg_values = signed_rate_jets_for_grid(
-        provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points)
-    length(g_values) >= n_points || throw(ArgumentError(
-        "signed_rate_jets_for_grid returned $(length(g_values)) g-values for $(n_points) grid points"))
-    length(dg_values) >= n_points || throw(ArgumentError(
-        "signed_rate_jets_for_grid returned $(length(dg_values)) derivative values for $(n_points) grid points"))
-    for (offset, point) in enumerate(start_point:stop_point)
-        pcb.y_vals[point], pcb.d_vals[point] =
-            _constant_rate_jet_from_signed(g_values[offset], dg_values[offset], λ_refresh)
-    end
-    return stop_point
+    transform = (g, dg) -> _constant_rate_derivative_from_signed(g, dg, λ_refresh)
+    return _load_rate_derivative_chunk!(
+        pcb, provider, state, flow, target_point, max_points, loaded_points, stats, transform)
 end
 
-function _load_signed_rate_jets!(
+function _load_rate_derivatives!(
     pcb::PiecewiseConstantBound,
     provider,
     state::AbstractPDMPState,
@@ -342,25 +356,9 @@ function _load_signed_rate_jets!(
     loaded_points::Integer,
     stats::Union{AbstractStatisticCounter,Nothing},
 )
-    target_point <= loaded_points && return loaded_points
-    start_point = loaded_points + 1
-    stop_point = min(max_points, max(target_point, loaded_points + _grid_signed_jet_chunk_points()))
-    n_points = stop_point - start_point + 1
-    if stats !== nothing
-        _inc_counter_grid_endpoint_jet_calls(stats)
-        _inc_counter_grid_endpoint_jet_points_loaded(stats, n_points)
-    end
-    g_values, dg_values = signed_rate_jets_for_grid(
-        provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points)
-    length(g_values) >= n_points || throw(ArgumentError(
-        "signed_rate_jets_for_grid returned $(length(g_values)) g-values for $(n_points) grid points"))
-    length(dg_values) >= n_points || throw(ArgumentError(
-        "signed_rate_jets_for_grid returned $(length(dg_values)) derivative values for $(n_points) grid points"))
-    for (offset, point) in enumerate(start_point:stop_point)
-        pcb.y_vals[point] = g_values[offset]
-        pcb.d_vals[point] = dg_values[offset]
-    end
-    return stop_point
+    return _load_rate_derivative_chunk!(
+        pcb, provider, state, flow, target_point, max_points, loaded_points, stats,
+        (g, dg) -> (g, dg))
 end
 
 function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d_vals::Vector, i::Int)
@@ -449,13 +447,6 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, rate_deriv
 end
 
-struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}}
-    grad::G
-    vhv::V
-    w_buf::W
-end
-VHVProvider(grad, vhv) = VHVProvider(grad, vhv, nothing)
-
 function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ContinuousDynamics)
     xt, vt = state.ξ.x, state.ξ.θ
     return provider.vhv(xt, vt, vt)
@@ -500,23 +491,9 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, rate_deriv
 end
 
-struct JointProvider{J}
-    joint::J
-end
-
-supports_grid_signed_rate_jets(provider::JointProvider) = supports_grid_signed_rate_jets(provider.joint)
-signed_rate_jets_for_grid(provider::JointProvider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_points::Integer) =
-    signed_rate_jets_for_grid(provider.joint, state, flow, t_grid, n_points)
-
-supports_grid_signed_rate_jets(provider::WithStatsJoint) = supports_grid_signed_rate_jets(provider.f)
-signed_rate_jets_for_grid(provider::WithStatsJoint, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_points::Integer) =
-    signed_rate_jets_for_grid(provider.f, state, flow, t_grid, n_points)
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::JointProvider, add_rate::Bool=true)
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::WithStatsJoint, add_rate::Bool=true)
     xt, vt = state.ξ.x, state.ξ.θ
-    dphi, d2phi = provider.joint(xt, vt)
+    dphi, d2phi = provider(xt, vt)
 
     f_t = pos(dphi) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = d2phi
@@ -525,6 +502,16 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 
     return rate, rate_deriv
+end
+
+function get_rate_and_deriv(
+    state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    provider::WithStatsJoint,
+    add_rate::Bool,
+    ::AbstractVector,
+)
+    return get_rate_and_deriv(state, flow, provider, add_rate)
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, grad_and_nothing::Tuple{G,Nothing}, add_rate::Bool=true) where {G}
@@ -600,15 +587,6 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
     return rate, rate_deriv
 end
-
-struct FiniteDiffVHV{G}
-    grad::G
-    buf::Vector{Float64}
-    grad_buf::Vector{Float64}
-    w_buf::Vector{Float64}
-end
-FiniteDiffVHV(grad, buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), similar(buf))
-FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) = FiniteDiffVHV(grad, buf, similar(buf), w_buf)
 
 function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
     h = _fd_step_size(xt, vt)
@@ -738,11 +716,31 @@ _rate_shape(::ZigZag) = :componentwise
 _rate_shape(::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) = :scalar
 _rate_shape(::PreconditionedDynamics{<:AbstractPreconditioner,<:ZigZag}) = :componentwise
 
+_rate_channel_count(state::AbstractPDMPState, flow::ContinuousDynamics) =
+    _rate_shape(flow) === :scalar ? 1 : length(state.ξ.θ)
+_rate_channel_count(state::AbstractPDMPState, flow::DensePreconditionedZigZag) =
+    length(flow.metric.v_canonical)
+
+_provider_has_directional_derivative(_) = true
+_provider_has_directional_derivative(::Tuple{G,Nothing}) where {G} = false
+
+_can_use_scalar_signed_grid(provider, ::BouncyParticle) = true
+
+_can_use_scalar_signed_grid(
+    provider,
+    ::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+) = true
+
+_can_use_scalar_signed_grid(provider, ::AnyBoomerang) =
+    _provider_has_directional_derivative(provider)
+
 _can_use_scalar_signed_grid(provider, flow::ContinuousDynamics) =
-    _rate_shape(flow) === :scalar || supports_grid_signed_rate_jets(provider)
+    _rate_shape(flow) === :scalar && _supports_rate_derivatives(provider, flow)
 
 _can_use_componentwise_signed_grid(provider, flow::ContinuousDynamics) =
-    _rate_shape(flow) === :componentwise && supports_grid_signed_rate_channel_jets(provider)
+    _rate_shape(flow) === :componentwise &&
+    _provider_has_directional_derivative(provider) &&
+    _supports_rate_derivatives(provider, flow)
 
 function _can_use_signed_grid(state::AbstractPDMPState, flow::ContinuousDynamics, provider)
     shape = _rate_shape(flow)
@@ -783,46 +781,79 @@ function _can_use_signed_grid_bound(alg, state::AbstractPDMPState, flow::Continu
     return _can_use_signed_grid(state, flow, provider)
 end
 
-supports_grid_curvature_bounds(provider) = false
-curvature_bounds_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_cells::Integer) = nothing
+function curvature_bounds_for_grid end
+function channel_curvature_bounds_for_grid end
+function rate_values_and_derivatives_for_grid! end
 
-supports_grid_channel_curvature_bounds(provider) = false
-channel_curvature_bounds_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_channels::Integer, n_cells::Integer) = nothing
+_grid_provider(p) = p
+_grid_provider(p::WithStatsJoint) = p.f
 
-supports_grid_signed_rate_jets(provider) = false
-signed_rate_jets_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_points::Integer) =
-    throw(MethodError(signed_rate_jets_for_grid, (provider, state, flow, t_grid, n_points)))
+function _has_grid_method(f, provider, flow::ContinuousDynamics, extra_types::Type...)
+    return hasmethod(f, Tuple{
+        typeof(_grid_provider(provider)),
+        AbstractPDMPState,
+        typeof(flow),
+        AbstractVector,
+        extra_types...,
+    })
+end
 
-supports_grid_signed_rate_channel_jets(provider) = false
-signed_rate_channel_jets_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_points::Integer) =
-    throw(MethodError(
-        signed_rate_channel_jets_for_grid, (provider, state, flow, t_grid, n_points)))
+_has_curvature_grid_values(provider, flow::ContinuousDynamics) =
+    _has_grid_method(curvature_bounds_for_grid, provider, flow, Integer)
 
-supports_grid_signed_rate_channel_jets(provider::JointProvider) =
-    supports_grid_signed_rate_channel_jets(provider.joint)
-signed_rate_channel_jets_for_grid(provider::JointProvider, state::AbstractPDMPState,
-    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer) =
-    signed_rate_channel_jets_for_grid(provider.joint, state, flow, t_grid, n_points)
+_has_channel_curvature_grid_values(provider, flow::ContinuousDynamics) =
+    _has_grid_method(channel_curvature_bounds_for_grid, provider, flow, Integer, Integer)
 
-supports_grid_signed_rate_channel_jets(provider::WithStatsJoint) =
-    supports_grid_signed_rate_channel_jets(provider.f)
-signed_rate_channel_jets_for_grid(provider::WithStatsJoint, state::AbstractPDMPState,
-    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer) =
-    signed_rate_channel_jets_for_grid(provider.f, state, flow, t_grid, n_points)
+_supports_rate_derivatives(provider, flow::ContinuousDynamics) =
+    hasmethod(rate_values_and_derivatives_for_grid!, Tuple{
+        AbstractMatrix,
+        AbstractMatrix,
+        typeof(_grid_provider(provider)),
+        AbstractPDMPState,
+        typeof(flow),
+        AbstractVector,
+        Integer,
+    })
 
-function signed_rate_channel_jets_for_grid(
+_curvature_grid_values(provider, state, flow, t_grid, n_cells) =
+    curvature_bounds_for_grid(_grid_provider(provider), state, flow, t_grid, n_cells)
+
+_channel_curvature_grid_values(provider, state, flow, t_grid, n_channels, n_cells) =
+    channel_curvature_bounds_for_grid(
+        _grid_provider(provider), state, flow, t_grid, n_channels, n_cells)
+
+function _fill_rate_values_and_derivatives!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
     provider,
-    state::AbstractPDMPState,
-    flow::BouncyParticle,
-    t_grid::AbstractVector,
+    state,
+    flow,
+    t_grid,
+    n_points,
+)
+    return rate_values_and_derivatives_for_grid!(
+        values, derivatives, _grid_provider(provider), state, flow, t_grid, n_points)
+end
+
+function rate_values_and_derivatives_for_grid(provider, state, flow, t_grid, n_points::Integer)
+    values = Matrix{Float64}(undef, _rate_channel_count(state, flow), n_points)
+    derivatives = similar(values)
+    _fill_rate_values_and_derivatives!(values, derivatives, provider, state, flow, t_grid, n_points)
+    return values, derivatives
+end
+
+function _rate_derivative_scratch!(
+    value_buf::Vector{Float64},
+    derivative_buf::Vector{Float64},
+    n_channels::Integer,
     n_points::Integer,
 )
-    g_values, dg_values = signed_rate_jets_for_grid(provider, state, flow, t_grid, n_points)
-    return reshape(collect(g_values), 1, :), reshape(collect(dg_values), 1, :)
+    len = n_channels * n_points
+    length(value_buf) < len && resize!(value_buf, len)
+    length(derivative_buf) < len && resize!(derivative_buf, len)
+    values = reshape(@view(value_buf[1:len]), n_channels, n_points)
+    derivatives = reshape(@view(derivative_buf[1:len]), n_channels, n_points)
+    return values, derivatives
 end
 
 function _curvature_bound_value(value)
@@ -872,9 +903,9 @@ function _prepare_grid_curvature_bound(curvature_bound, state::AbstractPDMPState
     elseif curvature_bound isa Real
         return (global_value=Float64(curvature_bound), first_value=nothing,
             has_first=false, cell_values=nothing)
-    elseif supports_grid_curvature_bounds(curvature_bound)
+    elseif _has_curvature_grid_values(curvature_bound, flow)
         stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
-        values = curvature_bounds_for_grid(curvature_bound, state, flow, t_grid, n_cells)
+        values = _curvature_grid_values(curvature_bound, state, flow, t_grid, n_cells)
         return _normalize_grid_curvature_bounds(values, stats, n_cells, flow)
     end
 
@@ -911,9 +942,9 @@ function _channel_curvature_matrix(
         return zeros(Float64, n_channels, n_cells)
     elseif curvature_bound isa Real
         return fill(Float64(curvature_bound), n_channels, n_cells)
-    elseif supports_grid_channel_curvature_bounds(curvature_bound)
+    elseif _has_channel_curvature_grid_values(curvature_bound, flow)
         stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
-        values = channel_curvature_bounds_for_grid(
+        values = _channel_curvature_grid_values(
             curvature_bound, state, flow, t_grid, n_channels, n_cells)
         return _normalize_channel_curvature_bounds(values, stats, n_channels, n_cells, flow)
     end
@@ -1670,192 +1701,6 @@ function _signed_rate_and_derivative_or_throw(
     end
 end
 
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, (grad, hvp)::Tuple{G,H}) where {G,H}
-    xt, vt = state.ξ.x, state.ξ.θ
-    ∇U_xt = grad(xt)
-    Hxt_vt = hvp(xt, vt)
-    return dot(∇U_xt, vt), extract_vhv(vt, Hxt_vt)
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, (grad, hvp)::Tuple{G,H},
-    cached_gradient::AbstractVector) where {G,H}
-    vt = state.ξ.θ
-    Hxt_vt = hvp(state.ξ.x, vt)
-    return dot(cached_gradient, vt), extract_vhv(vt, Hxt_vt)
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, provider::VHVProvider)
-    xt, vt = state.ξ.x, state.ξ.θ
-    ∇U_xt = provider.grad(xt)
-    return dot(∇U_xt, vt), _compute_vhv_scalar(provider, state, ∇U_xt, flow)
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, provider::VHVProvider,
-    cached_gradient::AbstractVector)
-    return dot(cached_gradient, state.ξ.θ), _compute_vhv_scalar(provider, state, cached_gradient, flow)
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, provider::JointProvider)
-    return provider.joint(state.ξ.x, state.ξ.θ)
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, grad_and_nothing::Tuple{G,Nothing}) where {G}
-    ∇U_xt = grad_and_nothing[1](state.ξ.x)
-    return dot(∇U_xt, state.ξ.θ), 0.0
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, grad_and_nothing::Tuple{G,Nothing},
-    cached_gradient::AbstractVector) where {G}
-    return dot(cached_gradient, state.ξ.θ), 0.0
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, fd::FiniteDiffVHV)
-    xt, vt = state.ξ.x, state.ξ.θ
-    ∇U_xt = fd.grad(xt)
-    copyto!(fd.grad_buf, ∇U_xt)
-    return dot(fd.grad_buf, vt), _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
-end
-
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, fd::FiniteDiffVHV,
-    cached_gradient::AbstractVector)
-    copyto!(fd.grad_buf, cached_gradient)
-    xt, vt = state.ξ.x, state.ξ.θ
-    return dot(fd.grad_buf, vt), _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
-end
-
-signed_rate_and_derivative(
-    state::AbstractPDMPState,
-    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
-    provider,
-    args...,
-) = signed_rate_and_derivative(state, flow.dynamics, provider, args...)
-
-function _reference_mul!(out::AbstractVector, flow::AnyBoomerang, x::AbstractVector)
-    mul!(out, flow.Γ, x)
-    return out
-end
-
-function _reference_mul!(out::AbstractVector, flow::LowRankMutableBoomerang, x::AbstractVector)
-    lowrank_mul!(out, flow.Γ, x, 1.0, 0.0)
-    return out
-end
-
-function _boomerang_signed_rate_and_derivative(
-    state::AbstractPDMPState,
-    flow::AnyBoomerang,
-    grad,
-    hvp,
-    corrected_gradient::AbstractVector,
-)
-    x = state.ξ.x
-    θ = state.ξ.θ
-    y = x .- flow.μ
-    Hθ = hvp(x, θ)
-    Γθ = similar(θ)
-    _reference_mul!(Γθ, flow, θ)
-    Hcorrθ = Hθ .- Γθ
-    return dot(corrected_gradient, θ), dot(θ, Hcorrθ) - dot(corrected_gradient, y)
-end
-
-function signed_rate_and_derivative(
-    state::AbstractPDMPState,
-    flow::AnyBoomerang,
-    (grad, hvp)::Tuple{G,H},
-) where {G,H}
-    return _boomerang_signed_rate_and_derivative(
-        state, flow, grad, hvp, grad(state.ξ.x))
-end
-
-function signed_rate_and_derivative(
-    state::AbstractPDMPState,
-    flow::AnyBoomerang,
-    (grad, hvp)::Tuple{G,H},
-    cached_gradient::AbstractVector,
-) where {G,H}
-    return _boomerang_signed_rate_and_derivative(
-        state, flow, grad, hvp, cached_gradient)
-end
-
-supports_grid_signed_rate_channel_jets(::Tuple{G,H}) where {G,H} = !(H <: Nothing)
-
-function signed_rate_channel_jets_for_grid(
-    (grad, hvp)::Tuple{G,H},
-    state::AbstractPDMPState,
-    flow::ZigZag,
-    t_grid::AbstractVector,
-    n_points::Integer,
-) where {G,H}
-    x0 = state.ξ.x
-    θ = state.ξ.θ
-    n_channels = length(θ)
-    Gmat = Matrix{Float64}(undef, n_channels, n_points)
-    dGmat = Matrix{Float64}(undef, n_channels, n_points)
-    for k in 1:n_points
-        x = x0 .+ t_grid[k] .* θ
-        ∇U = grad(x)
-        Hθ = hvp(x, θ)
-        for j in 1:n_channels
-            Gmat[j, k] = θ[j] * ∇U[j]
-            dGmat[j, k] = θ[j] * Hθ[j]
-        end
-    end
-    return Gmat, dGmat
-end
-
-function signed_rate_channel_jets_for_grid(
-    (grad, hvp)::Tuple{G,H},
-    state::AbstractPDMPState,
-    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
-    t_grid::AbstractVector,
-    n_points::Integer,
-) where {G,H}
-    x0 = state.ξ.x
-    θ = state.ξ.θ
-    n_channels = length(θ)
-    Gmat = Matrix{Float64}(undef, n_channels, n_points)
-    dGmat = Matrix{Float64}(undef, n_channels, n_points)
-    for k in 1:n_points
-        x = x0 .+ t_grid[k] .* θ
-        ∇U = grad(x)
-        Hθ = hvp(x, θ)
-        for j in 1:n_channels
-            Gmat[j, k] = θ[j] * ∇U[j]
-            dGmat[j, k] = θ[j] * Hθ[j]
-        end
-    end
-    return Gmat, dGmat
-end
-
-function signed_rate_channel_jets_for_grid(
-    (grad, hvp)::Tuple{G,H},
-    state::AbstractPDMPState,
-    flow::PreconditionedDynamics{DensePreconditioner,<:ZigZag},
-    t_grid::AbstractVector,
-    n_points::Integer,
-) where {G,H}
-    x0 = state.ξ.x
-    θ = state.ξ.θ
-    L = flow.metric.L
-    v = flow.metric.v_canonical
-    n_channels = length(v)
-    Gmat = Matrix{Float64}(undef, n_channels, n_points)
-    dGmat = Matrix{Float64}(undef, n_channels, n_points)
-    grad_z = Vector{Float64}(undef, n_channels)
-    hθ_z = Vector{Float64}(undef, n_channels)
-    for k in 1:n_points
-        x = x0 .+ t_grid[k] .* θ
-        ∇U = grad(x)
-        Hθ = hvp(x, θ)
-        mul!(grad_z, L', ∇U)
-        mul!(hθ_z, L', Hθ)
-        for j in 1:n_channels
-            Gmat[j, k] = v[j] * grad_z[j]
-            dGmat[j, k] = v[j] * hθ_z[j]
-        end
-    end
-    return Gmat, dGmat
-end
-
 function construct_signed_rate_grid!(
     pcb::PiecewiseConstantBound,
     state::AbstractPDMPState,
@@ -1921,6 +1766,8 @@ function construct_signed_inflated_grid!(
     initial_integral::Float64=0.0,
     append::Bool=false,
     max_componentwise_affine_segments_per_cell::Integer=64,
+    rate_value_buf::Union{Vector{Float64},Nothing}=nothing,
+    rate_derivative_buf::Union{Vector{Float64},Nothing}=nothing,
 )
     build_affine && !append && reset_affine_bound!(bound)
     t_grid = pcb.t_grid
@@ -1934,12 +1781,12 @@ function construct_signed_inflated_grid!(
     n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
-    used_batched_jets = supports_grid_signed_rate_jets(provider) && n_time_cells > 0
+    used_batched_derivatives = _supports_rate_derivatives(provider, flow) && n_time_cells > 0
     loaded_batched_points = start_cell == 1 ? 0 : start_cell
     if start_cell > 1
         move_forward_time!(state_t, t_grid[start_cell], flow)
-    elseif used_batched_jets
-        loaded_batched_points = _load_signed_rate_jets!(
+    elseif used_batched_derivatives
+        loaded_batched_points = _load_rate_derivatives!(
             pcb, provider, state, flow, 1, n_time_cells + 1, loaded_batched_points, stats)
     elseif cached_gradient === nothing
         if stats !== nothing
@@ -1975,8 +1822,8 @@ function construct_signed_inflated_grid!(
         end
 
         Δt = t_grid[i] - t_grid[i - 1]
-        if used_batched_jets
-            loaded_batched_points = _load_signed_rate_jets!(
+        if used_batched_derivatives
+            loaded_batched_points = _load_rate_derivatives!(
                 pcb, provider, state, flow, i, n_time_cells + 1, loaded_batched_points, stats)
         else
             move_forward_time!(state_t, Δt, flow)
@@ -2067,6 +1914,8 @@ function construct_signed_inflated_grid!(
     initial_integral::Float64=0.0,
     append::Bool=false,
     max_componentwise_affine_segments_per_cell::Integer=64,
+    rate_value_buf::Union{Vector{Float64},Nothing}=nothing,
+    rate_derivative_buf::Union{Vector{Float64},Nothing}=nothing,
 )
     build_affine && !append && reset_affine_bound!(bound)
     t_grid = pcb.t_grid
@@ -2083,13 +1932,18 @@ function construct_signed_inflated_grid!(
     start_point = start_cell
     stop_point = n_time_cells + 1
     n_points = stop_point - start_point + 1
-    stats !== nothing && (_inc_counter_grid_endpoint_jet_calls(stats))
-    stats !== nothing && (_inc_counter_grid_endpoint_jet_points_loaded(stats, n_points))
-    G, dG = signed_rate_channel_jets_for_grid(
-        provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
-    n_channels = size(G, 1)
-    size(G, 2) >= n_points && size(dG, 1) >= n_channels && size(dG, 2) >= n_points ||
-        throw(ArgumentError("signed channel jet matrices have incompatible sizes"))
+    n_channels = _rate_channel_count(state, flow)
+    if rate_value_buf === nothing || rate_derivative_buf === nothing
+        G = Matrix{Float64}(undef, n_channels, n_points)
+        dG = similar(G)
+    else
+        G, dG = _rate_derivative_scratch!(
+            rate_value_buf, rate_derivative_buf, n_channels, n_points)
+    end
+    stats !== nothing && (_inc_counter_grid_endpoint_derivative_calls(stats))
+    stats !== nothing && (_inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points))
+    _fill_rate_values_and_derivatives!(
+        G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
     stats !== nothing && (_inc_counter_componentwise_channels(stats, n_channels))
     stats !== nothing && (_inc_counter_componentwise_channel_point_evaluations(
         stats, n_channels * n_points))
@@ -2545,6 +2399,8 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         similar(state.ξ.x),
         similar(state.ξ.x),
         similar(state.ξ.x),
+        Float64[],
+        Float64[],
         Ref(NaN),
         Ref(0.0),
         strat.post_warmup_simplify,
@@ -2590,6 +2446,8 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     fd_buf::Vector{Float64}
     fd_grad_buf::Vector{Float64}
     fd_w_buf::Vector{Float64}
+    rate_value_buf::Vector{Float64}
+    rate_derivative_buf::Vector{Float64}
     constant_bound_rate::Base.RefValue{Float64}
     max_observed_rate::Base.RefValue{Float64}
     post_warmup_simplify::Bool
@@ -2864,7 +2722,7 @@ end
 function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState)
     joint_func = model.joint
     if joint_func !== nothing && _joint_compatible(flow)
-        return JointProvider(joint_func)
+        return joint_func
     end
     vhv_func = model.vhv
     if vhv_func !== nothing
@@ -2945,7 +2803,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     use_affine = _use_affine_envelope(alg, state, flow, grad_and_hvp)
     use_inflated_constant = _use_inflated_constant_envelope(alg, state, flow, grad_and_hvp)
     use_single_pass_signed = _use_signed_grid_bound(alg, state, flow, grad_and_hvp)
-    use_constant_batched_signed = !use_single_pass_signed && _supports_constant_grid_signed_jets(flow, grad_and_hvp)
+    use_constant_batched_signed = !use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, grad_and_hvp)
     had_cached_gradient = alg.has_cached_gradient[]
     if use_single_pass_signed
         cached_gradient = had_cached_gradient ? alg.cached_gradient : nothing
@@ -2968,6 +2826,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             certified_auto=_certified_auto_envelope(alg.envelope),
             max_componentwise_affine_segments_per_cell=
                 alg.max_componentwise_affine_segments_per_cell,
+            rate_value_buf=alg.rate_value_buf,
+            rate_derivative_buf=alg.rate_derivative_buf,
             probe_failure_handler,
         )
         _record_certified_auto_grid_choice!(
@@ -3094,7 +2954,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             use_affine = _use_affine_envelope(alg, state, flow, grad_and_hvp)
             use_inflated_constant = _use_inflated_constant_envelope(alg, state, flow, grad_and_hvp)
             use_single_pass_signed = _use_signed_grid_bound(alg, state, flow, grad_and_hvp)
-            use_constant_batched_signed = !use_single_pass_signed && _supports_constant_grid_signed_jets(flow, grad_and_hvp)
+            use_constant_batched_signed = !use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, grad_and_hvp)
             use_constant_batched_signed && (alg.has_cached_gradient[] = false)
             if use_single_pass_signed
                 auto_flat_before = _get_counter_certified_auto_flat_cells(stats)
@@ -3114,6 +2974,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                     certified_auto=_certified_auto_envelope(alg.envelope),
                     max_componentwise_affine_segments_per_cell=
                         alg.max_componentwise_affine_segments_per_cell,
+                    rate_value_buf=alg.rate_value_buf,
+                    rate_derivative_buf=alg.rate_derivative_buf,
                     probe_failure_handler,
                     start_cell,
                     initial_integral=built_area,

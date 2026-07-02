@@ -387,6 +387,56 @@ end
 
 λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang) = pos(dot(∇ϕ, ξ.θ))
 
+function _reference_mul!(out::AbstractVector, flow::AnyBoomerang, x::AbstractVector)
+    mul!(out, flow.Γ, x)
+    return out
+end
+
+function _reference_mul!(
+    out::AbstractVector,
+    flow::MutableBoomerang{<:LowRankPrecision},
+    x::AbstractVector,
+)
+    lowrank_mul!(out, flow.Γ, x, 1.0, 0.0)
+    return out
+end
+
+function _boomerang_signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    grad,
+    hvp,
+    corrected_gradient::AbstractVector,
+)
+    x = state.ξ.x
+    θ = state.ξ.θ
+    y = x .- flow.μ
+    Hθ = hvp(x, θ)
+    Γθ = similar(θ)
+    _reference_mul!(Γθ, flow, θ)
+    Hcorrθ = Hθ .- Γθ
+    return dot(corrected_gradient, θ), dot(θ, Hcorrθ) - dot(corrected_gradient, y)
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    (grad, hvp)::Tuple{G,H},
+) where {G,H}
+    return _boomerang_signed_rate_and_derivative(
+        state, flow, grad, hvp, grad(state.ξ.x))
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    (grad, hvp)::Tuple{G,H},
+    cached_gradient::AbstractVector,
+) where {G,H}
+    return _boomerang_signed_rate_and_derivative(
+        state, flow, grad, hvp, cached_gradient)
+end
+
 function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
