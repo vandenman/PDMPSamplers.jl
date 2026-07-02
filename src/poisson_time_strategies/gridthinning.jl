@@ -741,18 +741,100 @@ struct GlobalCertifiedUpperCurvature{T<:Real} <: AbstractCurvatureCertificate
     value::T
 end
 
+struct BoomerangCertifiedUpperCurvature{T<:Real} <: AbstractCurvatureCertificate
+    value::T
+end
+
+struct BoomerangLogisticGaussianReferenceCertificate{TX<:AbstractMatrix}
+    X::TX
+end
+
 struct NoCertificate <: AbstractCurvatureCertificate end
+
+abstract type AbstractSignedRateGeometry end
+struct ScalarSignedRateGeometry <: AbstractSignedRateGeometry end
+struct ComponentwiseSignedRateGeometry <: AbstractSignedRateGeometry end
+struct UnsupportedSignedRateGeometry <: AbstractSignedRateGeometry end
+
+signed_rate_geometry(provider, flow) = UnsupportedSignedRateGeometry()
+signed_rate_geometry(provider, flow::BouncyParticle) =
+    supports_scalar_signed_rate_channel(provider, flow) ?
+        ScalarSignedRateGeometry() : UnsupportedSignedRateGeometry()
+signed_rate_geometry(provider, flow::ZigZag) =
+    supports_signed_rate_channel_jets(provider, flow) ?
+        ComponentwiseSignedRateGeometry() : UnsupportedSignedRateGeometry()
+signed_rate_geometry(provider, flow::AnyBoomerang) =
+    supports_scalar_signed_rate_channel(provider, flow) ?
+        ScalarSignedRateGeometry() : UnsupportedSignedRateGeometry()
+signed_rate_geometry(provider, flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) =
+    supports_scalar_signed_rate_channel(provider, flow) ?
+        ScalarSignedRateGeometry() : UnsupportedSignedRateGeometry()
+signed_rate_geometry(
+    provider,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
+) = supports_signed_rate_channel_jets(provider, flow) ?
+        ComponentwiseSignedRateGeometry() : UnsupportedSignedRateGeometry()
+signed_rate_geometry(
+    provider,
+    flow::PreconditionedDynamics{DensePreconditioner,<:ZigZag},
+) = supports_signed_rate_channel_jets(provider, flow) ?
+        ComponentwiseSignedRateGeometry() : UnsupportedSignedRateGeometry()
+signed_rate_geometry(provider, ::PreconditionedDynamics) = UnsupportedSignedRateGeometry()
+
+_signed_rate_geometry_supported(provider, flow) =
+    !(signed_rate_geometry(provider, flow) isa UnsupportedSignedRateGeometry)
+
+# Preconditioned Boomerang is intentionally unsupported here.  Plain Boomerang
+# signed-rate jets below use the nonlinear flow and corrected-gradient
+# convention directly; preconditioned wrappers need a separate derivation.
+supports_scalar_signed_rate_channel(provider, flow::ContinuousDynamics) = false
+supports_scalar_signed_rate_channel(provider, ::BouncyParticle) =
+    supports_grid_signed_rate_jets(provider)
+supports_scalar_signed_rate_channel(::Tuple{G,H}, ::BouncyParticle) where {G,H} =
+    !(H <: Nothing)
+supports_scalar_signed_rate_channel(::Tuple{G,H}, ::AnyBoomerang) where {G,H} =
+    !(H <: Nothing)
+supports_scalar_signed_rate_channel(
+    ::Tuple{G,H},
+    ::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+) where {G,H} = !(H <: Nothing)
+supports_scalar_signed_rate_channel(::VHVProvider, ::BouncyParticle) = true
+supports_scalar_signed_rate_channel(::JointProvider, ::BouncyParticle) = true
+supports_scalar_signed_rate_channel(provider::WithStatsJoint, flow::BouncyParticle) =
+    supports_scalar_signed_rate_channel(JointProvider(provider), flow)
+
+supports_signed_rate_channel_jets(provider, flow::ContinuousDynamics) = false
+supports_signed_rate_channel_jets(provider, ::ZigZag) =
+    supports_grid_signed_rate_channel_jets(provider)
+supports_signed_rate_channel_jets(
+    provider,
+    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
+) = supports_grid_signed_rate_channel_jets(provider)
+supports_signed_rate_channel_jets(
+    provider,
+    ::PreconditionedDynamics{DensePreconditioner,<:ZigZag},
+) = supports_grid_signed_rate_channel_jets(provider)
 
 supports_certified_roof(::AbstractPDMPState, ::BouncyParticle, provider) = true
 supports_certified_roof(state::AbstractPDMPState, pd::PreconditionedDynamics, provider) =
     supports_certified_roof(state, pd.dynamics, provider)
 supports_certified_roof(::AbstractPDMPState, ::ContinuousDynamics, provider) = false
 
-supports_signed_certified_roof(::AbstractPDMPState, ::BouncyParticle, provider) = true
-supports_signed_certified_roof(::AbstractPDMPState, ::ContinuousDynamics, provider) = false
+supports_signed_certified_roof(::AbstractPDMPState, flow::ContinuousDynamics, provider) =
+    _signed_rate_geometry_supported(provider, flow)
 supports_signed_certified_roof(::AbstractPDMPState, ::BouncyParticle, ::FiniteDiffVHV) = false
 supports_signed_certified_roof(::AbstractPDMPState, ::BouncyParticle, ::FiniteDiffHVP) = false
 supports_signed_certified_roof(::AbstractPDMPState, ::BouncyParticle, ::Tuple{G,Nothing}) where {G} = false
+supports_signed_certified_roof(::AbstractPDMPState, ::ZigZag, ::Tuple{G,Nothing}) where {G} = false
+supports_signed_certified_roof(::AbstractPDMPState, ::ZigZag, ::FiniteDiffVHV) = false
+supports_signed_certified_roof(::AbstractPDMPState, ::ZigZag, ::FiniteDiffHVP) = false
+supports_signed_certified_roof(::AbstractPDMPState, ::ZigZag, ::VHVProvider) = false
+supports_signed_certified_roof(::AbstractPDMPState, ::ZigZag, ::JointProvider) = false
+
+supports_boomerang_curvature_certificate(cert) = !(cert isa AbstractCurvatureCertificate)
+supports_boomerang_curvature_certificate(::BoomerangCertifiedUpperCurvature) = true
+supports_boomerang_curvature_certificate(::NoCertificate) = true
+supports_boomerang_curvature_certificate(::AbstractCurvatureCertificate) = false
 
 _certified_auto_envelope(envelope::Symbol) =
     envelope === :certified_auto || envelope === :certified_auto_affine_sticky
@@ -797,14 +879,33 @@ function _can_use_signed_certified_roof(alg, state::AbstractPDMPState, flow::Con
             "envelope=$(alg.envelope) with certification=:required needs curvature_bound returning CertifiedUpperCurvature"))
         return false
     end
+    if flow isa AnyBoomerang && !supports_boomerang_curvature_certificate(alg.curvature_bound)
+        mode === :required && throw(ArgumentError(
+            "certified Boomerang GridThinning requires BoomerangCertifiedUpperCurvature; " *
+            "generic HVP curvature certificates may use the wrong flow convention"))
+        return false
+    end
     return true
 end
 
 _normalize_curvature_certificate(cert::CertifiedUpperCurvature) = cert
 _normalize_curvature_certificate(cert::GlobalCertifiedUpperCurvature) = cert
+_normalize_curvature_certificate(cert::BoomerangCertifiedUpperCurvature) = cert
 _normalize_curvature_certificate(::NoCertificate) = NoCertificate()
 _normalize_curvature_certificate(::Nothing) = NoCertificate()
 _normalize_curvature_certificate(cert) = cert
+
+function _validate_curvature_certificate_for_flow(cert, flow::ContinuousDynamics)
+    return cert
+end
+
+function _validate_curvature_certificate_for_flow(cert, flow::AnyBoomerang)
+    cert isa BoomerangCertifiedUpperCurvature && return cert
+    cert isa NoCertificate && return cert
+    throw(ArgumentError(
+        "certified Boomerang GridThinning requires BoomerangCertifiedUpperCurvature; " *
+        "generic HVP curvature certificates may use the wrong flow convention"))
+end
 
 rate_curvature_upper_bound(::Nothing, state::AbstractPDMPState, flow::ContinuousDynamics, a::Real, b::Real) = NoCertificate()
 rate_curvature_upper_bound(cert::AbstractCurvatureCertificate, state::AbstractPDMPState, flow::ContinuousDynamics, a::Real, b::Real) =
@@ -812,18 +913,85 @@ rate_curvature_upper_bound(cert::AbstractCurvatureCertificate, state::AbstractPD
 rate_curvature_upper_bound(provider, state::AbstractPDMPState, flow::ContinuousDynamics, a::Real, b::Real) =
     _normalize_curvature_certificate(provider(state, flow, a, b))
 
+function rate_curvature_upper_bound(
+    cert::BoomerangLogisticGaussianReferenceCertificate,
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    a::Real,
+    b::Real,
+)
+    y = state.ξ.x .- flow.μ
+    θ = state.ξ.θ
+    cubic_sum = 0.0
+    quadratic_sum = 0.0
+    linear_sum = 0.0
+    @inbounds for i in axes(cert.X, 1)
+        α = zero(eltype(cert.X))
+        β = zero(eltype(cert.X))
+        for j in axes(cert.X, 2)
+            xij = cert.X[i, j]
+            α += xij * y[j]
+            β += xij * θ[j]
+        end
+        r = hypot(α, β)
+        cubic_sum += r^3
+        quadratic_sum += r^2
+        linear_sum += r
+    end
+    L = cubic_sum / (6sqrt(3.0)) + (3 / 8) * quadratic_sum + linear_sum
+    return BoomerangCertifiedUpperCurvature(L)
+end
+
 supports_grid_curvature_bounds(provider) = false
 curvature_bounds_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
     t_grid::AbstractVector, n_cells::Integer) = NoCertificate()
+
+supports_grid_channel_curvature_bounds(provider) = false
+channel_curvature_bounds_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
+    t_grid::AbstractVector, n_channels::Integer, n_cells::Integer) = NoCertificate()
 
 supports_grid_signed_rate_jets(provider) = false
 signed_rate_jets_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
     t_grid::AbstractVector, n_points::Integer) =
     throw(MethodError(signed_rate_jets_for_grid, (provider, state, flow, t_grid, n_points)))
 
-function _curvature_certificate_value(cert, certification::Symbol)
+supports_grid_signed_rate_channel_jets(provider) = false
+signed_rate_channel_jets_for_grid(provider, state::AbstractPDMPState, flow::ContinuousDynamics,
+    t_grid::AbstractVector, n_points::Integer) =
+    throw(MethodError(
+        signed_rate_channel_jets_for_grid, (provider, state, flow, t_grid, n_points)))
+
+supports_grid_signed_rate_channel_jets(provider::JointProvider) =
+    supports_grid_signed_rate_channel_jets(provider.joint)
+signed_rate_channel_jets_for_grid(provider::JointProvider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer) =
+    signed_rate_channel_jets_for_grid(provider.joint, state, flow, t_grid, n_points)
+
+supports_grid_signed_rate_channel_jets(provider::WithStatsJoint) =
+    supports_grid_signed_rate_channel_jets(provider.f)
+signed_rate_channel_jets_for_grid(provider::WithStatsJoint, state::AbstractPDMPState,
+    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer) =
+    signed_rate_channel_jets_for_grid(provider.f, state, flow, t_grid, n_points)
+
+function signed_rate_channel_jets_for_grid(
+    provider,
+    state::AbstractPDMPState,
+    flow::BouncyParticle,
+    t_grid::AbstractVector,
+    n_points::Integer,
+)
+    g_values, dg_values = signed_rate_jets_for_grid(provider, state, flow, t_grid, n_points)
+    return reshape(collect(g_values), 1, :), reshape(collect(dg_values), 1, :)
+end
+
+function _curvature_certificate_value(cert, certification::Symbol, flow::ContinuousDynamics)
     mode = _validate_certification_mode(certification)
-    if cert isa Union{CertifiedUpperCurvature,GlobalCertifiedUpperCurvature}
+    cert = _validate_curvature_certificate_for_flow(cert, flow)
+    if cert isa Union{
+        CertifiedUpperCurvature,
+        GlobalCertifiedUpperCurvature,
+        BoomerangCertifiedUpperCurvature,
+    }
         L = cert.value
         isfinite(L) || throw(ArgumentError("curvature certificate value must be finite, got $(L)"))
         return L
@@ -838,23 +1006,26 @@ function _curvature_certificate_value(cert, certification::Symbol)
         throw(ArgumentError("unsupported curvature certificate return type $(typeof(cert))"))
     end
 end
+_curvature_certificate_value(cert, certification::Symbol) =
+    _curvature_certificate_value(cert, certification, BouncyParticle(1, 0.0))
 
 function _evaluate_curvature_provider(curvature_bound, state::AbstractPDMPState, flow::ContinuousDynamics,
     a::Real, b::Real, stats::Union{AbstractStatisticCounter,Nothing}, certification::Symbol)
     !(curvature_bound isa AbstractCurvatureCertificate) && stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
     cert = rate_curvature_upper_bound(curvature_bound, state, flow, a, b)
-    value = _curvature_certificate_value(cert, certification)
+    value = _curvature_certificate_value(cert, certification, flow)
     value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, 1))
     return cert, value
 end
 
-function _normalize_grid_curvature_values(certs, certification::Symbol, stats::Union{AbstractStatisticCounter,Nothing}, n_cells::Integer)
+function _normalize_grid_curvature_values(certs, certification::Symbol,
+    stats::Union{AbstractStatisticCounter,Nothing}, n_cells::Integer, flow::ContinuousDynamics)
     certs = _normalize_curvature_certificate(certs)
     if certs isa GlobalCertifiedUpperCurvature
-        return (global_value=_curvature_certificate_value(certs, certification),
+        return (global_value=_curvature_certificate_value(certs, certification, flow),
             first_value=nothing, has_first=false, cell_values=nothing)
     elseif certs isa AbstractCurvatureCertificate
-        value = _curvature_certificate_value(certs, certification)
+        value = _curvature_certificate_value(certs, certification, flow)
         value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_cells))
         return (global_value=nothing, first_value=value, has_first=true, cell_values=nothing)
     elseif certs isa AbstractVector
@@ -862,7 +1033,8 @@ function _normalize_grid_curvature_values(certs, certification::Symbol, stats::U
             "curvature_bounds_for_grid returned $(length(certs)) certificates for $(n_cells) cells"))
         values = Vector{Union{Nothing,Float64}}(undef, n_cells)
         for i in 1:n_cells
-            value = _curvature_certificate_value(_normalize_curvature_certificate(certs[i]), certification)
+            cert = _normalize_curvature_certificate(certs[i])
+            value = _curvature_certificate_value(cert, certification, flow)
             value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, 1))
             values[i] = value === nothing ? nothing : Float64(value)
         end
@@ -874,25 +1046,25 @@ end
 
 function _prepare_grid_curvature_certificate(curvature_bound, state::AbstractPDMPState, flow::ContinuousDynamics,
     t_grid::AbstractVector, n_cells::Integer, stats::Union{AbstractStatisticCounter,Nothing}, certification::Symbol)
-    if curvature_bound isa GlobalCertifiedUpperCurvature
-        return (global_value=_curvature_certificate_value(curvature_bound, certification),
+    if curvature_bound isa Union{GlobalCertifiedUpperCurvature,BoomerangCertifiedUpperCurvature}
+        return (global_value=_curvature_certificate_value(curvature_bound, certification, flow),
             first_value=nothing, has_first=false, cell_values=nothing)
     elseif curvature_bound isa CertifiedUpperCurvature || curvature_bound isa NoCertificate
-        value = _curvature_certificate_value(curvature_bound, certification)
+        value = _curvature_certificate_value(curvature_bound, certification, flow)
         value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_cells))
         return (global_value=nothing, first_value=value, has_first=true, cell_values=nothing)
     elseif curvature_bound === nothing
-        value = _curvature_certificate_value(NoCertificate(), certification)
+        value = _curvature_certificate_value(NoCertificate(), certification, flow)
         value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_cells))
         return (global_value=nothing, first_value=value, has_first=true, cell_values=nothing)
     elseif supports_grid_curvature_bounds(curvature_bound)
         stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
         certs = curvature_bounds_for_grid(curvature_bound, state, flow, t_grid, n_cells)
-        return _normalize_grid_curvature_values(certs, certification, stats, n_cells)
+        return _normalize_grid_curvature_values(certs, certification, stats, n_cells, flow)
     end
 
     cert, value = _evaluate_curvature_provider(curvature_bound, state, flow, t_grid[1], t_grid[n_cells + 1], stats, certification)
-    if cert isa GlobalCertifiedUpperCurvature
+    if cert isa Union{GlobalCertifiedUpperCurvature,BoomerangCertifiedUpperCurvature}
         return (global_value=value, first_value=nothing, has_first=false, cell_values=nothing)
     end
     return (global_value=nothing, first_value=value, has_first=true, cell_values=nothing)
@@ -910,6 +1082,71 @@ function _prepared_or_cell_curvature_value(prepared, cell::Integer, curvature_bo
     end
     _, value = _evaluate_curvature_provider(curvature_bound, state, flow, a, b, stats, certification)
     return value
+end
+
+function _channel_curvature_matrix(
+    curvature_bound,
+    state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    t_grid::AbstractVector,
+    n_channels::Integer,
+    n_cells::Integer,
+    stats::Union{AbstractStatisticCounter,Nothing},
+    certification::Symbol,
+)
+    if curvature_bound isa Union{GlobalCertifiedUpperCurvature,BoomerangCertifiedUpperCurvature}
+        value = _curvature_certificate_value(curvature_bound, certification, flow)
+        return fill(Float64(value), n_channels, n_cells)
+    elseif supports_grid_channel_curvature_bounds(curvature_bound)
+        stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
+        certs = channel_curvature_bounds_for_grid(
+            curvature_bound, state, flow, t_grid, n_channels, n_cells)
+        return _normalize_channel_curvature_values(certs, certification, stats,
+            n_channels, n_cells, flow)
+    end
+    prepared = _prepare_grid_curvature_certificate(
+        curvature_bound, state, flow, t_grid, n_cells, stats, certification)
+    L = Matrix{Float64}(undef, n_channels, n_cells)
+    for cell in 1:n_cells
+        a = t_grid[cell]
+        b = t_grid[cell + 1]
+        value = _prepared_or_cell_curvature_value(
+            prepared, cell, curvature_bound, state, flow, a, b, stats, certification)
+        L[:, cell] .= Float64(value)
+    end
+    return L
+end
+
+function _normalize_channel_curvature_values(
+    certs,
+    certification::Symbol,
+    stats::Union{AbstractStatisticCounter,Nothing},
+    n_channels::Integer,
+    n_cells::Integer,
+    flow::ContinuousDynamics,
+)
+    certs = _normalize_curvature_certificate(certs)
+    if certs isa Union{
+        GlobalCertifiedUpperCurvature,
+        CertifiedUpperCurvature,
+        BoomerangCertifiedUpperCurvature,
+    }
+        value = _curvature_certificate_value(certs, certification, flow)
+        return fill(Float64(value), n_channels, n_cells)
+    elseif certs isa AbstractMatrix
+        size(certs, 1) >= n_channels && size(certs, 2) >= n_cells ||
+            throw(ArgumentError("channel curvature certificate matrix is too small"))
+        values = Matrix{Float64}(undef, n_channels, n_cells)
+        for cell in 1:n_cells, channel in 1:n_channels
+            cert = _normalize_curvature_certificate(certs[channel, cell])
+            value = _curvature_certificate_value(cert, certification, flow)
+            value === nothing && stats !== nothing &&
+                (_inc_counter_grid_certificate_fallbacks(stats, 1))
+            values[channel, cell] = Float64(value)
+        end
+        return values
+    end
+    throw(ArgumentError("unsupported channel curvature certificate type $(typeof(certs))"))
 end
 
 function _affine_cell_tolerances(a::Real, b::Real, y_a::Real, y_b::Real, d_a::Real, d_b::Real, M::Real)
@@ -1257,6 +1494,270 @@ function _signed_inflated_flat_upper(a::Real, b::Real, g_a::Real, g_b::Real, dg_
     return max(M, 0.0)
 end
 
+function _signed_inflated_roof_lines(
+    a::Real,
+    b::Real,
+    g_a::Real,
+    g_b::Real,
+    dg_a::Real,
+    dg_b::Real,
+    L,
+)
+    h = b - a
+    Lbar = max(float(L), 0.0)
+    beta_a = dg_a + 0.5 * Lbar * h
+    beta_b = dg_b - 0.5 * Lbar * h
+    alpha_a = float(g_a)
+    alpha_b = float(g_b) - beta_b * h
+    return alpha_a, beta_a, alpha_b, beta_b
+end
+
+function _push_componentwise_breakpoint!(
+    breakpoints::Vector{Float64},
+    s::Real,
+    h::Real,
+    time_tol::Real,
+)
+    if s > time_tol && s < h - time_tol
+        push!(breakpoints, Float64(s))
+    end
+    return breakpoints
+end
+
+function _merge_componentwise_breakpoints!(breakpoints::Vector{Float64}, time_tol::Real)
+    sort!(breakpoints)
+    n_in = length(breakpoints)
+    n_in <= 1 && return n_in
+    write = 1
+    for read in 2:n_in
+        if abs(breakpoints[read] - breakpoints[write]) > time_tol
+            write += 1
+            breakpoints[write] = breakpoints[read]
+        end
+    end
+    resize!(breakpoints, write)
+    return n_in - write
+end
+
+function _add_signed_roof_breakpoints!(
+    breakpoints::Vector{Float64},
+    a::Real,
+    b::Real,
+    g_a::Real,
+    g_b::Real,
+    dg_a::Real,
+    dg_b::Real,
+    L,
+    slope_tol::Real,
+    time_tol::Real,
+)
+    h = b - a
+    alpha_a, beta_a, alpha_b, beta_b =
+        _signed_inflated_roof_lines(a, b, g_a, g_b, dg_a, dg_b, L)
+    denom = beta_a - beta_b
+    if abs(denom) > slope_tol
+        _push_componentwise_breakpoint!(
+            breakpoints, (alpha_b - alpha_a) / denom, h, time_tol)
+    end
+    for (alpha, beta) in ((alpha_a, beta_a), (alpha_b, beta_b))
+        abs(beta) > slope_tol &&
+            _push_componentwise_breakpoint!(breakpoints, -alpha / beta, h, time_tol)
+    end
+    return breakpoints
+end
+
+function _signed_roof_line_on_subinterval(
+    a::Real,
+    b::Real,
+    g_a::Real,
+    g_b::Real,
+    dg_a::Real,
+    dg_b::Real,
+    L,
+    s_mid::Real,
+)
+    alpha_a, beta_a, alpha_b, beta_b =
+        _signed_inflated_roof_lines(a, b, g_a, g_b, dg_a, dg_b, L)
+    val_a = alpha_a + beta_a * s_mid
+    val_b = alpha_b + beta_b * s_mid
+    return val_a <= val_b ? (alpha_a, beta_a) : (alpha_b, beta_b)
+end
+
+function _append_componentwise_flat_cell!(
+    bound::PiecewiseAffineBound,
+    stats::Union{AbstractStatisticCounter,Nothing},
+    a::Real,
+    b::Real,
+    M::Real;
+    certified_auto::Bool=false,
+    reason::Symbol=:other,
+)
+    if stats !== nothing
+        _inc_counter_componentwise_flat_fallback_cells(stats)
+        if reason === :segment_cap
+            _inc_counter_componentwise_flat_fallback_segment_cap(stats)
+        elseif reason === :numerical
+            _inc_counter_componentwise_flat_fallback_numerical(stats)
+        elseif reason === :area_gate
+            _inc_counter_componentwise_affine_skipped_by_area_gate(stats)
+            _inc_counter_componentwise_flat_fallback_area_gate(stats)
+        elseif reason === :policy
+            _inc_counter_componentwise_affine_skipped_by_policy(stats)
+            _inc_counter_componentwise_flat_fallback_policy(stats)
+        else
+            _inc_counter_componentwise_flat_fallback_other(stats)
+        end
+    end
+    return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+end
+
+function _componentwise_zero_crossing_count(
+    G::AbstractMatrix,
+    left::Integer,
+)
+    count = 0
+    for channel in axes(G, 1)
+        g_left = G[channel, left]
+        g_right = G[channel, left + 1]
+        if iszero(g_left) || iszero(g_right) || signbit(g_left) != signbit(g_right)
+            count += 1
+        end
+    end
+    return count
+end
+
+function _append_componentwise_signed_affine_cell!(
+    bound::PiecewiseAffineBound,
+    stats::Union{AbstractStatisticCounter,Nothing},
+    a::Real,
+    b::Real,
+    G::AbstractMatrix,
+    dG::AbstractMatrix,
+    L::AbstractMatrix,
+    left::Integer,
+    cell::Integer,
+    M::Real;
+    affine_area_threshold::Real=1.0,
+    affine_min_area_gain::Real=0.0,
+    certified_auto::Bool=false,
+    max_segments::Integer=64,
+)
+    h = b - a
+    n_channels = size(G, 1)
+    if !(isfinite(a) && isfinite(b) && isfinite(M) && h > 0)
+        return _append_componentwise_flat_cell!(
+            bound, stats, a, b, M; certified_auto, reason=:numerical)
+    end
+
+    _, slope_tol, time_tol, area_tol =
+        _affine_cell_tolerances(a, b, 0.0, M, 0.0, 0.0, M)
+    breakpoints = Float64[0.0, h]
+    zero_crossings = _componentwise_zero_crossing_count(G, left)
+    for channel in 1:n_channels
+        values = (
+            G[channel, left],
+            G[channel, left + 1],
+            dG[channel, left],
+            dG[channel, left + 1],
+            L[channel, cell],
+        )
+        all(isfinite, values) ||
+            return _append_componentwise_flat_cell!(
+                bound, stats, a, b, M; certified_auto, reason=:numerical)
+        _add_signed_roof_breakpoints!(
+            breakpoints, a, b, values[1], values[2], values[3], values[4],
+            values[5], slope_tol, time_tol)
+    end
+    proposed_breakpoints = max(length(breakpoints) - 2, 0)
+    merged = _merge_componentwise_breakpoints!(breakpoints, time_tol)
+    if length(breakpoints) - 1 > max_segments
+        _record_counter_componentwise_cell_diagnostics!(
+            stats, proposed_breakpoints, length(breakpoints) - 1, zero_crossings, 0.0, 0.0)
+        return _append_componentwise_flat_cell!(
+            bound, stats, a, b, M; certified_auto, reason=:segment_cap)
+    end
+
+    start_segments = bound.n_segments
+    affine_area = 0.0
+    try
+        for k in 1:(length(breakpoints) - 1)
+            s_left = breakpoints[k]
+            s_right = breakpoints[k + 1]
+            s_mid = (s_left + s_right) / 2
+            total_alpha = 0.0
+            total_beta = 0.0
+            for channel in 1:n_channels
+                alpha, beta = _signed_roof_line_on_subinterval(
+                    a, b, G[channel, left], G[channel, left + 1],
+                    dG[channel, left], dG[channel, left + 1], L[channel, cell], s_mid)
+                if alpha + beta * s_mid > area_tol
+                    total_alpha += alpha + beta * s_left
+                    total_beta += beta
+                end
+            end
+            append_affine_segment!(bound, a + s_left, a + s_right, max(total_alpha, 0.0), total_beta)
+            affine_area += _affine_segment_area(total_alpha, total_beta, s_right - s_left)
+        end
+    catch err
+        bound.n_segments = start_segments
+        return _append_componentwise_flat_cell!(
+            bound, stats, a, b, M; certified_auto, reason=:numerical)
+    end
+
+    flat_area = pos(M) * h
+    if affine_area < -area_tol || affine_area > flat_area + max(area_tol, 1e-10 * max(1.0, flat_area))
+        bound.n_segments = start_segments
+        return _append_componentwise_flat_cell!(
+            bound, stats, a, b, M; certified_auto, reason=:numerical)
+    end
+
+    area_gain = flat_area - max(affine_area, 0.0)
+    saved_fraction = flat_area <= area_tol ? 0.0 : max(area_gain, 0.0) / flat_area
+    segments_added = bound.n_segments - start_segments
+    if area_gain <= max(float(affine_min_area_gain), 0.0)
+        bound.n_segments = start_segments
+        stats !== nothing && (_inc_counter_affine_cells_skipped_by_min_gain(stats))
+        _record_counter_componentwise_cell_diagnostics!(
+            stats, proposed_breakpoints, segments_added, zero_crossings, area_gain, saved_fraction)
+        return _append_componentwise_flat_cell!(
+            bound, stats, a, b, M; certified_auto, reason=:area_gate)
+    end
+
+    threshold = float(affine_area_threshold)
+    if threshold < 1.0 && flat_area > area_tol && affine_area / flat_area >= threshold
+        bound.n_segments = start_segments
+        _record_counter_componentwise_cell_diagnostics!(
+            stats, proposed_breakpoints, segments_added, zero_crossings, area_gain, saved_fraction)
+        return _append_componentwise_flat_cell!(
+            bound, stats, a, b, M; certified_auto, reason=:area_gate)
+    end
+
+    if stats !== nothing
+        _record_counter_componentwise_cell_diagnostics!(
+            stats, proposed_breakpoints, segments_added, zero_crossings,
+            max(area_gain, 0.0), saved_fraction)
+        _inc_counter_affine_inflated_cells(stats)
+        _inc_counter_affine_area_constant_equiv(stats, flat_area)
+        _inc_counter_affine_area_hybrid(stats, max(affine_area, 0.0))
+        _inc_counter_affine_area_saved(stats, max(area_gain, 0.0))
+        _inc_counter_affine_segments_added(stats, segments_added)
+        _inc_counter_componentwise_affine_cells(stats)
+        _inc_counter_componentwise_affine_segments_added(stats, segments_added)
+        _inc_counter_componentwise_breakpoints_merged(stats, merged)
+        _inc_counter_componentwise_area_saved(stats, max(area_gain, 0.0))
+        if certified_auto
+            _inc_counter_certified_auto_affine_cells(stats)
+            _inc_counter_certified_auto_area_saved(stats, max(area_gain, 0.0))
+            total = _get_counter_certified_auto_flat_cells(stats) +
+                _get_counter_certified_auto_affine_cells(stats)
+            fraction = total == 0 ? 0.0 :
+                _get_counter_certified_auto_affine_cells(stats) / total
+            _set_counter_certified_auto_affine_fraction(stats, fraction)
+        end
+    end
+    return true
+end
+
 function _affine_added_area(bound::PiecewiseAffineBound, start_segments::Integer)
     area = 0.0
     for j in (start_segments + 1):bound.n_segments
@@ -1413,6 +1914,139 @@ function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyPartic
     return dot(fd.grad_buf, vt), _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
 end
 
+signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+    provider,
+    args...,
+) = signed_rate_and_derivative(state, flow.dynamics, provider, args...)
+
+function _reference_mul!(out::AbstractVector, flow::AnyBoomerang, x::AbstractVector)
+    mul!(out, flow.Γ, x)
+    return out
+end
+
+function _reference_mul!(out::AbstractVector, flow::LowRankMutableBoomerang, x::AbstractVector)
+    lowrank_mul!(out, flow.Γ, x, 1.0, 0.0)
+    return out
+end
+
+function _boomerang_signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    grad,
+    hvp,
+    corrected_gradient::AbstractVector,
+)
+    x = state.ξ.x
+    θ = state.ξ.θ
+    y = x .- flow.μ
+    Hθ = hvp(x, θ)
+    Γθ = similar(θ)
+    _reference_mul!(Γθ, flow, θ)
+    Hcorrθ = Hθ .- Γθ
+    return dot(corrected_gradient, θ), dot(θ, Hcorrθ) - dot(corrected_gradient, y)
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    (grad, hvp)::Tuple{G,H},
+) where {G,H}
+    return _boomerang_signed_rate_and_derivative(
+        state, flow, grad, hvp, grad(state.ξ.x))
+end
+
+function signed_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    (grad, hvp)::Tuple{G,H},
+    cached_gradient::AbstractVector,
+) where {G,H}
+    return _boomerang_signed_rate_and_derivative(
+        state, flow, grad, hvp, cached_gradient)
+end
+
+supports_grid_signed_rate_channel_jets(::Tuple{G,H}) where {G,H} = !(H <: Nothing)
+
+function signed_rate_channel_jets_for_grid(
+    (grad, hvp)::Tuple{G,H},
+    state::AbstractPDMPState,
+    flow::ZigZag,
+    t_grid::AbstractVector,
+    n_points::Integer,
+) where {G,H}
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    n_channels = length(θ)
+    Gmat = Matrix{Float64}(undef, n_channels, n_points)
+    dGmat = Matrix{Float64}(undef, n_channels, n_points)
+    for k in 1:n_points
+        x = x0 .+ t_grid[k] .* θ
+        ∇U = grad(x)
+        Hθ = hvp(x, θ)
+        for j in 1:n_channels
+            Gmat[j, k] = θ[j] * ∇U[j]
+            dGmat[j, k] = θ[j] * Hθ[j]
+        end
+    end
+    return Gmat, dGmat
+end
+
+function signed_rate_channel_jets_for_grid(
+    (grad, hvp)::Tuple{G,H},
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
+    t_grid::AbstractVector,
+    n_points::Integer,
+) where {G,H}
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    n_channels = length(θ)
+    Gmat = Matrix{Float64}(undef, n_channels, n_points)
+    dGmat = Matrix{Float64}(undef, n_channels, n_points)
+    for k in 1:n_points
+        x = x0 .+ t_grid[k] .* θ
+        ∇U = grad(x)
+        Hθ = hvp(x, θ)
+        for j in 1:n_channels
+            Gmat[j, k] = θ[j] * ∇U[j]
+            dGmat[j, k] = θ[j] * Hθ[j]
+        end
+    end
+    return Gmat, dGmat
+end
+
+function signed_rate_channel_jets_for_grid(
+    (grad, hvp)::Tuple{G,H},
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{DensePreconditioner,<:ZigZag},
+    t_grid::AbstractVector,
+    n_points::Integer,
+) where {G,H}
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    L = flow.metric.L
+    v = flow.metric.v_canonical
+    n_channels = length(v)
+    Gmat = Matrix{Float64}(undef, n_channels, n_points)
+    dGmat = Matrix{Float64}(undef, n_channels, n_points)
+    grad_z = Vector{Float64}(undef, n_channels)
+    hθ_z = Vector{Float64}(undef, n_channels)
+    for k in 1:n_points
+        x = x0 .+ t_grid[k] .* θ
+        ∇U = grad(x)
+        Hθ = hvp(x, θ)
+        mul!(grad_z, L', ∇U)
+        mul!(hθ_z, L', Hθ)
+        for j in 1:n_channels
+            Gmat[j, k] = v[j] * grad_z[j]
+            dGmat[j, k] = v[j] * hθ_z[j]
+        end
+    end
+    return Gmat, dGmat
+end
+
 function construct_signed_rate_grid!(
     pcb::PiecewiseConstantBound,
     state::AbstractPDMPState,
@@ -1456,7 +2090,11 @@ function construct_signed_inflated_grid!(
     bound::PiecewiseAffineBound,
     pcb::PiecewiseConstantBound,
     state::AbstractPDMPState,
-    flow::BouncyParticle,
+    flow::Union{
+        BouncyParticle,
+        AnyBoomerang,
+        PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+    },
     provider,
     curvature_bound;
     cached_gradient::Union{AbstractVector,Nothing}=nothing,
@@ -1473,6 +2111,7 @@ function construct_signed_inflated_grid!(
     start_cell::Integer=1,
     initial_integral::Float64=0.0,
     append::Bool=false,
+    max_componentwise_affine_segments_per_cell::Integer=64,
 )
     build_affine && !append && reset_affine_bound!(bound)
     t_grid = pcb.t_grid
@@ -1592,6 +2231,127 @@ function construct_signed_inflated_grid!(
     return N_evaluated
 end
 
+function construct_signed_inflated_grid!(
+    bound::PiecewiseAffineBound,
+    pcb::PiecewiseConstantBound,
+    state::AbstractPDMPState,
+    flow::Union{
+        ZigZag,
+        PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
+        PreconditionedDynamics{DensePreconditioner,<:ZigZag},
+    },
+    provider,
+    curvature_bound;
+    cached_gradient::Union{AbstractVector,Nothing}=nothing,
+    early_stop_threshold::Float64=Inf,
+    state_cache::Union{AbstractPDMPState,Nothing}=nothing,
+    stats::Union{AbstractStatisticCounter,Nothing}=nothing,
+    max_time::Float64=Inf,
+    certification::Symbol=:required,
+    build_affine::Bool=true,
+    affine_area_threshold::Real=1.0,
+    affine_min_area_gain::Real=0.0,
+    certified_auto::Bool=false,
+    probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
+    start_cell::Integer=1,
+    initial_integral::Float64=0.0,
+    append::Bool=false,
+    max_componentwise_affine_segments_per_cell::Integer=64,
+)
+    build_affine && !append && reset_affine_bound!(bound)
+    t_grid = pcb.t_grid
+    Λ_vals = pcb.Λ_vals
+    y_vals = pcb.y_vals
+    d_vals = pcb.d_vals
+    N = length(Λ_vals)
+    iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
+
+    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    start_cell = clamp(Int(start_cell), 1, N + 1)
+    start_cell > n_time_cells && return start_cell - 1
+
+    start_point = start_cell
+    stop_point = n_time_cells + 1
+    n_points = stop_point - start_point + 1
+    stats !== nothing && (_inc_counter_grid_endpoint_jet_calls(stats))
+    stats !== nothing && (_inc_counter_grid_endpoint_jet_points_loaded(stats, n_points))
+    G, dG = signed_rate_channel_jets_for_grid(
+        provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
+    n_channels = size(G, 1)
+    size(G, 2) >= n_points && size(dG, 1) >= n_channels && size(dG, 2) >= n_points ||
+        throw(ArgumentError("signed channel jet matrices have incompatible sizes"))
+    stats !== nothing && (_inc_counter_componentwise_channels(stats, n_channels))
+    stats !== nothing && (_inc_counter_componentwise_channel_point_evaluations(
+        stats, n_channels * n_points))
+
+    for point in start_point:stop_point
+        offset = point - start_point + 1
+        y_vals[point] = sum(pos(G[j, offset]) for j in 1:n_channels)
+        d_vals[point] = sum(ispositive(G[j, offset]) ? dG[j, offset] : 0.0 for j in 1:n_channels)
+    end
+
+    L = _channel_curvature_matrix(
+        curvature_bound, state, flow, t_grid, n_channels, N, stats, certification)
+    cumulative_integral = initial_integral
+    N_evaluated = N
+    for cell in start_cell:n_time_cells
+        a = t_grid[cell]
+        b = t_grid[cell + 1]
+        M = 0.0
+        for channel in 1:n_channels
+            left = cell - start_point + 1
+            right = left + 1
+            M += _signed_inflated_flat_upper(
+                a, b, G[channel, left], G[channel, right],
+                dG[channel, left], dG[channel, right], L[channel, cell])
+        end
+        Λ_vals[cell] = M
+        cell_area = M * (b - a)
+        if build_affine
+            start_segments = bound.n_segments
+            left = cell - start_point + 1
+            _append_componentwise_signed_affine_cell!(
+                bound, stats, a, b, G, dG, L, left, cell, M;
+                affine_area_threshold,
+                affine_min_area_gain,
+                certified_auto,
+                max_segments=max_componentwise_affine_segments_per_cell)
+            cell_area = _affine_added_area(bound, start_segments)
+        elseif stats !== nothing
+            _inc_counter_affine_constant_cells(stats)
+            _inc_counter_affine_area_constant_equiv(stats, cell_area)
+            _inc_counter_affine_area_hybrid(stats, cell_area)
+            _inc_counter_componentwise_flat_fallback_cells(stats)
+            _inc_counter_componentwise_affine_skipped_by_policy(stats)
+            _inc_counter_componentwise_flat_fallback_policy(stats)
+            if certified_auto
+                _inc_counter_certified_auto_flat_cells(stats)
+                total = _get_counter_certified_auto_flat_cells(stats) +
+                    _get_counter_certified_auto_affine_cells(stats)
+                fraction = total == 0 ? 0.0 :
+                    _get_counter_certified_auto_affine_cells(stats) / total
+                _set_counter_certified_auto_affine_fraction(stats, fraction)
+            end
+        end
+        cumulative_integral += cell_area
+        if cumulative_integral >= early_stop_threshold && cell <= N
+            N_evaluated = cell
+            for j in (cell + 1):N
+                Λ_vals[j] = 0.0
+            end
+            stats !== nothing && (_inc_counter_grid_early_stops(stats))
+            stats !== nothing && (_inc_counter_grid_points_skipped(stats, N - N_evaluated))
+            break
+        end
+    end
+
+    if stats !== nothing
+        _inc_counter_grid_builds(stats)
+        _inc_counter_grid_points_evaluated(stats, max(N_evaluated - start_cell + 1, 0))
+    end
+    return N_evaluated
+end
+
 function _grid_bound_violation_message(
     alg,
     stats::AbstractStatisticCounter,
@@ -1700,6 +2460,21 @@ function _record_budget_grid_build!(
     return nothing
 end
 
+"""
+    GridThinningStrategy(; kwargs...)
+
+Adaptive GridThinning configuration.
+
+Certified signed-rate envelopes use `curvature_bound` with
+`certification=:required`.  The certified envelope choices are
+`:inflated_constant`, `:inflated_linear`, `:certified_auto`, and
+`:certified_auto_affine_sticky`.
+
+For componentwise signed-rate geometry, currently ZigZag, the affine aggregate
+clips each channel before summing.  If a cell would create more than
+`max_componentwise_affine_segments_per_cell` aggregate affine segments, it
+falls back to the certified flat componentwise envelope for that cell.
+"""
 Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     N::Int = 20
     N_min::Int = 5
@@ -1719,6 +2494,7 @@ Base.@kwdef struct GridThinningStrategy <: PoissonTimeStrategy
     inflated_affine_min_area_gain::Float64 = 0.0
     max_rejections_before_tail_restart::Int = 100
     certified_auto_probe_interval::Int = 20
+    max_componentwise_affine_segments_per_cell::Int = 64
 end
 
 """
@@ -1726,14 +2502,11 @@ end
         inflated_affine_min_area_gain=0.0, certified_auto_probe_interval=20,
         kwargs...)
 
-Return the recommended adaptive certified scalar-BPS `GridThinningStrategy`
-preset.  It uses signed endpoint jets plus a certified signed-rate curvature
-bound and lets GridThinning choose between certified flat and certified affine
-cells/grids.
+Return the conservative automatic certified scalar-BPS preset.
 
-This is intended for scalar BPS targets with `certification=:required`, where
-the user should not have to know in advance whether the flat or affine
-representation is faster.
+It uses signed endpoint jets and certified signed-rate curvature bounds, then
+chooses between certified flat and affine envelopes.  This is a good compromise
+when the user does not know which representation is faster.
 """
 certified_auto_scalar_bps_grid(; N::Int=1, inflated_affine_threshold::Real=0.9,
     inflated_affine_min_area_gain::Real=0.0, certified_auto_probe_interval::Int=20,
@@ -1754,10 +2527,10 @@ Return the recommended certified scalar-BPS `GridThinningStrategy` preset for
 expensive targets with analytic signed endpoint jets and a certified signed-rate
 curvature bound.
 
-This is deliberately an affine preset, not a package default.  Prefer
-`certified_auto_scalar_bps_grid` unless you specifically want to force the
-affine representation.  Supply
-`curvature_bound=...` and, when available, a model-level signed-jet provider.
+This forces the certified affine envelope.  Use it for expensive scalar BPS
+targets when affine construction is cheaper than repeated target/rate
+evaluation.  Supply `curvature_bound=...` and, when available, a model-level
+signed-jet provider.
 """
 certified_scalar_bps_grid(; N::Int=1, inflated_affine_threshold::Real=0.9,
     inflated_affine_min_area_gain::Real=0.0, kwargs...) = GridThinningStrategy(;
@@ -1782,6 +2555,41 @@ certified_flat_scalar_bps_grid(; N::Int=1, kwargs...) = GridThinningStrategy(;
     certification=:required,
     kwargs...)
 
+# `envelope=:certified_auto_affine_sticky` is an experimental certified
+# scalar-BPS auto mode for expensive targets.  It starts from affine and only
+# switches toward flat after repeated low savings, with probes to avoid getting
+# stuck.  It is not the generic GridThinning default.
+
+"""
+    certified_auto_signed_rate_grid(; kwargs...)
+
+Generic alias for `certified_auto_scalar_bps_grid`.
+
+The name reflects the certified signed-rate-channel abstraction.  The current
+implementation supports scalar BPS signed-rate geometry and an initial
+componentwise ZigZag path.
+"""
+certified_auto_signed_rate_grid(; kwargs...) =
+    certified_auto_scalar_bps_grid(; kwargs...)
+
+"""
+    certified_signed_rate_grid(; kwargs...)
+
+Generic alias for `certified_scalar_bps_grid`, the forced certified-affine
+signed-rate preset.
+"""
+certified_signed_rate_grid(; kwargs...) =
+    certified_scalar_bps_grid(; kwargs...)
+
+"""
+    certified_flat_signed_rate_grid(; kwargs...)
+
+Generic alias for `certified_flat_scalar_bps_grid`, the certified-flat
+signed-rate preset.
+"""
+certified_flat_signed_rate_grid(; kwargs...) =
+    certified_flat_scalar_bps_grid(; kwargs...)
+
 function Base.show(io::IO, strat::GridThinningStrategy)
     print(io, "GridThinningStrategy(")
     print(io, "N=", strat.N, ", N_min=", strat.N_min, ", t_max=", strat.t_max)
@@ -1805,6 +2613,8 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     0.0 <= strat.inflated_affine_min_area_gain || throw(ArgumentError("inflated_affine_min_area_gain must be nonnegative"))
     strat.max_rejections_before_tail_restart > 0 || throw(ArgumentError("max_rejections_before_tail_restart must be positive"))
     strat.certified_auto_probe_interval > 0 || throw(ArgumentError("certified_auto_probe_interval must be positive"))
+    strat.max_componentwise_affine_segments_per_cell > 0 ||
+        throw(ArgumentError("max_componentwise_affine_segments_per_cell must be positive"))
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
     N_base = strat.N
     N_min = min_grid_cells(flow, strat.N_min, N_base)
@@ -1883,8 +2693,9 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         strat.inflated_affine_min_area_gain,
         strat.max_rejections_before_tail_restart,
         strat.certified_auto_probe_interval,
-        Ref(_certified_auto_affine_sticky(strat.envelope) ? true : true),
-        Ref(_certified_auto_affine_sticky(strat.envelope) ? true : true),
+        strat.max_componentwise_affine_segments_per_cell,
+        Ref(true),
+        Ref(true),
         Ref(0),
         Ref(0),
         Ref(0),
@@ -1927,6 +2738,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     inflated_affine_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
     certified_auto_probe_interval::Int
+    max_componentwise_affine_segments_per_cell::Int
     certified_auto_prefer_affine_next::Base.RefValue{Bool}
     certified_auto_prefer_affine_current::Base.RefValue{Bool}
     certified_auto_flat_grids_since_probe::Base.RefValue{Int}
@@ -2151,8 +2963,22 @@ function _constant_bound_event_time(
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
-function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter, max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit, probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe())
-    return _constant_bound_event_time(Random.default_rng(), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+function _constant_bound_event_time(
+    model::PDMPModel{<:GlobalGradientStrategy},
+    flow::ContinuousDynamics,
+    alg::GridAdaptiveState,
+    state::AbstractPDMPState,
+    cache,
+    stats::AbstractStatisticCounter,
+    max_horizon::Float64,
+    include_refresh::Bool,
+    max_horizon_event::Symbol=:horizon_hit,
+    probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
+)
+    return _constant_bound_event_time(
+        Random.default_rng(), model, flow, alg, state, cache, stats,
+        max_horizon, include_refresh, max_horizon_event, probe_failure_handler,
+    )
 end
 
 
@@ -2261,6 +3087,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             affine_area_threshold=alg.inflated_affine_threshold,
             affine_min_area_gain=alg.inflated_affine_min_area_gain,
             certified_auto=_certified_auto_envelope(alg.envelope),
+            max_componentwise_affine_segments_per_cell=
+                alg.max_componentwise_affine_segments_per_cell,
             probe_failure_handler,
         )
         _record_certified_auto_grid_choice!(
@@ -2400,6 +3228,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                     affine_area_threshold=alg.inflated_affine_threshold,
                     affine_min_area_gain=alg.inflated_affine_min_area_gain,
                     certified_auto=_certified_auto_envelope(alg.envelope),
+                    max_componentwise_affine_segments_per_cell=
+                        alg.max_componentwise_affine_segments_per_cell,
                     probe_failure_handler,
                     start_cell,
                     initial_integral=built_area,

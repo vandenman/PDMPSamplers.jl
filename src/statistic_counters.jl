@@ -575,6 +575,103 @@ end
     get_float(certified_auto_area_saved)
 end
 
+mutable struct ComponentwiseAffineCounter <: AbstractStatisticCounter
+    # Cumulative channel-work counters, not model dimension fields.
+    componentwise_channels::Int
+    componentwise_channel_point_evaluations::Int
+    componentwise_affine_cells::Int
+    componentwise_flat_fallback_cells::Int
+    componentwise_flat_fallback_segment_cap::Int
+    componentwise_flat_fallback_numerical::Int
+    componentwise_affine_skipped_by_area_gate::Int
+    componentwise_affine_skipped_by_policy::Int
+    componentwise_flat_fallback_area_gate::Int
+    componentwise_flat_fallback_policy::Int
+    componentwise_flat_fallback_other::Int
+    componentwise_affine_segments_added::Int
+    componentwise_breakpoints_merged::Int
+    componentwise_area_saved::Float64
+    componentwise_proposed_breakpoints_per_cell::Vector{Float64}
+    componentwise_segments_per_cell::Vector{Float64}
+    componentwise_zero_crossings_per_cell::Vector{Float64}
+    componentwise_area_saved_per_cell::Vector{Float64}
+    componentwise_area_saved_fraction_per_cell::Vector{Float64}
+end
+
+function ComponentwiseAffineCounter()
+    return ComponentwiseAffineCounter(
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0,
+        Float64[], Float64[], Float64[], Float64[], Float64[],
+    )
+end
+
+@counter_ops ComponentwiseAffineCounter begin
+    inc(
+        componentwise_affine_cells,
+        componentwise_flat_fallback_cells,
+        componentwise_flat_fallback_segment_cap,
+        componentwise_flat_fallback_numerical,
+        componentwise_affine_skipped_by_area_gate,
+        componentwise_affine_skipped_by_policy,
+        componentwise_flat_fallback_area_gate,
+        componentwise_flat_fallback_policy,
+        componentwise_flat_fallback_other,
+    )
+
+    incval(
+        componentwise_channels,
+        componentwise_channel_point_evaluations,
+        componentwise_affine_segments_added,
+        componentwise_breakpoints_merged,
+        componentwise_area_saved,
+    )
+
+    get_sum(
+        componentwise_channels,
+        componentwise_channel_point_evaluations,
+        componentwise_affine_cells,
+        componentwise_flat_fallback_cells,
+        componentwise_flat_fallback_segment_cap,
+        componentwise_flat_fallback_numerical,
+        componentwise_affine_skipped_by_area_gate,
+        componentwise_affine_skipped_by_policy,
+        componentwise_flat_fallback_area_gate,
+        componentwise_flat_fallback_policy,
+        componentwise_flat_fallback_other,
+        componentwise_affine_segments_added,
+        componentwise_breakpoints_merged,
+    )
+
+    get_float(componentwise_area_saved)
+end
+
+@inline _record_counter_componentwise_cell_diagnostics!(::AbstractStatisticCounter, args...) = nothing
+@inline _record_counter_componentwise_cell_diagnostics!(::Nothing, args...) = nothing
+
+@inline function _record_counter_componentwise_cell_diagnostics!(
+    c::ComponentwiseAffineCounter,
+    proposed_breakpoints,
+    segments,
+    zero_crossings,
+    area_saved,
+    area_saved_fraction,
+)
+    push!(c.componentwise_proposed_breakpoints_per_cell, Float64(proposed_breakpoints))
+    push!(c.componentwise_segments_per_cell, Float64(segments))
+    push!(c.componentwise_zero_crossings_per_cell, Float64(zero_crossings))
+    push!(c.componentwise_area_saved_per_cell, Float64(area_saved))
+    push!(c.componentwise_area_saved_fraction_per_cell, Float64(area_saved_fraction))
+    return nothing
+end
+
+@inline function _record_counter_componentwise_cell_diagnostics!(
+    m::MultiCounter,
+    args...,
+)
+    _apply_to_all(_record_counter_componentwise_cell_diagnostics!, m.counters, args...)
+    return nothing
+end
+
 @counter_struct mutable struct PhaseSummaryCounter <: AbstractStatisticCounter
     warmup_events::Int
     main_events::Int
@@ -631,4 +728,17 @@ end
 
 @counter_bundle StatisticCounter BasicEventCounter SupportBoundaryCounter GradientCallCounter
 
-@counter_bundle DevelStatisticCounter BasicEventCounter SupportBoundaryCounter GradientCallCounter GridThinningCounter ConstantBoundCounter StickyStatsCounter AffineBoundCounter CertifiedAutoCounter PhaseSummaryCounter LazyBoundCounter
+@counter_bundle(
+    DevelStatisticCounter,
+    BasicEventCounter,
+    SupportBoundaryCounter,
+    GradientCallCounter,
+    GridThinningCounter,
+    ConstantBoundCounter,
+    StickyStatsCounter,
+    AffineBoundCounter,
+    CertifiedAutoCounter,
+    ComponentwiseAffineCounter,
+    PhaseSummaryCounter,
+    LazyBoundCounter,
+)

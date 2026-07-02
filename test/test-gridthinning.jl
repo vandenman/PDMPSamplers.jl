@@ -669,6 +669,596 @@ end
         @test PDMPSamplers._use_affine_envelope(alg, state, bps, nothing)
     end
 
+    @testset "componentwise certified ZigZag Gaussian channels" begin
+        flow = ZigZag(2)
+        state = PDMPState(0.0, SkeletonPoint([-0.5, 0.25], [1.0, -1.0]))
+        t_grid = collect(range(0.0, 1.0, 5))
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
+        pab = PDMPSamplers.PiecewiseAffineBound(8)
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+
+        geom = PDMPSamplers.signed_rate_geometry((grad, hvp), flow)
+        @test geom isa PDMPSamplers.ComponentwiseSignedRateGeometry
+        @test PDMPSamplers.signed_rate_geometry((grad, nothing), flow) isa
+            PDMPSamplers.UnsupportedSignedRateGeometry
+        G, dG = PDMPSamplers.signed_rate_channel_jets_for_grid(
+            (grad, hvp), state, flow, t_grid, length(t_grid))
+        @test size(G) == (2, length(t_grid))
+        @test all(dG .≈ 1.0)
+
+        stats = PDMPSamplers.DevelStatisticCounter()
+        n = PDMPSamplers.construct_signed_inflated_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            certification=:required,
+            build_affine=true,
+            stats)
+        @test n == length(pcb.Λ_vals)
+
+        flat_area = sum(pcb.Λ_vals[i] * (t_grid[i + 1] - t_grid[i])
+            for i in eachindex(pcb.Λ_vals))
+        @test PDMPSamplers.total_area(pab) <= flat_area + 1e-12
+        @test stats.componentwise_affine_cells > 0
+        @test stats.componentwise_affine_segments_added > 0
+
+        for cell in eachindex(pcb.Λ_vals)
+            a, b = t_grid[cell], t_grid[cell + 1]
+            for t in range(a, b; length=11)
+                channels = state.ξ.θ .* (state.ξ.x .+ t .* state.ξ.θ)
+                positive_channels = max.(channels, 0.0)
+                @test all(positive_channels[j] <= pcb.Λ_vals[cell] + 1e-12 for j in 1:2)
+                @test sum(positive_channels) <= pcb.Λ_vals[cell] + 1e-12
+                @test sum(positive_channels) <= pab(t) + 1e-12
+            end
+        end
+    end
+
+    @testset "componentwise ZigZag affine aggregate handles zero crossings" begin
+        flow = ZigZag(2)
+        state = PDMPState(0.0, SkeletonPoint([-0.5, 0.25], [1.0, -1.0]))
+        t_grid = [0.0, 1.0]
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
+        pab = PDMPSamplers.PiecewiseAffineBound(8)
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        stats = PDMPSamplers.DevelStatisticCounter()
+
+        PDMPSamplers.construct_signed_inflated_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            certification=:required,
+            build_affine=true,
+            stats)
+
+        @test pab.n_segments == 3
+        @test stats.componentwise_flat_fallback_cells == 0
+        @test stats.componentwise_affine_cells == 1
+        @test PDMPSamplers.total_area(pab) <= pcb.Λ_vals[1] + 1e-12
+        for t in range(0.0, 1.0; length=41)
+            channels = state.ξ.θ .* (state.ξ.x .+ t .* state.ξ.θ)
+            @test sum(max.(channels, 0.0)) <= pab(t) + 1e-12
+        end
+    end
+
+    @testset "componentwise ZigZag high-dimensional crossing diagnostic" begin
+        d = 100
+        flow = ZigZag(d)
+        θ = ones(d)
+        x = [-i / (d + 1) for i in 1:d]
+        state = PDMPState(0.0, SkeletonPoint(x, θ))
+        t_grid = [0.0, 1.0]
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        crossings = count(i -> 0.0 < -θ[i] * x[i] < 1.0, 1:d)
+
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
+        pab = PDMPSamplers.PiecewiseAffineBound(2d + 2)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.construct_signed_inflated_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            certification=:required,
+            build_affine=true,
+            stats,
+            max_componentwise_affine_segments_per_cell=256)
+
+        @test crossings == d
+        @test pab.n_segments == crossings + 1
+        @test stats.componentwise_flat_fallback_cells == 0
+        @test PDMPSamplers.total_area(pab) <= pcb.Λ_vals[1] + 1e-12
+        for t in range(0.0, 1.0; length=51)
+            exact = sum(max(x[i] + t, 0.0) for i in 1:d)
+            @test exact <= pab(t) + 1e-10
+        end
+
+        pcb_cap = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
+        pab_cap = PDMPSamplers.PiecewiseAffineBound(8)
+        stats_cap = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.construct_signed_inflated_grid!(
+            pab_cap, pcb_cap, state, flow, (grad, hvp), cert;
+            certification=:required,
+            build_affine=true,
+            stats=stats_cap,
+            max_componentwise_affine_segments_per_cell=32)
+
+        @test stats_cap.componentwise_flat_fallback_cells == 1
+        @test pab_cap.n_segments == 1
+        @test PDMPSamplers.total_area(pab_cap) ≈ pcb_cap.Λ_vals[1]
+    end
+
+    @testset "Boomerang signed jets use corrected-gradient convention" begin
+        Γ = Diagonal([1.5, 2.0, 2.5])
+        μ = [0.2, -0.3, 0.4]
+        flow = Boomerang(Γ, μ, 0.0)
+        x = [0.7, -0.1, -0.2]
+        θ = [0.4, -0.5, 0.3]
+        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+        corrected_grad = x -> zeros(length(x))
+        raw_hvp = (x, v) -> Γ * v
+
+        geom = PDMPSamplers.signed_rate_geometry((corrected_grad, raw_hvp), flow)
+        @test geom isa PDMPSamplers.ScalarSignedRateGeometry
+        g, dg = PDMPSamplers.signed_rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        @test g ≈ 0.0 atol=1e-12
+        @test dg ≈ 0.0 atol=1e-12
+    end
+
+    @testset "Boomerang quadratic residual signed jets and certificate" begin
+        Γ = Diagonal([1.2, 1.6, 2.1])
+        μ = [0.1, -0.2, 0.3]
+        A = Symmetric([0.7 0.1 -0.05; 0.1 0.5 0.02; -0.05 0.02 0.4])
+        b = [0.3, -0.2, 0.15]
+        flow = Boomerang(Γ, μ, 0.0)
+        x = [0.8, -0.4, 0.1]
+        θ = [0.25, -0.7, 0.35]
+        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+        corrected_grad = x -> A * (x .- μ) .+ b
+        raw_hvp = (x, v) -> (Γ + A) * v
+
+        y = x .- μ
+        a = A * y .+ b
+        g_expected = dot(a, θ)
+        dg_expected = dot(θ, A * θ) - dot(a, y)
+        g, dg = PDMPSamplers.signed_rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        @test g ≈ g_expected atol=1e-12
+        @test dg ≈ dg_expected atol=1e-12
+
+        R = sqrt(dot(y, y) + dot(θ, θ))
+        Lcert = 2opnorm(Matrix(A)) * R^2 + norm(b) * R
+        for t in range(0.0, 2π; length=31)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            yt = st.ξ.x .- μ
+            gdd = -4dot(yt, A * st.ξ.θ) - dot(b, st.ξ.θ)
+            @test abs(gdd) <= Lcert + 1e-10
+        end
+    end
+
+    @testset "Boomerang signed derivative matches sampler convention" begin
+        Γ = Diagonal([1.2, 1.6, 2.0])
+        μ = [0.1, -0.25, 0.3]
+        A = Symmetric([0.6 0.12 -0.04; 0.12 0.4 0.08; -0.04 0.08 0.5])
+        b = [0.2, -0.3, 0.1]
+        flow = Boomerang(Γ, μ, 0.0)
+        x = [0.55, -0.45, 0.05]
+        θ = [0.35, -0.2, 0.45]
+        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+
+        function residual_grad!(out, x)
+            y = x .- μ
+            out .= Γ * y .+ A * y .+ b
+            return out
+        end
+        function residual_hvp!(out, x, v)
+            out .= (Γ + A) * v
+            return out
+        end
+        model = PDMPModel(3, FullGradient(residual_grad!), residual_hvp!)
+        alg = GridThinningStrategy()
+
+        function actual_signed_rate(t)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            cache = PDMPSamplers.initialize_cache(Xoshiro(31), flow, model.grad, alg, st.t[], st.ξ)
+            cache = PDMPSamplers.add_gradient_to_cache(cache, st.ξ)
+            ∇corr = compute_gradient!(st, model.grad, flow, cache)
+            return dot(∇corr, st.ξ.θ)
+        end
+
+        corrected_grad = x -> A * (x .- μ) .+ b
+        raw_hvp = (x, v) -> (Γ + A) * v
+        g, dg = PDMPSamplers.signed_rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        h = 1e-6
+        fd = (actual_signed_rate(h) - actual_signed_rate(-h)) / (2h)
+
+        @test g ≈ actual_signed_rate(0.0) atol=1e-12
+        @test dg ≈ fd rtol=1e-7 atol=1e-8
+    end
+
+    @testset "certified Boomerang requires Boomerang curvature certificate" begin
+        Γ = Diagonal([1.0, 1.4])
+        μ = [0.0, 0.1]
+        A = Symmetric([0.3 0.05; 0.05 0.2])
+        b = [0.15, -0.1]
+        flow = Boomerang(Γ, μ, 0.0)
+        function residual_grad!(out, x)
+            y = x .- μ
+            out .= Γ * y .+ A * y .+ b
+            return out
+        end
+        function residual_hvp!(out, x, v)
+            out .= (Γ + A) * v
+            return out
+        end
+        model = PDMPModel(2, FullGradient(residual_grad!), residual_hvp!)
+        ξ0 = SkeletonPoint([0.25, -0.2], [0.4, -0.3])
+        generic = GridThinningStrategy(;
+            N=2,
+            envelope=:inflated_constant,
+            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(1.0),
+            certification=:required,
+            lazy=false)
+        specific = GridThinningStrategy(;
+            N=2,
+            envelope=:inflated_constant,
+            curvature_bound=PDMPSamplers.BoomerangCertifiedUpperCurvature(10.0),
+            certification=:required,
+            bound_violation=:throw,
+            lazy=false)
+
+        @test_throws ArgumentError pdmp_sample(
+            ξ0, flow, model, generic, 0.0, 0.5;
+            seed=32,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        _, stats = pdmp_sample(
+            ξ0, flow, model, specific, 0.0, 0.5;
+            seed=33,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test stats.grid_bound_violations == 0
+        @test stats.grid_certificate_fallbacks == 0
+    end
+
+    @testset "certified Boomerang quadratic residual has no violations" begin
+        Γ = Diagonal([1.1, 1.7])
+        μ = [0.05, -0.15]
+        A = Symmetric([0.4 0.08; 0.08 0.3])
+        b = [0.12, -0.2]
+        flow = Boomerang(Γ, μ, 0.0)
+        function residual_grad!(out, x)
+            y = x .- μ
+            out .= Γ * y .+ A * y .+ b
+            return out
+        end
+        function residual_hvp!(out, x, v)
+            out .= (Γ + A) * v
+            return out
+        end
+        model = PDMPModel(2, FullGradient(residual_grad!), residual_hvp!)
+        ξ0 = SkeletonPoint([0.3, -0.45], [0.5, -0.25])
+        cert = PDMPSamplers.BoomerangCertifiedUpperCurvature(25.0)
+
+        for envelope in (:inflated_constant, :inflated_linear, :certified_auto)
+            alg = GridThinningStrategy(;
+                N=2,
+                N_min=1,
+                t_max=0.5,
+                envelope,
+                curvature_bound=cert,
+                certification=:required,
+                inflated_affine_threshold=1.0,
+                inflated_affine_min_area_gain=0.0,
+                bound_violation=:throw,
+                lazy=false)
+            _, stats = pdmp_sample(
+                ξ0, flow, model, alg, 0.0, 1.0;
+                seed=34,
+                progress=false,
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+            @test stats.grid_certificate_fallbacks == 0
+        end
+    end
+
+    @testset "exact-reference Boomerang has no reflection events" begin
+        Γ = Diagonal([1.0, 1.6])
+        μ = [0.2, -0.1]
+        flow = Boomerang(Γ, μ, 0.25)
+        function reference_grad!(out, x)
+            out .= Γ * (x .- μ)
+            return out
+        end
+        function reference_hvp!(out, x, v)
+            out .= Γ * v
+            return out
+        end
+        model = PDMPModel(2, FullGradient(reference_grad!), reference_hvp!)
+        alg = GridThinningStrategy(;
+            N=2,
+            envelope=:inflated_constant,
+            curvature_bound=PDMPSamplers.BoomerangCertifiedUpperCurvature(0.0),
+            certification=:required,
+            bound_violation=:throw,
+            lazy=false)
+        ξ0 = SkeletonPoint([0.45, -0.35], [0.25, 0.4])
+        _, stats = pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 2.0;
+            seed=35,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+
+        @test stats.reflections_events == 0
+        @test stats.reflections_accepted == 0
+        @test stats.grid_bound_violations == 0
+        @test stats.grid_certificate_fallbacks == 0
+    end
+
+    @testset "Boomerang logistic certificate matches sampler convention" begin
+        X = [0.4 -0.2 0.1; -0.3 0.5 0.2; 0.2 0.1 -0.4; -0.1 -0.3 0.35]
+        yobs = [1.0, 0.0, 1.0, 0.0]
+        Γ = Diagonal([1.3, 1.6, 2.0])
+        μ = [0.1, -0.2, 0.05]
+        flow = Boomerang(Γ, μ, 0.0)
+        x0 = [0.35, -0.45, 0.2]
+        θ0 = [0.25, -0.15, 0.4]
+        state = PDMPState(0.0, SkeletonPoint(copy(x0), copy(θ0)))
+        sigmoid(z) = inv(1 + exp(-z))
+
+        function logistic_grad!(out, x)
+            η = X * x
+            w = sigmoid.(η) .- yobs
+            mul!(out, transpose(X), w)
+            out .+= Γ * (x .- μ)
+            return out
+        end
+        function logistic_hvp!(out, x, v)
+            η = X * x
+            Xv = X * v
+            w = sigmoid.(η) .* (1 .- sigmoid.(η)) .* Xv
+            mul!(out, transpose(X), w)
+            out .+= Γ * v
+            return out
+        end
+        model = PDMPModel(3, FullGradient(logistic_grad!), logistic_hvp!)
+        alg = GridThinningStrategy()
+
+        function actual_signed_rate(t)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            cache = PDMPSamplers.initialize_cache(Xoshiro(41), flow, model.grad, alg, st.t[], st.ξ)
+            cache = PDMPSamplers.add_gradient_to_cache(cache, st.ξ)
+            ∇corr = compute_gradient!(st, model.grad, flow, cache)
+            return dot(∇corr, st.ξ.θ)
+        end
+
+        corrected_grad = x -> begin
+            η = X * x
+            vec(transpose(X) * (sigmoid.(η) .- yobs))
+        end
+        raw_hvp = (x, v) -> begin
+            η = X * x
+            Xv = X * v
+            w = sigmoid.(η) .* (1 .- sigmoid.(η)) .* Xv
+            vec(transpose(X) * w .+ Γ * v)
+        end
+        g, dg = PDMPSamplers.signed_rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        h = 1e-6
+        fd = (actual_signed_rate(h) - actual_signed_rate(-h)) / (2h)
+        @test g ≈ actual_signed_rate(0.0) atol=1e-12
+        @test dg ≈ fd rtol=1e-7 atol=1e-8
+
+        cert = PDMPSamplers.BoomerangLogisticGaussianReferenceCertificate(X)
+        L = PDMPSamplers.rate_curvature_upper_bound(cert, state, flow, 0.0, 1.0).value
+        for t in range(0.0, 2π; length=41)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            gdd = 0.0
+            for i in axes(X, 1)
+                z = dot(view(X, i, :), st.ξ.x)
+                q = dot(view(X, i, :), st.ξ.θ)
+                u = dot(view(X, i, :), st.ξ.x .- μ)
+                s = sigmoid(z)
+                gdd += s * (1 - s) * (1 - 2s) * q^3
+                gdd -= 3s * (1 - s) * q * u
+                gdd -= (s - yobs[i]) * q
+            end
+            @test abs(gdd) <= L + 1e-10
+        end
+
+        t_grid = collect(range(0.0, 1.0, 5))
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
+        pab = PDMPSamplers.PiecewiseAffineBound(16)
+        PDMPSamplers.construct_signed_inflated_grid!(
+            pab, pcb, state, flow, (corrected_grad, raw_hvp), cert;
+            certification=:required,
+            build_affine=true,
+            stats=PDMPSamplers.DevelStatisticCounter())
+        for cell in eachindex(pcb.Λ_vals), t in range(t_grid[cell], t_grid[cell + 1]; length=11)
+            @test max(actual_signed_rate(t), 0.0) <= pcb.Λ_vals[cell] + 1e-10
+            @test max(actual_signed_rate(t), 0.0) <= pab(t) + 1e-10
+        end
+    end
+
+    @testset "certified Boomerang logistic smoke has no violations" begin
+        rng = Xoshiro(42)
+        n, p = 100, 5
+        X = randn(rng, n, p) ./ sqrt(p)
+        β_true = range(-0.4, 0.4; length=p)
+        yobs = Float64.(rand.(Ref(rng), Bernoulli.(inv.(1 .+ exp.(-(X * β_true))))))
+        Γ = Diagonal(fill(1.25, p))
+        μ = zeros(p)
+        flow = Boomerang(Γ, μ, 0.05)
+        sigmoid(z) = inv(1 + exp(-z))
+
+        function logistic_grad!(out, x)
+            η = X * x
+            w = sigmoid.(η) .- yobs
+            mul!(out, transpose(X), w)
+            out .+= Γ * (x .- μ)
+            return out
+        end
+        function logistic_hvp!(out, x, v)
+            η = X * x
+            Xv = X * v
+            s = sigmoid.(η)
+            mul!(out, transpose(X), s .* (1 .- s) .* Xv)
+            out .+= Γ * v
+            return out
+        end
+
+        model = PDMPModel(p, FullGradient(logistic_grad!), logistic_hvp!)
+        cert = PDMPSamplers.BoomerangLogisticGaussianReferenceCertificate(X)
+        ξ0 = SkeletonPoint(fill(0.05, p), collect(range(-0.4, 0.4; length=p)))
+        generic = GridThinningStrategy(;
+            N=2,
+            envelope=:inflated_constant,
+            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(1.0),
+            certification=:required,
+            lazy=false)
+        @test_throws ArgumentError pdmp_sample(
+            ξ0, flow, model, generic, 0.0, 0.5;
+            seed=43,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+
+        for envelope in (:inflated_constant, :inflated_linear, :certified_auto)
+            alg = GridThinningStrategy(;
+                N=2,
+                N_min=1,
+                t_max=1.0,
+                envelope,
+                curvature_bound=cert,
+                certification=:required,
+                inflated_affine_threshold=1.0,
+                inflated_affine_min_area_gain=0.0,
+                bound_violation=:throw,
+                lazy=false)
+            _, stats = pdmp_sample(
+                ξ0, flow, model, alg, 0.0, 20.0;
+                seed=44,
+                progress=false,
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+            @test stats.grid_certificate_fallbacks == 0
+        end
+    end
+
+    @testset "preconditioned signed-rate geometry conventions" begin
+        d = 3
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        state = PDMPState(0.0, SkeletonPoint([0.4, -0.3, 0.2], [1.2, -0.8, 0.5]))
+
+        dbps = PreconditionedBPS(d; refresh_rate=0.0, scale=[0.5, 1.5, 2.0])
+        @test PDMPSamplers.signed_rate_geometry((grad, hvp), dbps) isa
+            PDMPSamplers.ScalarSignedRateGeometry
+        g, dg = PDMPSamplers.signed_rate_and_derivative(state, dbps, (grad, hvp))
+        @test g ≈ dot(state.ξ.x, state.ξ.θ)
+        @test dg ≈ dot(state.ξ.θ, state.ξ.θ)
+
+        dense_bps = DensePreconditionedBPS(d; refresh_rate=0.0)
+        @test PDMPSamplers.signed_rate_geometry((grad, hvp), dense_bps) isa
+            PDMPSamplers.ScalarSignedRateGeometry
+        g_dense, dg_dense = PDMPSamplers.signed_rate_and_derivative(
+            state, dense_bps, (grad, hvp))
+        @test g_dense ≈ dot(state.ξ.x, state.ξ.θ)
+        @test dg_dense ≈ dot(state.ξ.θ, state.ξ.θ)
+
+        dzz = PreconditionedZigZag(d; scale=[0.5, 1.5, 2.0])
+        @test PDMPSamplers.signed_rate_geometry((grad, hvp), dzz) isa
+            PDMPSamplers.ComponentwiseSignedRateGeometry
+        G_diag, dG_diag = PDMPSamplers.signed_rate_channel_jets_for_grid(
+            (grad, hvp), state, dzz, [0.0], 1)
+        @test vec(G_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.x
+        @test vec(dG_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.θ
+
+        L = [1.0 0.0 0.0; 0.25 1.1 0.0; -0.2 0.15 0.9]
+        dense = PDMPSamplers.DensePreconditioner(d)
+        dense.L .= L
+        dense.Linv .= inv(LowerTriangular(L))
+        flow = PDMPSamplers.PreconditionedDynamics(dense, ZigZag(d))
+        v = [1.0, -1.0, 1.0]
+        copyto!(flow.metric.v_canonical, v)
+        θ = L * v
+        zz_state = PDMPState(0.0, SkeletonPoint([0.3, -0.4, 0.2], θ))
+        @test PDMPSamplers.signed_rate_geometry((grad, hvp), flow) isa
+            PDMPSamplers.ComponentwiseSignedRateGeometry
+        G, dG = PDMPSamplers.signed_rate_channel_jets_for_grid(
+            (grad, hvp), zz_state, flow, [0.0], 1)
+        η = L' * zz_state.ξ.x
+        Hθ_z = L' * θ
+        @test vec(G[:, 1]) ≈ v .* η
+        @test vec(dG[:, 1]) ≈ v .* Hθ_z
+        @test sum(max.(G[:, 1], 0.0)) ≈ PDMPSamplers.λ(zz_state.ξ, zz_state.ξ.x, flow)
+    end
+
+    @testset "dense preconditioned ZigZag certified aggregate dominates rate" begin
+        d = 3
+        L = [1.0 0.0 0.0; 0.2 1.0 0.0; -0.1 0.3 0.8]
+        dense = PDMPSamplers.DensePreconditioner(d)
+        dense.L .= L
+        dense.Linv .= inv(LowerTriangular(L))
+        flow = PDMPSamplers.PreconditionedDynamics(dense, ZigZag(d))
+        v = [1.0, -1.0, 1.0]
+        copyto!(flow.metric.v_canonical, v)
+        θ = L * v
+        state = PDMPState(0.0, SkeletonPoint([-0.4, 0.25, -0.1], θ))
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        t_grid = collect(range(0.0, 1.0, 4))
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
+        pab = PDMPSamplers.PiecewiseAffineBound(16)
+
+        PDMPSamplers.construct_signed_inflated_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            certification=:required,
+            build_affine=true,
+            stats=PDMPSamplers.DevelStatisticCounter())
+        for t in range(0.0, 1.0; length=31)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            @test PDMPSamplers.λ(st.ξ, st.ξ.x, flow) <= pab(t) + 1e-12
+        end
+    end
+
+    @testset "componentwise certified ZigZag smoke has no violations" begin
+        function zz_gaussian_grad!(out, x)
+            copyto!(out, x)
+            return out
+        end
+        function zz_gaussian_hvp!(out, x, v)
+            copyto!(out, v)
+            return out
+        end
+        model = PDMPModel(2, FullGradient(zz_gaussian_grad!), zz_gaussian_hvp!)
+        flow = ZigZag(2)
+        alg = GridThinningStrategy(;
+            N=4,
+            envelope=:inflated_linear,
+            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0),
+            certification=:required,
+            bound_violation=:throw,
+            lazy=false)
+        ξ0 = SkeletonPoint([-0.5, 0.25], [1.0, -1.0])
+        trace, stats = pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 2.0;
+            seed=23,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test length(trace) >= 1
+        @test stats.grid_bound_violations == 0
+        @test stats.affine_bound_violations == 0
+    end
+
     @testset "_compute_cell_bound!" begin
         t_grid = [0.0, 1.0]
         y_vals = [2.0, 3.0]
