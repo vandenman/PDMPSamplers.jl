@@ -14,7 +14,7 @@ function PDMPSamplers.curvature_bounds_for_grid(
     n_cells::Integer,
 )
     cert.calls[] += 1
-    return [PDMPSamplers.CertifiedUpperCurvature(0.0) for _ in 1:n_cells]
+    return [(0.0) for _ in 1:n_cells]
 end
 
 struct TestSignedGridJets
@@ -30,6 +30,32 @@ function PDMPSamplers.signed_rate_jets_for_grid(
 )
     jets.calls[] += 1
     return [-0.5 + t_grid[i] for i in 1:n_points], ones(Float64, n_points)
+end
+
+struct TestBoomerangLogisticBound
+    X::Matrix{Float64}
+end
+
+function (cert::TestBoomerangLogisticBound)(state, flow, a, b)
+    y = state.ξ.x .- flow.μ
+    cubic_sum = 0.0
+    quadratic_sum = 0.0
+    linear_sum = 0.0
+    @inbounds for i in axes(cert.X, 1)
+        α = 0.0
+        β = 0.0
+        for j in axes(cert.X, 2)
+            xij = cert.X[i, j]
+            α += xij * y[j]
+            β += xij * state.ξ.θ[j]
+        end
+        r = hypot(α, β)
+        cubic_sum += r^3
+        quadratic_sum += r^2
+        linear_sum += r
+    end
+    L = cubic_sum / (6sqrt(3.0)) + (3 / 8) * quadratic_sum + linear_sum
+    return L
 end
 
 @testset "Grid thinning" begin
@@ -218,7 +244,7 @@ end
         flow = BouncyParticle(1, 0.0)
         pab = PDMPSamplers.PiecewiseAffineBound(2)
         stats = PDMPSamplers.DevelStatisticCounter()
-        cert = (state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(2.0)
+        cert = (state, flow, a, b) -> (2.0)
         PDMPSamplers.build_inflated_affine_bound!(pab, pcb, 1, state, flow, cert, stats)
 
         @test pab.n_segments == 1
@@ -242,7 +268,7 @@ end
         flow = BouncyParticle(1, 0.0)
         pab = PDMPSamplers.PiecewiseAffineBound(2)
         stats = PDMPSamplers.DevelStatisticCounter()
-        cert = (state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(2.0)
+        cert = (state, flow, a, b) -> (2.0)
         PDMPSamplers.build_inflated_affine_bound!(pab, pcb, 1, state, flow, cert, stats)
 
         @test pab.n_segments == 1
@@ -266,7 +292,7 @@ end
         stats = PDMPSamplers.DevelStatisticCounter()
         PDMPSamplers.build_signed_inflated_affine_bound!(
             pab, pcb, 1, state, flow,
-            (state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(0.0), stats)
+            (state, flow, a, b) -> (0.0), stats)
 
         @test stats.affine_inflated_cells == 1
         @test stats.affine_area_saved ≈ 0.875
@@ -294,7 +320,7 @@ end
         stats = PDMPSamplers.DevelStatisticCounter()
         PDMPSamplers.build_signed_inflated_affine_bound!(
             pab, pcb, 1, state, flow,
-            PDMPSamplers.GlobalCertifiedUpperCurvature(0.0), stats;
+            (0.0), stats;
             affine_area_threshold=1.0,
             affine_min_area_gain=0.4)
 
@@ -308,7 +334,7 @@ end
 
     @testset "signed inflated Gaussian one-cell flat and affine envelopes dominate dense grid" begin
         flow = BouncyParticle(1, 0.0)
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
 
         for (x0, v0, tmax) in ((-0.5, 1.0, 1.0), (0.5, 1.0, 1.0))
             state = PDMPState(0.0, SkeletonPoint([x0], [v0]))
@@ -341,7 +367,7 @@ end
 
     @testset "certified_auto chooses flat or affine cells by area gain" begin
         flow = BouncyParticle(1, 0.0)
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
         provider = (x -> [x[1]], (x, v) -> [v[1]])
 
         flat_state = PDMPState(0.0, SkeletonPoint([1.0], [0.0]))
@@ -393,7 +419,7 @@ end
         pab = PDMPSamplers.PiecewiseAffineBound(4)
         stats = PDMPSamplers.DevelStatisticCounter()
         PDMPSamplers.build_signed_inflated_affine_bound!(
-            pab, pcb, 1, state, flow, PDMPSamplers.GlobalCertifiedUpperCurvature(0.0), stats;
+            pab, pcb, 1, state, flow, (0.0), stats;
             affine_area_threshold=0.95)
 
         @test stats.grid_certificate_calls == 0
@@ -415,7 +441,7 @@ end
         cert_calls = Ref(0)
         cert = (state, flow, a, b) -> begin
             cert_calls[] += 1
-            PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+            (0.0)
         end
 
         n = PDMPSamplers.construct_signed_inflated_grid!(
@@ -473,7 +499,7 @@ end
         flow = BouncyParticle(1, 0.0)
         alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
             envelope=:inflated_linear,
-            curvature_bound=(state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(0.0),
+            curvature_bound=(state, flow, a, b) -> (0.0),
             bound_violation=:throw)
         ξ0 = SkeletonPoint([-0.5], [1.0])
         rng = Xoshiro(20260630)
@@ -505,7 +531,7 @@ end
         flow = BouncyParticle(1, 0.05)
         alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
             envelope=:inflated_constant,
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0),
+            curvature_bound=(0.0),
             certification=:required,
             bound_violation=:throw)
         ξ0 = SkeletonPoint([0.25], [1.0])
@@ -531,7 +557,7 @@ end
             x0 = state.ξ.x[1]
             v0 = state.ξ.θ[1]
             c = 6 * v0^3
-            PDMPSamplers.CertifiedUpperCurvature(max(c * (x0 + a * v0), c * (x0 + b * v0)))
+            return max(c * (x0 + a * v0), c * (x0 + b * v0))
         end
 
         function trig_grad!(out, x)
@@ -542,7 +568,7 @@ end
             out[1] = (2cos(x[1]) + 0.1) * v[1]
             return out
         end
-        trig_cert = (state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(2abs(state.ξ.θ[1])^3)
+        trig_cert = (state, flow, a, b) -> 2abs(state.ξ.θ[1])^3
 
         for (grad!, hvp!, cert, ξ0, T, seed) in (
             (quartic_grad!, quartic_hvp!, quartic_cert, SkeletonPoint([0.25], [1.0]), 5.0, 701),
@@ -573,7 +599,7 @@ end
             out[1] = v[1]
             return out
         end
-        gaussian_cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        gaussian_cert = (0.0)
 
         function quartic_grad!(out, x)
             out[1] = x[1]^3 - x[1]
@@ -587,7 +613,7 @@ end
             x0 = state.ξ.x[1]
             v0 = state.ξ.θ[1]
             c = 6 * v0^3
-            PDMPSamplers.CertifiedUpperCurvature(max(c * (x0 + a * v0), c * (x0 + b * v0)))
+            return max(c * (x0 + a * v0), c * (x0 + b * v0))
         end
 
         function trig_grad!(out, x)
@@ -598,7 +624,7 @@ end
             out[1] = (2cos(x[1]) + 0.1) * v[1]
             return out
         end
-        trig_cert = (state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(2abs(state.ξ.θ[1])^3)
+        trig_cert = (state, flow, a, b) -> 2abs(state.ξ.θ[1])^3
 
         for (grad!, hvp!, cert, ξ0, seed) in (
             (gaussian_grad!, gaussian_hvp!, gaussian_cert, SkeletonPoint([0.25], [1.0]), 711),
@@ -637,7 +663,7 @@ end
         flow = BouncyParticle(1, 0.0)
         alg = GridThinningStrategy(; N=1, N_min=1, t_max=2.0, lazy=false,
             envelope=:inflated_constant,
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0),
+            curvature_bound=(0.0),
             certification=:required,
             bound_violation=:throw,
             max_rejections_before_tail_restart=1,
@@ -677,12 +703,11 @@ end
         pab = PDMPSamplers.PiecewiseAffineBound(8)
         grad = x -> copy(x)
         hvp = (x, v) -> copy(v)
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
 
-        geom = PDMPSamplers.signed_rate_geometry((grad, hvp), flow)
-        @test geom isa PDMPSamplers.ComponentwiseSignedRateGeometry
-        @test PDMPSamplers.signed_rate_geometry((grad, nothing), flow) isa
-            PDMPSamplers.UnsupportedSignedRateGeometry
+        @test PDMPSamplers._rate_shape(flow) === :componentwise
+        @test PDMPSamplers._can_use_signed_grid(state, flow, (grad, hvp))
+        @test !PDMPSamplers._can_use_signed_grid(state, flow, (grad, nothing))
         G, dG = PDMPSamplers.signed_rate_channel_jets_for_grid(
             (grad, hvp), state, flow, t_grid, length(t_grid))
         @test size(G) == (2, length(t_grid))
@@ -722,7 +747,7 @@ end
         pab = PDMPSamplers.PiecewiseAffineBound(8)
         grad = x -> copy(x)
         hvp = (x, v) -> copy(v)
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
         stats = PDMPSamplers.DevelStatisticCounter()
 
         PDMPSamplers.construct_signed_inflated_grid!(
@@ -750,7 +775,7 @@ end
         t_grid = [0.0, 1.0]
         grad = x -> copy(x)
         hvp = (x, v) -> copy(v)
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
         crossings = count(i -> 0.0 < -θ[i] * x[i] < 1.0, 1:d)
 
         pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
@@ -797,8 +822,8 @@ end
         corrected_grad = x -> zeros(length(x))
         raw_hvp = (x, v) -> Γ * v
 
-        geom = PDMPSamplers.signed_rate_geometry((corrected_grad, raw_hvp), flow)
-        @test geom isa PDMPSamplers.ScalarSignedRateGeometry
+        @test PDMPSamplers._rate_shape(flow) === :scalar
+        @test PDMPSamplers._can_use_signed_grid(state, flow, (corrected_grad, raw_hvp))
         g, dg = PDMPSamplers.signed_rate_and_derivative(
             state, flow, (corrected_grad, raw_hvp))
         @test g ≈ 0.0 atol=1e-12
@@ -879,7 +904,7 @@ end
         @test dg ≈ fd rtol=1e-7 atol=1e-8
     end
 
-    @testset "certified Boomerang requires Boomerang curvature certificate" begin
+    @testset "Boomerang signed grid accepts optional generic curvature bound" begin
         Γ = Diagonal([1.0, 1.4])
         μ = [0.0, 0.1]
         A = Symmetric([0.3 0.05; 0.05 0.2])
@@ -899,27 +924,38 @@ end
         generic = GridThinningStrategy(;
             N=2,
             envelope=:inflated_constant,
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(1.0),
+            curvature_bound=(1.0),
             certification=:required,
             lazy=false)
-        specific = GridThinningStrategy(;
+        adaptive = GridThinningStrategy(;
             N=2,
             envelope=:inflated_constant,
-            curvature_bound=PDMPSamplers.BoomerangCertifiedUpperCurvature(10.0),
+            lazy=false)
+        bounded = GridThinningStrategy(;
+            N=2,
+            envelope=:inflated_constant,
+            curvature_bound=(10.0),
             certification=:required,
             bound_violation=:throw,
             lazy=false)
 
-        @test_throws ArgumentError pdmp_sample(
+        _, generic_stats = pdmp_sample(
             ξ0, flow, model, generic, 0.0, 0.5;
             seed=32,
             progress=false,
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        _, adaptive_stats = pdmp_sample(
+            ξ0, flow, model, adaptive, 0.0, 0.5;
+            seed=34,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
         _, stats = pdmp_sample(
-            ξ0, flow, model, specific, 0.0, 0.5;
+            ξ0, flow, model, bounded, 0.0, 0.5;
             seed=33,
             progress=false,
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test generic_stats.grid_bound_violations == 0
+        @test adaptive_stats.grid_bound_violations >= 0
         @test stats.grid_bound_violations == 0
         @test stats.grid_certificate_fallbacks == 0
     end
@@ -941,7 +977,7 @@ end
         end
         model = PDMPModel(2, FullGradient(residual_grad!), residual_hvp!)
         ξ0 = SkeletonPoint([0.3, -0.45], [0.5, -0.25])
-        cert = PDMPSamplers.BoomerangCertifiedUpperCurvature(25.0)
+        cert = (25.0)
 
         for envelope in (:inflated_constant, :inflated_linear, :certified_auto)
             alg = GridThinningStrategy(;
@@ -982,7 +1018,7 @@ end
         alg = GridThinningStrategy(;
             N=2,
             envelope=:inflated_constant,
-            curvature_bound=PDMPSamplers.BoomerangCertifiedUpperCurvature(0.0),
+            curvature_bound=(0.0),
             certification=:required,
             bound_violation=:throw,
             lazy=false)
@@ -1054,8 +1090,8 @@ end
         @test g ≈ actual_signed_rate(0.0) atol=1e-12
         @test dg ≈ fd rtol=1e-7 atol=1e-8
 
-        cert = PDMPSamplers.BoomerangLogisticGaussianReferenceCertificate(X)
-        L = PDMPSamplers.rate_curvature_upper_bound(cert, state, flow, 0.0, 1.0).value
+        cert = TestBoomerangLogisticBound(X)
+        L = cert(state, flow, 0.0, 1.0)
         for t in range(0.0, 2π; length=41)
             st = copy(state)
             move_forward_time!(st, t, flow)
@@ -1114,20 +1150,8 @@ end
         end
 
         model = PDMPModel(p, FullGradient(logistic_grad!), logistic_hvp!)
-        cert = PDMPSamplers.BoomerangLogisticGaussianReferenceCertificate(X)
+        cert = TestBoomerangLogisticBound(X)
         ξ0 = SkeletonPoint(fill(0.05, p), collect(range(-0.4, 0.4; length=p)))
-        generic = GridThinningStrategy(;
-            N=2,
-            envelope=:inflated_constant,
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(1.0),
-            certification=:required,
-            lazy=false)
-        @test_throws ArgumentError pdmp_sample(
-            ξ0, flow, model, generic, 0.0, 0.5;
-            seed=43,
-            progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
-
         for envelope in (:inflated_constant, :inflated_linear, :certified_auto)
             alg = GridThinningStrategy(;
                 N=2,
@@ -1158,23 +1182,23 @@ end
         state = PDMPState(0.0, SkeletonPoint([0.4, -0.3, 0.2], [1.2, -0.8, 0.5]))
 
         dbps = PreconditionedBPS(d; refresh_rate=0.0, scale=[0.5, 1.5, 2.0])
-        @test PDMPSamplers.signed_rate_geometry((grad, hvp), dbps) isa
-            PDMPSamplers.ScalarSignedRateGeometry
+        @test PDMPSamplers._rate_shape(dbps) === :scalar
+        @test PDMPSamplers._can_use_signed_grid(state, dbps, (grad, hvp))
         g, dg = PDMPSamplers.signed_rate_and_derivative(state, dbps, (grad, hvp))
         @test g ≈ dot(state.ξ.x, state.ξ.θ)
         @test dg ≈ dot(state.ξ.θ, state.ξ.θ)
 
         dense_bps = DensePreconditionedBPS(d; refresh_rate=0.0)
-        @test PDMPSamplers.signed_rate_geometry((grad, hvp), dense_bps) isa
-            PDMPSamplers.ScalarSignedRateGeometry
+        @test PDMPSamplers._rate_shape(dense_bps) === :scalar
+        @test PDMPSamplers._can_use_signed_grid(state, dense_bps, (grad, hvp))
         g_dense, dg_dense = PDMPSamplers.signed_rate_and_derivative(
             state, dense_bps, (grad, hvp))
         @test g_dense ≈ dot(state.ξ.x, state.ξ.θ)
         @test dg_dense ≈ dot(state.ξ.θ, state.ξ.θ)
 
         dzz = PreconditionedZigZag(d; scale=[0.5, 1.5, 2.0])
-        @test PDMPSamplers.signed_rate_geometry((grad, hvp), dzz) isa
-            PDMPSamplers.ComponentwiseSignedRateGeometry
+        @test PDMPSamplers._rate_shape(dzz) === :componentwise
+        @test PDMPSamplers._can_use_signed_grid(state, dzz, (grad, hvp))
         G_diag, dG_diag = PDMPSamplers.signed_rate_channel_jets_for_grid(
             (grad, hvp), state, dzz, [0.0], 1)
         @test vec(G_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.x
@@ -1189,8 +1213,8 @@ end
         copyto!(flow.metric.v_canonical, v)
         θ = L * v
         zz_state = PDMPState(0.0, SkeletonPoint([0.3, -0.4, 0.2], θ))
-        @test PDMPSamplers.signed_rate_geometry((grad, hvp), flow) isa
-            PDMPSamplers.ComponentwiseSignedRateGeometry
+        @test PDMPSamplers._rate_shape(flow) === :componentwise
+        @test PDMPSamplers._can_use_signed_grid(zz_state, flow, (grad, hvp))
         G, dG = PDMPSamplers.signed_rate_channel_jets_for_grid(
             (grad, hvp), zz_state, flow, [0.0], 1)
         η = L' * zz_state.ξ.x
@@ -1213,7 +1237,7 @@ end
         state = PDMPState(0.0, SkeletonPoint([-0.4, 0.25, -0.1], θ))
         grad = x -> copy(x)
         hvp = (x, v) -> copy(v)
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
         t_grid = collect(range(0.0, 1.0, 4))
         pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
         pab = PDMPSamplers.PiecewiseAffineBound(16)
@@ -1244,7 +1268,7 @@ end
         alg = GridThinningStrategy(;
             N=4,
             envelope=:inflated_linear,
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0),
+            curvature_bound=(0.0),
             certification=:required,
             bound_violation=:throw,
             lazy=false)
@@ -1510,15 +1534,18 @@ end
         @test strat_hybrid.envelope === :hybrid_linear
 
         strat_inflated = GridThinningStrategy(; envelope=:inflated_linear, lazy=false,
-            curvature_bound=(args...) -> PDMPSamplers.CertifiedUpperCurvature(0.0))
+            curvature_bound=(args...) -> (0.0))
         @test strat_inflated.envelope === :inflated_linear
         @test strat_inflated.curvature_bound !== nothing
         @test strat_inflated.certification === :required
         @test strat_inflated.inflated_affine_threshold == 0.95
         @test strat_inflated.inflated_affine_min_area_gain == 0.0
 
-        auto_preset = certified_auto_scalar_bps_grid(;
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0))
+        auto_preset = GridThinningStrategy(;
+            bound=:auto,
+            N=1,
+            inflated_affine_threshold=0.9,
+            curvature_bound=(0.0))
         @test auto_preset.N == 1
         @test auto_preset.envelope === :certified_auto
         @test auto_preset.certification === :required
@@ -1526,25 +1553,104 @@ end
         @test auto_preset.inflated_affine_min_area_gain == 0.0
         @test auto_preset.certified_auto_probe_interval == 20
 
-        scalar_preset = certified_scalar_bps_grid(;
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0))
+        scalar_preset = GridThinningStrategy(;
+            bound=:linear,
+            N=1,
+            inflated_affine_threshold=0.9,
+            curvature_bound=(0.0))
         @test scalar_preset.N == 1
         @test scalar_preset.envelope === :inflated_linear
         @test scalar_preset.certification === :required
         @test scalar_preset.inflated_affine_threshold == 0.9
         @test scalar_preset.inflated_affine_min_area_gain == 0.0
 
-        flat_preset = certified_flat_scalar_bps_grid(;
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0))
+        flat_preset = GridThinningStrategy(;
+            bound=:flat,
+            N=1,
+            curvature_bound=(0.0))
         @test flat_preset.N == 1
         @test flat_preset.envelope === :inflated_constant
         @test flat_preset.certification === :required
+
+        @test GridThinningStrategy(; bound=:sticky_auto).envelope ===
+            :certified_auto_affine_sticky
+        @test_throws ArgumentError GridThinningStrategy(;
+            bound=:flat,
+            envelope=:inflated_linear)
+    end
+
+    @testset "R bridge GridThinning compatibility surface" begin
+        d = 2
+        Γ = Diagonal([1.2, 1.8])
+        μ = [0.1, -0.2]
+        function compat_grad!(out, x)
+            out .= Γ * (x .- μ)
+            return out
+        end
+        function compat_hvp!(out, x, v)
+            out .= Γ * v
+            return out
+        end
+        model = PDMPModel(d, FullGradient(compat_grad!), compat_hvp!)
+        alg = GridThinningStrategy(;
+            N=30,
+            t_max=2.0,
+            use_fd_hvp=false,
+            post_warmup_simplify=true)
+        @test alg.envelope === :constant
+
+        fields = (
+            :reflections_events,
+            :reflections_accepted,
+            :refreshment_events,
+            :sticky_events,
+            :support_boundary_events,
+            :support_boundary_refresh_attempts,
+            :support_boundary_refresh_failures,
+            :∇f_calls,
+            :∇²f_calls,
+            :elapsed_time,
+            :grid_builds,
+            :grid_shrinks,
+            :grid_grows,
+            :grid_early_stops,
+            :grid_points_evaluated,
+            :grid_points_skipped,
+            :grid_N_current,
+            :lazy_fallback_low_tightness,
+            :lazy_fallback_bound_violation,
+            :lazy_proposal_attempts,
+            :lazy_proposal_rejections,
+            :grid_resets_from_dynamics_adaptation,
+        )
+
+        flows = (
+            ZigZag(Γ, μ),
+            BouncyParticle(Γ, μ),
+            Boomerang(Γ, μ),
+            AdaptiveBoomerang(Γ, μ; λref=0.1),
+            PreconditionedZigZag(Matrix(Γ), μ),
+            PreconditionedBPS(Matrix(Γ), μ),
+        )
+        for (i, flow) in enumerate(flows)
+            rng = Xoshiro(20_260_702 + i)
+            θ0 = PDMPSamplers.initialize_velocity(rng, flow, d)
+            ξ0 = SkeletonPoint(copy(μ), θ0)
+            _, stats = pdmp_sample(
+                ξ0, flow, model, alg, 0.0, 0.05;
+                seed=20_260_800 + i,
+                progress=false)
+            for field in fields
+                @test field in propertynames(stats)
+                @test getproperty(stats, field) !== nothing
+            end
+        end
     end
 
     @testset "certified_auto forced affine probe is non-sticky" begin
         state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
         strat = GridThinningStrategy(; envelope=:certified_auto, lazy=false,
-            curvature_bound=PDMPSamplers.GlobalCertifiedUpperCurvature(0.0),
+            curvature_bound=(0.0),
             certified_auto_probe_interval=1)
         alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 1, 1, 2, 1.0)
         stats = PDMPSamplers.DevelStatisticCounter()
@@ -1661,7 +1767,7 @@ end
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
         provider_full = TestSignedGridJets(Ref(0))
         provider_append = TestSignedGridJets(Ref(0))
-        cert = PDMPSamplers.GlobalCertifiedUpperCurvature(0.0)
+        cert = (0.0)
         t_grid = collect(range(0.0, 1.0, 11))
 
         full_pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
@@ -1894,7 +2000,7 @@ end
         flow = BouncyParticle(1, 0.0)
         cert = (state, flow, a, b) -> begin
             v = state.ξ.θ[1]
-            PDMPSamplers.CertifiedUpperCurvature(2.0 * v^3)
+            (2.0 * v^3)
         end
         alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
             envelope=:inflated_linear, curvature_bound=cert)
@@ -1912,7 +2018,7 @@ end
         @test stats.grid_bound_violations == 0
     end
 
-    @testset "inflated affine GridThinning does not certify finite-diff derivatives" begin
+    @testset "inflated affine GridThinning accepts finite-diff derivatives" begin
         function convex_rate_grad_only!(out, x)
             out[1] = x[1]^2 + 1.0
             return out
@@ -1922,7 +2028,7 @@ end
         flow = BouncyParticle(1, 0.0)
         alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
             envelope=:inflated_linear,
-            curvature_bound=(state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(2.0),
+            curvature_bound=(state, flow, a, b) -> (2.0),
             certification=:opportunistic)
         ξ0 = SkeletonPoint([0.0], [1.0])
         rng = Xoshiro(20260630)
@@ -1932,12 +2038,13 @@ end
         τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
 
         @test isfinite(τ)
-        @test stats.affine_inflated_cells == 0
-        @test stats.affine_area_hybrid == 0.0
-        @test stats.affine_area_constant_equiv == 0.0
+        @test stats.affine_inflated_cells > 0
+        @test stats.affine_area_hybrid > 0.0
+        @test stats.affine_area_constant_equiv > 0.0
+        @test stats.grid_bound_violations == 0
     end
 
-    @testset "inflated affine certification contract is explicit" begin
+    @testset "inflated affine bound works without mandatory curvature certificates" begin
         function simple_grad!(out, x)
             out[1] = x[1]
             return out
@@ -1947,12 +2054,14 @@ end
         flow = BouncyParticle(1, 0.0)
         alg_required_fd = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
             envelope=:inflated_linear,
-            curvature_bound=(state, flow, a, b) -> PDMPSamplers.CertifiedUpperCurvature(0.0),
+            curvature_bound=(state, flow, a, b) -> (0.0),
             certification=:required)
         ξ0 = SkeletonPoint([0.0], [1.0])
         rng = Xoshiro(20260630)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model_grad_only, alg_required_fd, 0.0, ξ0)
-        @test_throws ArgumentError PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, Inf, false)
+        @test isfinite(τ)
 
         function simple_hvp!(out, x, v)
             out[1] = v[1]
@@ -1964,7 +2073,9 @@ end
             curvature_bound=(state, flow, a, b) -> 0.0,
             certification=:required)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model_hvp, alg_raw_cert, 0.0, ξ0)
-        @test_throws ArgumentError PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, Inf, false)
+        @test isfinite(τ)
     end
 
     @testset "_constant_bound_event_time direct call" begin

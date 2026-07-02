@@ -726,7 +726,15 @@ end
 # Convenience type aliases for backward-compatible construction
 # ===========================================================================================
 
-@counter_bundle StatisticCounter BasicEventCounter SupportBoundaryCounter GradientCallCounter
+@counter_bundle(
+    StatisticCounter,
+    BasicEventCounter,
+    SupportBoundaryCounter,
+    GradientCallCounter,
+    GridThinningCounter,
+    PhaseSummaryCounter,
+    LazyBoundCounter,
+)
 
 @counter_bundle(
     DevelStatisticCounter,
