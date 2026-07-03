@@ -141,7 +141,7 @@ function gen_data(::Type{Distributions.MvTDist}, d, η,
 
     D = MvTDist(ν, μ, Σ)
 
-    Σ_inv = Symmetric(inv(Σ))
+    Σ_inv = Symmetric(Matrix(inv(Σ)))
     scalar_coeff = (ν + d) / ν
 
     x_centered = similar(μ)
