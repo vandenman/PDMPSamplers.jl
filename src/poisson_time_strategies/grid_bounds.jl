@@ -189,8 +189,9 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
 end
 
 _supports_constant_grid_rate_derivatives(::ContinuousDynamics, provider) = false
-_supports_constant_grid_rate_derivatives(flow::BouncyParticle, provider) =      _supports_rate_derivatives(provider, flow)
-_supports_constant_grid_rate_derivatives(pd::PreconditionedDynamics, provider) =_supports_constant_grid_rate_derivatives(pd.dynamics, provider)
+_supports_constant_grid_rate_derivatives(flow::BouncyParticle, provider) = _supports_rate_derivatives(provider, flow)
+_supports_constant_grid_rate_derivatives(pd::PreconditionedDynamics, provider) =
+    _supports_constant_grid_rate_derivatives(pd.dynamics, provider)
 
 function _constant_rate_derivative_from_signed(g::Real, dg::Real, λ_refresh::Real)
     return pos(g) + λ_refresh, ispositive(g) ? dg : zero(dg)
@@ -198,17 +199,8 @@ end
 
 _grid_rate_derivative_chunk_points() = 16
 
-function _load_rate_derivative_chunk!(
-    pcb::PiecewiseConstantBound,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    target_point::Integer,
-    max_points::Integer,
-    loaded_points::Integer,
-    stats::Union{AbstractStatisticCounter,Nothing},
-    transform,
-)
+function _load_rate_derivative_chunk!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
+    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing}, transform)
     target_point <= loaded_points && return loaded_points
     start_point = loaded_points + 1
     stop_point = min(max_points, max(target_point, loaded_points + _grid_rate_derivative_chunk_points()))
@@ -227,32 +219,16 @@ function _load_rate_derivative_chunk!(
     return stop_point
 end
 
-function _load_constant_rate_derivatives!(
-    pcb::PiecewiseConstantBound,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    target_point::Integer,
-    max_points::Integer,
-    loaded_points::Integer,
-    λ_refresh::Real,
-    stats::Union{AbstractStatisticCounter,Nothing},
-)
+function _load_constant_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, target_point::Integer, max_points::Integer, loaded_points::Integer, λ_refresh::Real,
+    stats::Union{AbstractStatisticCounter,Nothing})
     transform = (g, dg) -> _constant_rate_derivative_from_signed(g, dg, λ_refresh)
     return _load_rate_derivative_chunk!(
         pcb, provider, state, flow, target_point, max_points, loaded_points, stats, transform)
 end
 
-function _load_rate_derivatives!(
-    pcb::PiecewiseConstantBound,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    target_point::Integer,
-    max_points::Integer,
-    loaded_points::Integer,
-    stats::Union{AbstractStatisticCounter,Nothing},
-)
+function _load_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
+    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing})
     return _load_rate_derivative_chunk!(
         pcb, provider, state, flow, target_point, max_points, loaded_points, stats,
         (g, dg) -> (g, dg))

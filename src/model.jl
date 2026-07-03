@@ -71,7 +71,9 @@ const GlobalGradientModel{H} = PDMPModel{<:GlobalGradientStrategy,H}
 const CoordinateWiseGradientModel{H} = PDMPModel{<:CoordinateWiseGradientStrategy,H}
 
 function PDMPModel(f::Function, args...; kwargs...)
-    throw(ArgumentError("PDMPModel(f::Function, args..; kwargs...) is intentionally not implemented because it's unclear if this is a log density or gradient. Use PDMPModel(LogDensity(f), args..; kwargs...) or PDMPModel(FullGradient(f), args..; kwargs...) instead."))
+    msg = "PDMPModel(f::Function, args..; kwargs...) is intentionally not implemented because it's unclear if this is a log density or gradient. " *
+        "Use PDMPModel(LogDensity(f), args..; kwargs...) or PDMPModel(FullGradient(f), args..; kwargs...) instead."
+    throw(ArgumentError(msg))
 end
 
 PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true, true)

@@ -1,16 +1,5 @@
-function _grid_bound_violation_message(
-    alg,
-    stats::AbstractStatisticCounter,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    τ::Real,
-    signed_actual::Real,
-    l_actual::Real,
-    bound_actual::Real,
-    cumulative_exp::Real,
-    λ_refresh::Real,
-    use_linear::Bool,
-)
+function _grid_bound_violation_message(alg, stats::AbstractStatisticCounter, state::AbstractPDMPState, flow::ContinuousDynamics,
+    τ::Real, signed_actual::Real, l_actual::Real, bound_actual::Real, cumulative_exp::Real, λ_refresh::Real, use_linear::Bool)
     ratio = bound_actual == 0 ? Inf : l_actual / bound_actual
     cell_index = if isempty(alg.pcb.t_grid)
         0
@@ -92,13 +81,8 @@ end
 _grid_built_area(pcb::PiecewiseConstantBound, bound::PiecewiseAffineBound, use_linear::Bool) =
     use_linear ? total_area(bound) : _piecewise_constant_area(pcb)
 
-function _record_budget_grid_build!(
-    stats::AbstractStatisticCounter,
-    n_cells::Integer,
-    built_area::Real,
-    exponential_budget::Real,
-    is_extension::Bool,
-)
+function _record_budget_grid_build!(stats::AbstractStatisticCounter, n_cells::Integer, built_area::Real,
+    exponential_budget::Real, is_extension::Bool)
     is_extension && (_inc_counter_grid_budget_extensions(stats))
     _inc_counter_grid_budget_cells_built(stats, max(Int(n_cells), 0))
     _inc_counter_grid_budget_area_built(stats, float(built_area))
@@ -147,25 +131,10 @@ function _normalize_grid_bound(bound::Symbol)
     throw(ArgumentError("unknown GridThinning bound $(bound)"))
 end
 
-function GridThinningStrategy(;
-    N::Int=20,
-    N_min::Int=5,
-    t_max::Real=2.0,
-    α⁺::Real=1.5,
-    α⁻::Real=0.5,
-    safety_limit::Int=500,
-    early_stop_threshold::Real=5.0,
-    use_fd_hvp::Bool=false,
-    post_warmup_simplify::Bool=false,
-    lazy::Bool=true,
-    bound=nothing,
-    curvature_bound=nothing,
-    bound_violation=nothing,
-    linear_area_threshold::Real=0.95,
-    linear_min_area_gain::Real=0.0,
-    max_rejections_before_tail_restart::Int=100,
-    max_componentwise_affine_segments_per_cell::Int=64,
-)
+function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
+    safety_limit::Int=500, early_stop_threshold::Real=5.0, use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false,
+    lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing, linear_area_threshold::Real=0.95,
+    linear_min_area_gain::Real=0.0, max_rejections_before_tail_restart::Int=100, max_componentwise_affine_segments_per_cell::Int=64)
     bound_symbol = _normalize_grid_bound(bound)
     bound_violation_symbol = bound_violation === nothing ?
         (bound_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
@@ -209,13 +178,8 @@ end
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
 _adjust_early_stop(::SubsampledGradient, ::Float64) = Inf
 
-function _effective_grid_horizon(
-    ::GradientStrategy,
-    t_max::Float64,
-    τ_refresh::Float64,
-    max_horizon::Float64,
-    max_horizon_event::Symbol=:horizon_hit,
-)
+function _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64,
+    max_horizon_event::Symbol=:horizon_hit)
     if τ_refresh <= t_max && τ_refresh <= max_horizon
         return τ_refresh, :refresh
     elseif max_horizon <= t_max
@@ -432,18 +396,9 @@ function _constant_bound_event_time(
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
-function _constant_bound_event_time(
-    model::PDMPModel{<:GlobalGradientStrategy},
-    flow::ContinuousDynamics,
-    alg::GridAdaptiveState,
-    state::AbstractPDMPState,
-    cache,
-    stats::AbstractStatisticCounter,
-    max_horizon::Float64,
-    include_refresh::Bool,
-    max_horizon_event::Symbol=:horizon_hit,
-    probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
-)
+function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState,
+    state::AbstractPDMPState, cache, stats::AbstractStatisticCounter, max_horizon::Float64, include_refresh::Bool,
+    max_horizon_event::Symbol=:horizon_hit, probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe())
     return _constant_bound_event_time(
         Random.default_rng(), model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler,
@@ -1089,4 +1044,3 @@ function _maybe_activate_constant_bound!(alg::GridAdaptiveState, stats::Abstract
     alg.constant_bound_rate[] = max_rate * 2.0
     return nothing
 end
-

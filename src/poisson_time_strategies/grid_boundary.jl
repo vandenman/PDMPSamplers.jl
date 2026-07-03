@@ -58,19 +58,11 @@ end
 
 # ── Support-boundary helpers for grid thinning ───────────────────────────────
 
-function _grid_probe_failure_handler(
-    original_state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    model::PDMPModel,
-    algorithm_type::Type
-)
+function _grid_probe_failure_handler(original_state::AbstractPDMPState, flow::ContinuousDynamics, model::PDMPModel, algorithm_type::Type)
     return GridBoundaryProbeHandler(original_state, flow, model, algorithm_type)
 end
 
-function _throw_grid_boundary_error(
-    probe::GridBoundaryProbeHandler{S,F,M,A},
-    current_state::AbstractPDMPState,
-    err::Exception;
+function _throw_grid_boundary_error(probe::GridBoundaryProbeHandler{S,F,M,A}, current_state::AbstractPDMPState, err::Exception;
     t_valid::Float64=0.0,
     t_invalid::Float64=current_state.t[] - probe.original_state.t[],
 ) where {S,F,M,A}
@@ -79,13 +71,8 @@ function _throw_grid_boundary_error(
         t_valid, t_invalid, algorithm_type=A)
 end
 
-function _throw_grid_boundary_error(
-    current_state::AbstractPDMPState,
-    original_state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    model::PDMPModel,
-    err::Exception;
-    t_valid::Float64=0.0,
+function _throw_grid_boundary_error(current_state::AbstractPDMPState, original_state::AbstractPDMPState, flow::ContinuousDynamics,
+    model::PDMPModel, err::Exception; t_valid::Float64=0.0,
     t_invalid::Float64=current_state.t[] - original_state.t[],
     algorithm_type::Type=GridThinningStrategy
 )
@@ -109,25 +96,13 @@ function _throw_grid_boundary_error(
     throw(_ProbeFailureException(ctx))
 end
 
-function _throw_grid_boundary_error(
-    current_state::AbstractPDMPState,
-    original_state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    model::PDMPModel,
-    err::_ProbeFailureException;
-    kwargs...
-)
+function _throw_grid_boundary_error(current_state::AbstractPDMPState, original_state::AbstractPDMPState, flow::ContinuousDynamics,
+    model::PDMPModel, err::_ProbeFailureException; kwargs...)
     rethrow(err)
 end
 
-function _throw_grid_safety_limit_error(
-    original_state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    model::PDMPModel;
-    t_invalid::Float64,
-    message::String,
-    algorithm_type::Type=GridThinningStrategy
-)
+function _throw_grid_safety_limit_error(original_state::AbstractPDMPState, flow::ContinuousDynamics, model::PDMPModel;
+    t_invalid::Float64, message::String, algorithm_type::Type=GridThinningStrategy)
     t_invalid = max(t_invalid, eps(Float64))
     ctx = BoundaryContext(
         copy(original_state.ξ.x), copy(original_state.ξ.θ), Float64(original_state.t[]),

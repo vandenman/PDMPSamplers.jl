@@ -1,26 +1,12 @@
-function rate_derivatives_for_grid!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    t_grid::AbstractVector,
-    n_points::Integer,
-)
+function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer)
     throw(ArgumentError(
         "bound=:linear requires rate derivatives for $(typeof(flow)); " *
         "use bound=:constant or implement rate_derivatives_for_grid!"))
 end
 
-function _scalar_rate_derivatives_for_grid!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    t_grid::AbstractVector,
-    n_points::Integer,
-)
+function _scalar_rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer)
     size(values, 1) >= 1 && size(values, 2) >= n_points ||
         throw(ArgumentError("values matrix is too small"))
     size(derivatives, 1) >= 1 && size(derivatives, 2) >= n_points ||
@@ -34,41 +20,22 @@ function _scalar_rate_derivatives_for_grid!(
     return values, derivatives
 end
 
-function rate_derivatives_for_grid!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider::Union{Tuple,GradHVPProvider,VHVProvider,FiniteDiffVHV,WithStatsJoint},
-    state::AbstractPDMPState,
-    flow::BouncyParticle,
-    t_grid::AbstractVector,
-    n_points::Integer,
-)
+function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix,
+    provider::Union{Tuple,GradHVPProvider,VHVProvider,FiniteDiffVHV,WithStatsJoint}, state::AbstractPDMPState,
+    flow::BouncyParticle, t_grid::AbstractVector, n_points::Integer)
     return _scalar_rate_derivatives_for_grid!(
         values, derivatives, provider, state, flow, t_grid, n_points)
 end
 
-function rate_derivatives_for_grid!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider::Union{Tuple,GradHVPProvider},
-    state::AbstractPDMPState,
-    flow::AnyBoomerang,
-    t_grid::AbstractVector,
-    n_points::Integer,
-)
+function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix, provider::Union{Tuple,GradHVPProvider},
+    state::AbstractPDMPState, flow::AnyBoomerang, t_grid::AbstractVector, n_points::Integer)
     return _scalar_rate_derivatives_for_grid!(
         values, derivatives, provider, state, flow, t_grid, n_points)
 end
 
-function rate_derivatives_for_grid!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider::Union{Tuple,GradHVPProvider,VHVProvider,FiniteDiffVHV,WithStatsJoint},
-    state::AbstractPDMPState,
-    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
-    t_grid::AbstractVector,
-    n_points::Integer,
-)
+function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix,
+    provider::Union{Tuple,GradHVPProvider,VHVProvider,FiniteDiffVHV,WithStatsJoint}, state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}, t_grid::AbstractVector, n_points::Integer)
     return _scalar_rate_derivatives_for_grid!(
         values, derivatives, provider, state, flow, t_grid, n_points)
 end
@@ -94,29 +61,18 @@ _supports_rate_derivatives(provider, ::ContinuousDynamics) = false
 _supports_rate_derivatives(provider, ::BouncyParticle) = true
 _supports_rate_derivatives(provider, ::AnyBoomerang) =
     _provider_has_directional_derivative(provider)
-_supports_rate_derivatives(
-    provider,
-    ::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
-) = true
+_supports_rate_derivatives(provider, ::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) = true
 _supports_rate_derivatives((grad, hvp)::Tuple{G,H}, ::ZigZag) where {G,H} =
     !(H <: Nothing)
 _supports_rate_derivatives(provider::GradHVPProvider{G,H}, ::ZigZag) where {G,H} = !(H <: Nothing)
-_supports_rate_derivatives(
-    (grad, hvp)::Tuple{G,H},
-    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
-) where {G,H} = !(H <: Nothing)
-_supports_rate_derivatives(
-    provider::GradHVPProvider{G,H},
-    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
-) where {G,H} = !(H <: Nothing)
-_supports_rate_derivatives(
-    (grad, hvp)::Tuple{G,H},
-    ::PreconditionedDynamics{DensePreconditioner,<:ZigZag},
-) where {G,H} = !(H <: Nothing)
-_supports_rate_derivatives(
-    provider::GradHVPProvider{G,H},
-    ::PreconditionedDynamics{DensePreconditioner,<:ZigZag},
-) where {G,H} = !(H <: Nothing)
+_supports_rate_derivatives((grad, hvp)::Tuple{G,H},
+    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
+_supports_rate_derivatives(provider::GradHVPProvider{G,H},
+    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
+_supports_rate_derivatives((grad, hvp)::Tuple{G,H},
+    ::PreconditionedDynamics{DensePreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
+_supports_rate_derivatives(provider::GradHVPProvider{G,H},
+    ::PreconditionedDynamics{DensePreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
 
 function _can_use_signed_grid(state::AbstractPDMPState, flow::ContinuousDynamics, provider)
     _rate_aggregation(flow) === :unsupported && return false
@@ -130,15 +86,7 @@ _uses_builtin_grid_provider(::VHVProvider) = true
 _uses_builtin_grid_provider(::FiniteDiffVHV) = true
 _uses_builtin_grid_provider(::WithStatsJoint) = true
 
-function _fill_rate_derivatives!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider,
-    state,
-    flow,
-    t_grid,
-    n_points,
-)
+function _fill_rate_derivatives!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state, flow, t_grid, n_points)
     return rate_derivatives_for_grid!(values, derivatives, provider, state, flow, t_grid, n_points)
 end
 
@@ -149,12 +97,7 @@ function rate_derivatives_for_grid(provider, state, flow, t_grid, n_points::Inte
     return values, derivatives
 end
 
-function _rate_derivative_scratch!(
-    value_buf::Vector{Float64},
-    derivative_buf::Vector{Float64},
-    n_channels::Integer,
-    n_points::Integer,
-)
+function _rate_derivative_scratch!(value_buf::Vector{Float64}, derivative_buf::Vector{Float64}, n_channels::Integer, n_points::Integer)
     len = n_channels * n_points
     length(value_buf) < len && resize!(value_buf, len)
     length(derivative_buf) < len && resize!(derivative_buf, len)
@@ -272,13 +215,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     return rate, rate_deriv
 end
 
-function get_rate_and_deriv(
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    provider::WithStatsJoint,
-    add_rate::Bool,
-    ::AbstractVector,
-)
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::WithStatsJoint, add_rate::Bool, ::AbstractVector)
     return get_rate_and_deriv(state, flow, provider, add_rate)
 end
 
