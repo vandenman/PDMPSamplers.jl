@@ -440,8 +440,8 @@ function initialize_state(rng::Random.AbstractRNG, flow::ContinuousDynamics, mod
     state = alg isa Sticky ? StickyPDMPState(t, ξ) : PDMPState(t, ξ)
     initialize_flow_state!(state, flow)
     cache = add_gradient_to_cache(initialize_cache(rng, flow, model.grad, alg, t, ξ), ξ)
-    alg_ = _to_internal(alg, rng, flow, model, state, cache, stats)
     model_ = with_stats(model, stats)
+    alg_ = _to_internal(alg, rng, flow, model_, state, cache, stats)
     model_.grad isa SubsampledGradient && model_.grad.resample_indices!(model_.grad.nsub)
     return state, model_, alg_, cache, stats
 end

@@ -1320,7 +1320,7 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     est = _default_early_stop(flow, strat.early_stop_threshold)
     est = _adjust_early_stop(model.grad, est)
     N_max = max(N_base + 4, 2 * N_base)
-    _build_grid_adaptive_state(strat, state, N_base, N_min, N_max, est)
+    _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, est)
 end
 
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
@@ -1354,11 +1354,21 @@ function _return_grid_horizon!(alg, stats::AbstractStatisticCounter, t_max::Floa
 end
 
 function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
-    return _build_grid_adaptive_state(strat, state, N_base, N_min, N_base, est)
+    flow = BouncyParticle(length(state.ξ))
+    model = PDMPModel(length(state.ξ), FullGradient((out, x) -> copyto!(out, x)))
+    cache = (; ∇ϕx=similar(state.ξ.x))
+    return _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_base, est)
 end
 
-function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, N_max::Int, est) where S<:AbstractPDMPState
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
+    return _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_base, est)
+end
+
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, N_max::Int, est) where S<:AbstractPDMPState
     T = typeof(strat.t_max)
+    state_cache = copy(state)
+    state_cache2 = copy(state)
+    grad_provider = GradientProvider(state_cache.ξ.θ, flow, model.grad, cache)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         PiecewiseAffineBound(2N_base),
@@ -1370,8 +1380,8 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         N_min,
         N_max,
         est,
-        copy(state),
-        copy(state),
+        state_cache,
+        state_cache2,
         similar(state.ξ.x, 0),
         strat.use_fd_hvp,
         similar(state.ξ.x),
@@ -1386,6 +1396,10 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         Ref(strat.lazy),
         similar(state.ξ.x),
         Ref(false),
+        grad_provider,
+        GradHVPProvider(grad_provider, model.hvp),
+        VHVProvider(grad_provider, model.vhv, similar(state.ξ.x)),
+        FiniteDiffVHV(grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x)),
         strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
@@ -1396,7 +1410,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
@@ -1423,6 +1437,10 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     lazy_enabled::Base.RefValue{Bool}
     cached_gradient::Vector{Float64}
     has_cached_gradient::Base.RefValue{Bool}
+    grad_provider::P
+    grad_hvp_provider::GH
+    vhv_provider::VP
+    fd_vhv_provider::FD
     bound::Symbol
     curvature_bound
     bound_violation::Symbol
@@ -1557,15 +1575,15 @@ function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynami
     end
     vhv_func = model.vhv
     if vhv_func !== nothing
-        return VHVProvider(grad_func, vhv_func, alg.fd_buf)
+        return alg.vhv_provider
     end
     hvp_func = model.hvp
     if hvp_func === nothing
         # Always fall back to finite-diff curvature when no HVP is available.
         # This gives much tighter bounds than gradient-only mode.
-        return FiniteDiffVHV(grad_func, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf)
+        return alg.fd_vhv_provider
     end
-    return (grad_func, hvp_func)
+    return alg.grad_hvp_provider
 end
 
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
@@ -1594,8 +1612,7 @@ function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<
     state_ = alg.state_cache
     copyto!(state_, state)
 
-    grad_func = make_grad_U_func(state_, flow, model.grad, cache)
-    grad_and_hvp = _make_grad_provider(grad_func, model, flow, alg)
+    grad_and_hvp = _make_grad_provider(alg.grad_provider, model, flow, alg)
 
     # Function barrier: specialized on the concrete type of grad_and_hvp
     if alg.lazy_enabled[]

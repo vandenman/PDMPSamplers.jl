@@ -20,6 +20,24 @@ struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}}
 end
 VHVProvider(grad, vhv) = VHVProvider(grad, vhv, nothing)
 
+struct GradientProvider{V,F,G,C} <: Function
+    θ::V
+    flow::F
+    gradient_strategy::G
+    cache::C
+end
+(p::GradientProvider)(x::AbstractVector) =
+    compute_gradient!(x, p.θ, p.gradient_strategy, p.flow, p.cache)
+
+struct GradHVPProvider{G,H}
+    grad::G
+    hvp::H
+end
+_provider_grad((grad, hvp)::Tuple) = grad
+_provider_hvp((grad, hvp)::Tuple) = hvp
+_provider_grad(provider::GradHVPProvider) = provider.grad
+_provider_hvp(provider::GradHVPProvider) = provider.hvp
+
 struct FiniteDiffVHV{G}
     grad::G
     buf::Vector{Float64}

@@ -410,31 +410,28 @@ function _boomerang_rate_and_derivative(
 )
     x = state.ξ.x
     θ = state.ξ.θ
-    y = x .- flow.μ
     Hθ = hvp(x, θ)
-    Γθ = similar(θ)
-    _reference_mul!(Γθ, flow, θ)
-    Hcorrθ = Hθ .- Γθ
-    return dot(corrected_gradient, θ), dot(θ, Hcorrθ) - dot(corrected_gradient, y)
+    return dot(corrected_gradient, θ), ∂λ∂t(state, corrected_gradient, Hθ, flow)
 end
 
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    (grad, hvp)::Tuple{G,H},
-) where {G,H}
+    provider::Union{Tuple,GradHVPProvider},
+)
+    grad = _provider_grad(provider)
     return _boomerang_rate_and_derivative(
-        state, flow, grad, hvp, grad(state.ξ.x))
+        state, flow, grad, _provider_hvp(provider), grad(state.ξ.x))
 end
 
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    (grad, hvp)::Tuple{G,H},
+    provider::Union{Tuple,GradHVPProvider},
     cached_gradient::AbstractVector,
-) where {G,H}
+)
     return _boomerang_rate_and_derivative(
-        state, flow, grad, hvp, cached_gradient)
+        state, flow, _provider_grad(provider), _provider_hvp(provider), cached_gradient)
 end
 
 function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)

@@ -62,9 +62,7 @@ function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integ
 end
 
 function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function (x)
-        return compute_gradient!(x, θ, gradient_strategy, flow, cache)
-    end
+    return GradientProvider(θ, flow, gradient_strategy, cache)
 end
 function make_grad_U_func(state::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
     return make_grad_U_func(state.ξ.θ, flow, gradient_strategy, cache)
@@ -202,7 +200,8 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
-    used_batched_rate_derivatives = _supports_constant_grid_rate_derivatives(flow, grad_and_hess_or_grad_and_hvp) && n_time_cells > 0
+    used_batched_rate_derivatives = _supports_constant_grid_rate_derivatives(flow, grad_and_hess_or_grad_and_hvp) &&
+        !_uses_builtin_grid_provider(grad_and_hess_or_grad_and_hvp) && n_time_cells > 0
 
     loaded_batched_points = start_cell == 1 ? 0 : start_cell
     λ_refresh = add_rate ? refresh_rate(flow) : 0.0
@@ -415,10 +414,12 @@ max_grid_horizon(pd::PreconditionedDynamics) = max_grid_horizon(pd.dynamics)
 get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider, add_rate::Bool, ::AbstractVector) =
     get_rate_and_deriv(state, flow, provider, add_rate)
 
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H}, add_rate::Bool=true) where {G,H}
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::Union{Tuple,GradHVPProvider}, add_rate::Bool=true)
 
     xt, vt = state.ξ.x, state.ξ.θ  # state already moved to time t
 
+    grad = _provider_grad(provider)
+    hvp = _provider_hvp(provider)
     ∇U_xt = grad(xt)
     Hxt_vt = hvp(xt, vt)  # Hessian-vector product
 
@@ -434,9 +435,10 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
 
 end
 
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H},
-    add_rate::Bool, cached_gradient::AbstractVector) where {G,H}
+function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::Union{Tuple,GradHVPProvider},
+    add_rate::Bool, cached_gradient::AbstractVector)
     xt, vt = state.ξ.x, state.ξ.θ
+    hvp = _provider_hvp(provider)
     Hxt_vt = hvp(xt, vt)
     f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, cached_gradient, Hxt_vt, flow)
@@ -706,4 +708,3 @@ function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound
 end
 
 propose_event_time(pcb::PiecewiseConstantBound, u::Real, refresh_rate::Real=0.0) = propose_event_time(Random.default_rng(), pcb, u, refresh_rate)
-

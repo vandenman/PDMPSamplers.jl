@@ -191,12 +191,12 @@ const DensePreconditionedBPS = PreconditionedDynamics{DensePreconditioner, <:Bou
 function rate_derivatives_for_grid!(
     values::AbstractMatrix,
     derivatives::AbstractMatrix,
-    (grad, hvp)::Tuple{G,H},
+    provider::Union{Tuple,GradHVPProvider},
     state::AbstractPDMPState,
     flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
     t_grid::AbstractVector,
     n_points::Integer,
-) where {G,H}
+)
     x0 = state.ξ.x
     θ = state.ξ.θ
     n_channels = length(θ)
@@ -204,6 +204,8 @@ function rate_derivatives_for_grid!(
         throw(ArgumentError("values matrix is too small"))
     size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
         throw(ArgumentError("derivatives matrix is too small"))
+    grad = _provider_grad(provider)
+    hvp = _provider_hvp(provider)
     for k in 1:n_points
         x = @view derivatives[:, k]
         @inbounds for j in 1:n_channels
@@ -224,12 +226,12 @@ end
 function rate_derivatives_for_grid!(
     values::AbstractMatrix,
     derivatives::AbstractMatrix,
-    (grad, hvp)::Tuple{G,H},
+    provider::Union{Tuple,GradHVPProvider},
     state::AbstractPDMPState,
     flow::DensePreconditionedZigZag,
     t_grid::AbstractVector,
     n_points::Integer,
-) where {G,H}
+)
     x0 = state.ξ.x
     θ = state.ξ.θ
     L = flow.metric.L
@@ -239,6 +241,8 @@ function rate_derivatives_for_grid!(
         throw(ArgumentError("values matrix is too small"))
     size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
         throw(ArgumentError("derivatives matrix is too small"))
+    grad = _provider_grad(provider)
+    hvp = _provider_hvp(provider)
     for k in 1:n_points
         x = @view derivatives[:, k]
         @inbounds for j in 1:n_channels

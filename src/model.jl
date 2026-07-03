@@ -173,7 +173,10 @@ struct InplaceHVP{F, O<:AbstractVector} <: Function
     f::F
     out::O
 end
-(h::InplaceHVP)(x::AbstractVector, v::AbstractVector) = h.f(h.out, x, v)
+function (h::InplaceHVP)(x::AbstractVector, v::AbstractVector)
+    h.f(h.out, x, v)
+    return h.out
+end
 _copy_callable(h::InplaceHVP) = InplaceHVP(_copy_callable(h.f), copy(h.out))
 
 struct WithStatsHVP{F,S} <: Function
