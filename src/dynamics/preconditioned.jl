@@ -126,6 +126,15 @@ function rate_and_derivative(
     return rate_and_derivative(state, flow.dynamics, provider, args...)
 end
 
+function rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+    provider,
+    cached_gradient::AbstractVector,
+)
+    return rate_and_derivative(state, flow.dynamics, provider, cached_gradient)
+end
+
 # 3. Reflection Logic (Mirroring is invariant)
 reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, ξ, ∇ϕ, pd.dynamics, cache)
 reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, state, ∇ϕ, pd.dynamics, cache)
