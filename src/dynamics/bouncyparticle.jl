@@ -73,7 +73,7 @@ end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
     (grad, hvp)::Tuple{G,H},
@@ -85,7 +85,7 @@ function signed_rate_and_derivative(
     return dot(∇U, θ), extract_vhv(θ, Hθ)
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
     (grad, hvp)::Tuple{G,H},
@@ -96,7 +96,7 @@ function signed_rate_and_derivative(
     return dot(cached_gradient, θ), extract_vhv(θ, Hθ)
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     flow::BouncyParticle,
     provider::VHVProvider,
@@ -107,7 +107,7 @@ function signed_rate_and_derivative(
     return dot(∇U, θ), _compute_vhv_scalar(provider, state, ∇U, flow)
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     flow::BouncyParticle,
     provider::VHVProvider,
@@ -119,7 +119,7 @@ function signed_rate_and_derivative(
     )
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
     provider::WithStatsJoint,
@@ -127,7 +127,7 @@ function signed_rate_and_derivative(
     return provider(state.ξ.x, state.ξ.θ)
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
     grad_and_nothing::Tuple{G,Nothing},
@@ -136,7 +136,7 @@ function signed_rate_and_derivative(
     return dot(∇U, state.ξ.θ), 0.0
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
     ::Tuple{G,Nothing},
@@ -145,7 +145,7 @@ function signed_rate_and_derivative(
     return dot(cached_gradient, state.ξ.θ), 0.0
 end
 
-function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, fd::FiniteDiffVHV)
+function rate_and_derivative(state::AbstractPDMPState, flow::BouncyParticle, fd::FiniteDiffVHV)
     x = state.ξ.x
     θ = state.ξ.θ
     ∇U = fd.grad(x)
@@ -154,7 +154,7 @@ function signed_rate_and_derivative(state::AbstractPDMPState, flow::BouncyPartic
     return dot(fd.grad_buf, θ), vhv
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     flow::BouncyParticle,
     fd::FiniteDiffVHV,

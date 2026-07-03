@@ -401,7 +401,7 @@ function _reference_mul!(
     return out
 end
 
-function _boomerang_signed_rate_and_derivative(
+function _boomerang_rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
     grad,
@@ -418,22 +418,22 @@ function _boomerang_signed_rate_and_derivative(
     return dot(corrected_gradient, θ), dot(θ, Hcorrθ) - dot(corrected_gradient, y)
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
     (grad, hvp)::Tuple{G,H},
 ) where {G,H}
-    return _boomerang_signed_rate_and_derivative(
+    return _boomerang_rate_and_derivative(
         state, flow, grad, hvp, grad(state.ξ.x))
 end
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
     (grad, hvp)::Tuple{G,H},
     cached_gradient::AbstractVector,
 ) where {G,H}
-    return _boomerang_signed_rate_and_derivative(
+    return _boomerang_rate_and_derivative(
         state, flow, grad, hvp, cached_gradient)
 end
 

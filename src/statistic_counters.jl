@@ -523,56 +523,32 @@ end
 end
 
 @counter_struct mutable struct CertifiedAutoCounter <: AbstractStatisticCounter
-    certified_auto_flat_cells::Int
-    certified_auto_affine_cells::Int
-    certified_auto_area_saved::Float64
-    certified_auto_affine_fraction::Float64
-    certified_auto_used_affine_grids::Int
-    certified_auto_used_flat_grids::Int
-    certified_auto_forced_probe_grids::Int
-    certified_auto_flat_preferred_grids::Int
-    certified_auto_affine_preferred_grids::Int
-    certified_auto_mode_affine_sticky::Int
-    certified_auto_low_saving_streak_max::Int
-    certified_auto_switched_to_flat::Int
-    certified_auto_switched_to_affine::Int
-    certified_auto_flat_streak_grids::Int
-    certified_auto_affine_streak_grids::Int
+    auto_flat_cells::Int
+    auto_affine_cells::Int
+    auto_area_saved::Float64
+    auto_affine_fraction::Float64
+    auto_used_affine_grids::Int
+    auto_used_flat_grids::Int
 end
 
 @counter_ops CertifiedAutoCounter begin
     inc(
-        certified_auto_flat_cells,
-        certified_auto_affine_cells,
-        certified_auto_used_affine_grids,
-        certified_auto_used_flat_grids,
-        certified_auto_forced_probe_grids,
-        certified_auto_flat_preferred_grids,
-        certified_auto_affine_preferred_grids,
-        certified_auto_mode_affine_sticky,
-        certified_auto_switched_to_flat,
-        certified_auto_switched_to_affine,
+        auto_flat_cells,
+        auto_affine_cells,
+        auto_used_affine_grids,
+        auto_used_flat_grids,
     )
 
-    incval(certified_auto_area_saved)
+    incval(auto_area_saved)
 
-    set(
-        certified_auto_affine_fraction,
-        certified_auto_low_saving_streak_max,
-        certified_auto_flat_streak_grids,
-        certified_auto_affine_streak_grids,
-    )
+    set(auto_affine_fraction)
 
     get_sum(
-        certified_auto_flat_cells,
-        certified_auto_affine_cells,
-        certified_auto_mode_affine_sticky,
-        certified_auto_low_saving_streak_max,
-        certified_auto_flat_streak_grids,
-        certified_auto_affine_streak_grids,
+        auto_flat_cells,
+        auto_affine_cells,
     )
 
-    get_float(certified_auto_area_saved)
+    get_float(auto_area_saved)
 end
 
 mutable struct ComponentwiseAffineCounter <: AbstractStatisticCounter

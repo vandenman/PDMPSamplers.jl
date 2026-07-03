@@ -117,13 +117,13 @@ move_forward_time!(state::AbstractPDMPState, τ, pd::PreconditionedDynamics) = m
 # 2. Event Rates (Dot products are invariant)
 λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics) = λ(ξ, ∇ϕ, pd.dynamics)
 
-function signed_rate_and_derivative(
+function rate_and_derivative(
     state::AbstractPDMPState,
     flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
     provider,
     args...,
 )
-    return signed_rate_and_derivative(state, flow.dynamics, provider, args...)
+    return rate_and_derivative(state, flow.dynamics, provider, args...)
 end
 
 # 3. Reflection Logic (Mirroring is invariant)
@@ -188,7 +188,7 @@ end
 const DensePreconditionedZigZag = PreconditionedDynamics{DensePreconditioner, <:ZigZag}
 const DensePreconditionedBPS = PreconditionedDynamics{DensePreconditioner, <:BouncyParticle}
 
-function rate_values_and_derivatives_for_grid!(
+function rate_derivatives_for_grid!(
     values::AbstractMatrix,
     derivatives::AbstractMatrix,
     (grad, hvp)::Tuple{G,H},
@@ -221,7 +221,7 @@ function rate_values_and_derivatives_for_grid!(
     return values, derivatives
 end
 
-function rate_values_and_derivatives_for_grid!(
+function rate_derivatives_for_grid!(
     values::AbstractMatrix,
     derivatives::AbstractMatrix,
     (grad, hvp)::Tuple{G,H},

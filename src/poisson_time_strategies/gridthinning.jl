@@ -1,859 +1,19 @@
+_auto_policy(bound::Symbol) = bound === :auto
 
-"""
-A structure to hold the piecewise constant upper bound.
-Contains the grid points and the constant rate values on each segment.
-"""
-struct PiecewiseConstantBound{T<:Real}
-    t_grid::Vector{T} # Grid points [t_0, t_1, ..., t_N]
-    Λ_vals::Vector{T} # Bound values [Λ_0, Λ_1, ..., Λ_{N-1}] on each interval
-    y_vals::Vector{T} # y values [y_0, y_1, ..., y_{N-1}] on each interval
-    d_vals::Vector{T} # d values [d_0, d_1, ..., d_{N-1}] on each interval
-end
-function PiecewiseConstantBound(t_grid::AbstractVector, Λ_vals::AbstractVector)
-    return PiecewiseConstantBound(collect(t_grid), collect(Λ_vals), similar(Λ_vals, length(Λ_vals) + 1), similar(Λ_vals, length(Λ_vals) + 1))
-end
+_use_linear_bound(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider) =
+    (alg.bound === :linear && _can_use_signed_grid_bound(alg, state, flow, provider)) ||
+    (_auto_policy(alg.bound) && _can_use_signed_grid_bound(alg, state, flow, provider))
 
-"""
-    (bound::PiecewiseConstantBound)(t::Real)
-
-Functor to evaluate the piecewise constant bound Λ(t) at a given time t.
-"""
-function (bound::PiecewiseConstantBound)(t::Real)
-    # Check if t is outside the horizon
-    if t < bound.t_grid[1] || t >= bound.t_grid[end]
-        return 0.0 # Or handle as an error
-    end
-
-    # Find which segment t falls into. `searchsortedlast` is efficient for this.
-    i = searchsortedlast(bound.t_grid, t)
-    return bound.Λ_vals[i]
-end
-
-"""
-    construct_upper_bound(x₀, v₀, flow, U, t_max, N)
-
-Constructs a piecewise-constant upper bound for the event rate λ(t)
-using the grid-based method from Andral & Kamatani (2024).
-
-# Arguments
-- `x₀`, `v₀`: Initial position and velocity.
-- `flow`: The deterministic dynamics (e.g., BouncyParticle, Boomerang).
-- `U`: The potential energy function `U(x)`.
-- `t_max`: The time horizon for the bound.
-- `N`: The number of grid segments.
-
-# Returns
-- A `PiecewiseConstantBound` object.
-"""
-function construct_upper_bound(ξ::SkeletonPoint, flow, ∇U!::Function, t_max::Real, N::Int)
-
-    pcb = PiecewiseConstantBound(Vector{eltype(ξ.x)}(undef, N + 1), Vector{eltype(ξ.x)}(undef, N))
-    recompute_time_grid!(pcb, t_max, N)
-    construct_upper_bound!(pcb, ξ, flow, ∇U!)
-    return pcb
-end
-
-function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integer)
-    resize!(pcb.t_grid, N + 1)
-    resize!(pcb.Λ_vals, N)
-    resize!(pcb.y_vals, N + 1)
-    resize!(pcb.d_vals, N + 1)
-    pcb.t_grid .= range(0.0, t_max, N + 1)
-end
-
-function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function (x)
-        return compute_gradient!(x, θ, gradient_strategy, flow, cache)
-    end
-end
-function make_grad_U_func(state::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return make_grad_U_func(state.ξ.θ, flow, gradient_strategy, cache)
-end
-
-function make_hvp_func(flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function (x, θ)
-        dot(compute_gradient!(x, θ, gradient_strategy, flow, cache), θ)
-        # dot(compute_gradient_uncorrected!(x, θ, gradient_strategy, flow, cache), θ)
-    end
-end
-function make_hvp_func(::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return make_hvp_func(flow, gradient_strategy, cache)
-end
-
-abstract type GridBoundaryProbe end
-struct NoGridBoundaryProbe <: GridBoundaryProbe end
-struct GridBoundaryProbeHandler{S,F,M,A} <: GridBoundaryProbe
-    original_state::S
-    flow::F
-    model::M
-end
-GridBoundaryProbeHandler(original_state::S, flow::F, model::M, ::Type{A}) where {S,F,M,A} =
-    GridBoundaryProbeHandler{S,F,M,A}(original_state, flow, model)
-
-_is_bridgestan_probe_error(err) = err isa ErrorException && startswith(err.msg, "BridgeStan gradient failed")
-
-function _get_rate_and_deriv_or_throw(
-    ::NoGridBoundaryProbe,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    grad_and_hess_or_grad_and_hvp,
-    add_rate::Bool,
-    args...;
-    t_valid::Float64,
-    t_invalid::Float64
-)
-    return get_rate_and_deriv(state, flow, grad_and_hess_or_grad_and_hvp, add_rate, args...)
-end
-
-function _get_rate_and_deriv_or_throw(
-    probe_failure_handler::GridBoundaryProbeHandler,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    grad_and_hess_or_grad_and_hvp,
-    add_rate::Bool,
-    args...;
-    t_valid::Float64,
-    t_invalid::Float64
-)
-    try
-        return get_rate_and_deriv(state, flow, grad_and_hess_or_grad_and_hvp, add_rate, args...)
-    catch err
-        err isa _ProbeFailureException && rethrow()
-        if err isa ErrorException && err.msg == "bad hvp"
-            throw(MethodError(get_rate_and_deriv, (state, flow, grad_and_hess_or_grad_and_hvp, add_rate, args...)))
-        end
-        if t_valid == t_invalid
-            # If the current state itself is already invalid, keep routing the
-            # failure through support-boundary recovery with a tiny forward
-            # bracket so truncated-refresh can fall back to the last valid
-            # trace event instead of leaking the raw model error.
-            t_invalid = max(t_valid + eps(Float64), eps(Float64))
-            try
-                _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
-            catch boundary_err
-                if boundary_err isa MethodError && boundary_err.f === _throw_grid_boundary_error
-                    if _is_bridgestan_probe_error(err)
-                        x0 = copy(probe_failure_handler.original_state.ξ.x)
-                        v = copy(probe_failure_handler.original_state.ξ.θ)
-                        ctx = BoundaryContext(
-                            x0, v, Float64(probe_failure_handler.original_state.t[]),
-                            max(t_valid, 0.0), max(t_invalid, eps(Float64)),
-                            err, typeof(flow), typeof(probe_failure_handler).parameters[4],
-                        )
-                        throw(_ProbeFailureException(ctx))
-                    end
-                    throw(err)
-                end
-                rethrow()
-            end
-        end
-        _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
-    end
-end
-
-function _compute_grid_gradient_or_throw!(
-    state::AbstractPDMPState,
-    original_state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    model::PDMPModel,
-    cache,
-    t_valid::Float64,
-    t_invalid::Float64,
-    ::NoGridBoundaryProbe,
-)
-    return compute_gradient!(state, model.grad, flow, cache)
-end
-
-function _compute_grid_gradient_or_throw!(
-    state::AbstractPDMPState,
-    original_state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    model::PDMPModel,
-    cache,
-    t_valid::Float64,
-    t_invalid::Float64,
-    probe_failure_handler::GridBoundaryProbeHandler,
-)
-    try
-        return compute_gradient!(state, model.grad, flow, cache)
-    catch err
-        _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
-    end
-end
-
-function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::FL,
-    grad_and_hess_or_grad_and_hvp, add_rate::Bool=true;
-    cached_y0::Float64=NaN, cached_d0::Float64=NaN,
-    early_stop_threshold::Float64=Inf, stats::Union{AbstractStatisticCounter,Nothing}=nothing,
-    state_cache::Union{AbstractPDMPState,Nothing}=nothing,
-    max_time::Float64=Inf,
-    probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
-    start_cell::Integer=1,
-    initial_integral::Float64=0.0) where {FL<:ContinuousDynamics}
-
-    t_grid = pcb.t_grid
-    Λ_vals = pcb.Λ_vals
-    N = length(Λ_vals)
-    y_vals = pcb.y_vals
-    d_vals = pcb.d_vals
-
-    state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
-    iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
-    start_cell = clamp(Int(start_cell), 1, N + 1)
-    start_cell > n_time_cells && return start_cell - 1
-    used_batched_rate_derivatives = _supports_constant_grid_rate_derivatives(flow, grad_and_hess_or_grad_and_hvp) && n_time_cells > 0
-
-    loaded_batched_points = start_cell == 1 ? 0 : start_cell
-    λ_refresh = add_rate ? refresh_rate(flow) : 0.0
-    if start_cell > 1
-        move_forward_time!(state_t, t_grid[start_cell], flow)
-    elseif used_batched_rate_derivatives
-        loaded_batched_points = _load_constant_rate_derivatives!(
-            pcb, grad_and_hess_or_grad_and_hvp, state, flow, 1, n_time_cells + 1,
-            loaded_batched_points, λ_refresh, stats)
-    elseif isnan(cached_y0)
-        if stats !== nothing
-            _inc_counter_grid_endpoint_evaluations(stats)
-            _inc_counter_grid_endpoint_gradient_calls(stats)
-            _inc_counter_grid_endpoint_hessian_calls(stats)
-        end
-        y_vals[1], d_vals[1] = _get_rate_and_deriv_or_throw(
-            probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
-            t_valid=0.0, t_invalid=0.0)
-    else
-        !isnothing(stats) && (_inc_counter_grid_cached_endpoint_reuses(stats))
-        y_vals[1] = cached_y0
-        d_vals[1] = cached_d0
-    end
-
-    # Early termination: stop evaluating grid points once cumulative integral is large enough
-    cumulative_integral = initial_integral
-    N_evaluated = N  # how many cells we actually computed
-
-    for i in (start_cell + 1):(N + 1)
-        # Horizon cap: skip evaluation beyond effective time horizon (Phase 1A)
-        if t_grid[i - 1] >= max_time
-            for j in (i-1):N
-                Λ_vals[j] = 0.0
-            end
-            N_evaluated = i - 2
-            if !isnothing(stats)
-                _inc_counter_grid_points_skipped(stats, N - N_evaluated)
-            end
-            break
-        end
-
-        Δt = t_grid[i] - t_grid[i-1]
-        if used_batched_rate_derivatives
-            loaded_batched_points = _load_constant_rate_derivatives!(
-                pcb, grad_and_hess_or_grad_and_hvp, state, flow, i, n_time_cells + 1,
-                loaded_batched_points, λ_refresh, stats)
-        else
-            move_forward_time!(state_t, Δt, flow)
-            if stats !== nothing
-                _inc_counter_grid_endpoint_evaluations(stats)
-                _inc_counter_grid_endpoint_gradient_calls(stats)
-                _inc_counter_grid_endpoint_hessian_calls(stats)
-            end
-            y_vals[i], d_vals[i] = _get_rate_and_deriv_or_throw(
-                probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
-                t_valid=t_grid[i-1], t_invalid=t_grid[i])
-        end
-
-        # Compute bound for interval [i-1] immediately so we can track cumulative integral
-        _compute_cell_bound!(Λ_vals, t_grid, y_vals, d_vals, i - 1)
-        cumulative_integral += pos(Λ_vals[i-1]) * Δt
-
-        if cumulative_integral >= early_stop_threshold && i <= N
-            # Enough integrated rate; zero out remaining cells
-            N_evaluated = i - 1
-            for j in i:N
-                Λ_vals[j] = 0.0
-            end
-            if !isnothing(stats)
-                _inc_counter_grid_early_stops(stats)
-                _inc_counter_grid_points_skipped(stats, N - N_evaluated)
-            end
-            break
-        end
-    end
-
-    validate_state(state_t, flow, "after grid construction in Grid algorithm")
-
-    if !isnothing(stats)
-        _inc_counter_grid_builds(stats)
-        _inc_counter_grid_points_evaluated(stats, start_cell == 1 ?
-            (N_evaluated > 1 ? N_evaluated - 1 : N_evaluated) : N_evaluated)
-    end
-    return N_evaluated
-end
-
-_supports_constant_grid_rate_derivatives(::ContinuousDynamics, provider) = false
-_supports_constant_grid_rate_derivatives(flow::BouncyParticle, provider) =
-    _supports_rate_derivatives(provider, flow)
-_supports_constant_grid_rate_derivatives(pd::PreconditionedDynamics, provider) =
-    _supports_constant_grid_rate_derivatives(pd.dynamics, provider)
-
-function _constant_rate_derivative_from_signed(g::Real, dg::Real, λ_refresh::Real)
-    return pos(g) + λ_refresh, ispositive(g) ? dg : zero(dg)
-end
-
-_grid_rate_derivative_chunk_points() = 16
-
-function _load_rate_derivative_chunk!(
-    pcb::PiecewiseConstantBound,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    target_point::Integer,
-    max_points::Integer,
-    loaded_points::Integer,
-    stats::Union{AbstractStatisticCounter,Nothing},
-    transform,
-)
-    target_point <= loaded_points && return loaded_points
-    start_point = loaded_points + 1
-    stop_point = min(max_points, max(target_point, loaded_points + _grid_rate_derivative_chunk_points()))
-    n_points = stop_point - start_point + 1
-    if stats !== nothing
-        _inc_counter_grid_endpoint_derivative_calls(stats)
-        _inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points)
-    end
-    values = reshape(@view(pcb.y_vals[start_point:stop_point]), 1, n_points)
-    derivatives = reshape(@view(pcb.d_vals[start_point:stop_point]), 1, n_points)
-    _fill_rate_values_and_derivatives!(
-        values, derivatives, provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points)
-    for (offset, point) in enumerate(start_point:stop_point)
-        pcb.y_vals[point], pcb.d_vals[point] = transform(values[1, offset], derivatives[1, offset])
-    end
-    return stop_point
-end
-
-function _load_constant_rate_derivatives!(
-    pcb::PiecewiseConstantBound,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    target_point::Integer,
-    max_points::Integer,
-    loaded_points::Integer,
-    λ_refresh::Real,
-    stats::Union{AbstractStatisticCounter,Nothing},
-)
-    transform = (g, dg) -> _constant_rate_derivative_from_signed(g, dg, λ_refresh)
-    return _load_rate_derivative_chunk!(
-        pcb, provider, state, flow, target_point, max_points, loaded_points, stats, transform)
-end
-
-function _load_rate_derivatives!(
-    pcb::PiecewiseConstantBound,
-    provider,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    target_point::Integer,
-    max_points::Integer,
-    loaded_points::Integer,
-    stats::Union{AbstractStatisticCounter,Nothing},
-)
-    return _load_rate_derivative_chunk!(
-        pcb, provider, state, flow, target_point, max_points, loaded_points, stats,
-        (g, dg) -> (g, dg))
-end
-
-function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d_vals::Vector, i::Int)
-    Λ_vals[i] = _tangent_intersection_bound(t_grid[i], t_grid[i+1], y_vals[i], y_vals[i+1], d_vals[i], d_vals[i+1])
-end
-
-function _tangent_intersection_bound(tᵢ::Float64, tᵢ₊₁::Float64, yᵢ::Float64, yᵢ₊₁::Float64, dᵢ::Float64, dᵢ₊₁::Float64)
-    if abs(dᵢ - dᵢ₊₁) < 1e-9
-        mᵢ = yᵢ
-    else
-        x_intersect = (yᵢ₊₁ - yᵢ + dᵢ * tᵢ - dᵢ₊₁ * tᵢ₊₁) / (dᵢ - dᵢ₊₁)
-        x_clipped = clamp(x_intersect, tᵢ, tᵢ₊₁)
-        mᵢ = dᵢ * x_clipped + yᵢ - dᵢ * tᵢ
-    end
-    return max(yᵢ, yᵢ₊₁, mᵢ)
-end
-
-function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool=true)
-    construct_upper_bound!(pcb, PDMPState(0.0, ξ), flow, ∇U!, use_hvp)
-end
-function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, flow::ContinuousDynamics, ∇U!::Function,
-    use_hvp::Bool=true)
-
-    use_hvp || error("Only HVP mode is supported")
-
-    g = similar(state.ξ.x)
-    out = similar(g)
-    ∇U = Base.Fix1(∇U!, out)
-    f = (x, v) -> dot(∇U(x), v)
-    prep = DI.prepare_gradient(f, DI.AutoMooncake(), g, DI.Constant(copy(g)))
-
-    # Avoid boxing prep by wrapping it in a struct or passing it explicitly
-    hvp = let prep = prep, g = g, f = f
-        (x, v) -> DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
-    end
-
-    return construct_upper_bound_grad_and_hess!(pcb, state, flow, (∇U, hvp))
-end
-
-# --- Grid parameter caps, dispatched on flow type ---
-
-_joint_compatible(::BouncyParticle) = true
-_joint_compatible(pd::PreconditionedDynamics) = _joint_compatible(pd.dynamics)
-_joint_compatible(::ContinuousDynamics) = false
-
-min_grid_cells(::ContinuousDynamics, N_min::Int, ::Int) = N_min
-min_grid_cells(::AnyBoomerang, N_min::Int, ::Int) = max(N_min, 5)
-min_grid_cells(pd::PreconditionedDynamics, N_min::Int, N::Int) = min_grid_cells(pd.dynamics, N_min, N)
-
-max_grid_horizon(::ContinuousDynamics) = 1e10
-max_grid_horizon(::AnyBoomerang) = 8π
-max_grid_horizon(pd::PreconditionedDynamics) = max_grid_horizon(pd.dynamics)
-
-# --- helper functions for λ(t) and λ'(t) ---
-# Generic fallback: ignore cached gradient for providers that don't support it
-get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider, add_rate::Bool, ::AbstractVector) =
-    get_rate_and_deriv(state, flow, provider, add_rate)
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H}, add_rate::Bool=true) where {G,H}
-
-    xt, vt = state.ξ.x, state.ξ.θ  # state already moved to time t
-
-    ∇U_xt = grad(xt)
-    Hxt_vt = hvp(xt, vt)  # Hessian-vector product
-
-    # base rate (before positive-part)
-    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-
-    f_prime_t = ∂λ∂t(state, ∇U_xt, Hxt_vt, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-
-    return rate, rate_deriv
-
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, (grad, hvp)::Tuple{G,H},
-    add_rate::Bool, cached_gradient::AbstractVector) where {G,H}
-    xt, vt = state.ξ.x, state.ξ.θ
-    Hxt_vt = hvp(xt, vt)
-    f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, cached_gradient, Hxt_vt, flow)
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ContinuousDynamics)
-    xt, vt = state.ξ.x, state.ξ.θ
-    return provider.vhv(xt, vt, vt)
-end
-
-function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ZigZag)
-    xt, vt = state.ξ.x, state.ξ.θ
-    w = provider.w_buf === nothing ? similar(vt) : provider.w_buf
-    for i in eachindex(vt)
-        w[i] = ispositive(vt[i] * ∇U_xt[i]) ? vt[i] : zero(eltype(vt))
-    end
-    return provider.vhv(xt, vt, w)
-end
-
-function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, pd::PreconditionedDynamics)
-    return _compute_vhv_scalar(provider, state, ∇U_xt, pd.dynamics)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::VHVProvider, add_rate::Bool=true)
-    xt, vt = state.ξ.x, state.ξ.θ
-
-    ∇U_xt = provider.grad(xt)
-
-    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-
-    curvature_scalar = _compute_vhv_scalar(provider, state, ∇U_xt, flow)
-    f_prime_t = ∂λ∂t(state, ∇U_xt, curvature_scalar, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::VHVProvider,
-    add_rate::Bool, cached_gradient::AbstractVector)
-    f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    curvature_scalar = _compute_vhv_scalar(provider, state, cached_gradient, flow)
-    f_prime_t = ∂λ∂t(state, cached_gradient, curvature_scalar, flow)
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::WithStatsJoint, add_rate::Bool=true)
-    xt, vt = state.ξ.x, state.ξ.θ
-    dphi, d2phi = provider(xt, vt)
-
-    f_t = pos(dphi) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = d2phi
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    provider::WithStatsJoint,
-    add_rate::Bool,
-    ::AbstractVector,
-)
-    return get_rate_and_deriv(state, flow, provider, add_rate)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, grad_and_nothing::Tuple{G,Nothing}, add_rate::Bool=true) where {G}
-    grad = grad_and_nothing[1]
-    xt = state.ξ.x
-    ∇U_xt = grad(xt)
-    f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    rate = pos(f_t)
-    return rate, zero(rate)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, grad_and_nothing::Tuple{G,Nothing},
-    add_rate::Bool, cached_gradient::AbstractVector) where {G}
-    f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    rate = pos(f_t)
-    return rate, zero(rate)
-end
-
-struct FiniteDiffHVP{G}
-    grad::G
-    buf::Vector{Float64}
-    grad_buf::Vector{Float64}
-    hvp_buf::Vector{Float64}
-end
-FiniteDiffHVP(grad, buf::Vector{Float64}) = FiniteDiffHVP(grad, buf, similar(buf), similar(buf))
-
-function _fd_step_size(xt::AbstractVector, vt::AbstractVector)
-    vnorm = norm(vt)
-    iszero(vnorm) && return vnorm
-    return oftype(vnorm, 1e-5) * max(one(vnorm), norm(xt) / vnorm)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP, add_rate::Bool=true)
-    xt, vt = state.ξ.x, state.ξ.θ
-    ∇U_xt = fd.grad(xt)
-    copyto!(fd.grad_buf, ∇U_xt)
-
-    h = _fd_step_size(xt, vt)
-    if iszero(h)
-        fill!(fd.hvp_buf, 0.0)
-    else
-        fd.buf .= xt .+ h .* vt
-        ∇U_shifted = fd.grad(fd.buf)
-        fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
-    end
-
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP,
-    add_rate::Bool, cached_gradient::AbstractVector)
-    copyto!(fd.grad_buf, cached_gradient)
-
-    xt, vt = state.ξ.x, state.ξ.θ
-    h = _fd_step_size(xt, vt)
-    if iszero(h)
-        fill!(fd.hvp_buf, 0.0)
-    else
-        fd.buf .= xt .+ h .* vt
-        ∇U_shifted = fd.grad(fd.buf)
-        fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
-    end
-
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
-    h = _fd_step_size(xt, vt)
-    iszero(h) && return h
-    fd.buf .= xt .+ h .* vt
-    ∇U_shifted = fd.grad(fd.buf)
-    return (dot(wt, ∇U_shifted) - dot(wt, fd.grad_buf)) / h
-end
-
-_restore_reference_vhv(vhv::Real, ::AbstractVector, ::ContinuousDynamics) = vhv
-function _restore_reference_vhv(vhv::Real, vt::AbstractVector, flow::AnyBoomerang)
-    # `fd.grad` calls compute_gradient!, so for Boomerang it differentiates
-    # ∇U - Γ(x-μ). The Boomerang ∂λ∂t method expects curvature of the raw
-    # target gradient ∇U and subtracts the reference contribution itself.
-    return vhv + dot(vt, flow.Γ, vt)
-end
-function _restore_reference_vhv(vhv::Real, vt::AbstractVector, flow::LowRankMutableBoomerang)
-    return vhv + lowrank_quadform(flow.Γ, vt)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffVHV, add_rate::Bool=true)
-    xt, vt = state.ξ.x, state.ξ.θ
-    ∇U_xt = fd.grad(xt)
-    copyto!(fd.grad_buf, ∇U_xt)
-
-    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffVHV,
-    add_rate::Bool, cached_gradient::AbstractVector)
-    copyto!(fd.grad_buf, cached_gradient)
-
-    xt, vt = state.ξ.x, state.ξ.θ
-    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV, add_rate::Bool=true)
-    xt, vt = state.ξ.x, state.ξ.θ
-    ∇U_xt = fd.grad(xt)
-    copyto!(fd.grad_buf, ∇U_xt)
-
-    w = fd.w_buf
-    for i in eachindex(vt)
-        w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
-    end
-    whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
-
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = whv_scalar
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV,
-    add_rate::Bool, cached_gradient::AbstractVector)
-    copyto!(fd.grad_buf, cached_gradient)
-
-    vt = state.ξ.θ
-    w = fd.w_buf
-    for i in eachindex(vt)
-        w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
-    end
-    xt = state.ξ.x
-    whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
-
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = whv_scalar
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
-end
-
-function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound, u::Real=rand(rng, Exponential()), refresh_rate::Real=0.0)
-
-    area_before = zero(eltype(pcb.Λ_vals))
-    segment_idx = 0
-    integral = zero(eltype(pcb.Λ_vals))
-    for i in eachindex(pcb.Λ_vals)
-        integral += pos(pcb.Λ_vals[i] + refresh_rate) * (pcb.t_grid[i+1] - pcb.t_grid[i])
-        if integral >= u
-            segment_idx = i
-            break
-        end
-        area_before = integral
-    end
-
-    if iszero(segment_idx)
-        return (Inf, 0.0)
-    end
-
-    # Get the properties of this segment
-    t_start = pcb.t_grid[segment_idx]
-    Λ_val = pos(pcb.Λ_vals[segment_idx] + refresh_rate)
-    # This is how much of the random draw `u` we need to "spend" inside this segment
-    u_remaining = u - area_before
-
-    # Calculate the time into the segment: time = distance / speed
-    time_in_segment = u_remaining / Λ_val
-
-    τ_proposed = t_start + time_in_segment
-
-    return τ_proposed, Λ_val
-
-end
-
-propose_event_time(pcb::PiecewiseConstantBound, u::Real, refresh_rate::Real=0.0) = propose_event_time(Random.default_rng(), pcb, u, refresh_rate)
-
-_rate_shape(::ContinuousDynamics) = :unsupported
-_rate_shape(::BouncyParticle) = :scalar
-_rate_shape(::AnyBoomerang) = :scalar
-_rate_shape(::ZigZag) = :componentwise
-_rate_shape(::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) = :scalar
-_rate_shape(::PreconditionedDynamics{<:AbstractPreconditioner,<:ZigZag}) = :componentwise
-
-_rate_channel_count(state::AbstractPDMPState, flow::ContinuousDynamics) =
-    _rate_shape(flow) === :scalar ? 1 : length(state.ξ.θ)
-_rate_channel_count(state::AbstractPDMPState, flow::DensePreconditionedZigZag) =
-    length(flow.metric.v_canonical)
-
-_provider_has_directional_derivative(_) = true
-_provider_has_directional_derivative(::Tuple{G,Nothing}) where {G} = false
-
-_can_use_scalar_signed_grid(provider, ::BouncyParticle) = true
-
-_can_use_scalar_signed_grid(
-    provider,
-    ::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
-) = true
-
-_can_use_scalar_signed_grid(provider, ::AnyBoomerang) =
-    _provider_has_directional_derivative(provider)
-
-_can_use_scalar_signed_grid(provider, flow::ContinuousDynamics) =
-    _rate_shape(flow) === :scalar && _supports_rate_derivatives(provider, flow)
-
-_can_use_componentwise_signed_grid(provider, flow::ContinuousDynamics) =
-    _rate_shape(flow) === :componentwise &&
-    _provider_has_directional_derivative(provider) &&
-    _supports_rate_derivatives(provider, flow)
-
-function _can_use_signed_grid(state::AbstractPDMPState, flow::ContinuousDynamics, provider)
-    shape = _rate_shape(flow)
-    shape === :scalar && return _can_use_scalar_signed_grid(provider, flow)
-    shape === :componentwise && return _can_use_componentwise_signed_grid(provider, flow)
-    return false
-end
-
-_certified_auto_envelope(envelope::Symbol) =
-    envelope === :certified_auto || envelope === :certified_auto_affine_sticky
-_certified_auto_affine_sticky(envelope::Symbol) = envelope === :certified_auto_affine_sticky
-
-_certified_auto_currently_prefers_affine(alg) =
-    hasproperty(alg, :certified_auto_prefer_affine_current) && alg.certified_auto_prefer_affine_current[]
-
-_use_affine_envelope(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider) =
-    (alg.envelope === :hybrid_linear && _rate_shape(flow) === :scalar) ||
-    (alg.envelope === :inflated_linear && _can_use_signed_grid_bound(alg, state, flow, provider)) ||
-    (_certified_auto_envelope(alg.envelope) && _certified_auto_currently_prefers_affine(alg) &&
-        _can_use_signed_grid_bound(alg, state, flow, provider))
-
-_use_inflated_constant_envelope(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider) =
-    ((alg.envelope === :inflated_constant) ||
-        (_certified_auto_envelope(alg.envelope) && !_certified_auto_currently_prefers_affine(alg))) &&
+_use_flat_bound(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider) =
+    (alg.bound === :flat) &&
     _can_use_signed_grid_bound(alg, state, flow, provider)
 
 _use_signed_grid_bound(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider) =
-    alg.envelope in (:inflated_linear, :inflated_constant, :certified_auto, :certified_auto_affine_sticky) &&
+    alg.bound in (:linear, :flat, :auto) &&
     _can_use_signed_grid_bound(alg, state, flow, provider)
-
-function _validate_certification_mode(certification::Symbol)
-    certification === :required && return certification
-    certification === :opportunistic && return certification
-    throw(ArgumentError("certification must be :required or :opportunistic, got $(certification)"))
-end
 
 function _can_use_signed_grid_bound(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider)
     return _can_use_signed_grid(state, flow, provider)
-end
-
-function curvature_bounds_for_grid end
-function channel_curvature_bounds_for_grid end
-function rate_values_and_derivatives_for_grid! end
-
-_grid_provider(p) = p
-_grid_provider(p::WithStatsJoint) = p.f
-
-function _has_grid_method(f, provider, flow::ContinuousDynamics, extra_types::Type...)
-    return hasmethod(f, Tuple{
-        typeof(_grid_provider(provider)),
-        AbstractPDMPState,
-        typeof(flow),
-        AbstractVector,
-        extra_types...,
-    })
-end
-
-_has_curvature_grid_values(provider, flow::ContinuousDynamics) =
-    _has_grid_method(curvature_bounds_for_grid, provider, flow, Integer)
-
-_has_channel_curvature_grid_values(provider, flow::ContinuousDynamics) =
-    _has_grid_method(channel_curvature_bounds_for_grid, provider, flow, Integer, Integer)
-
-_supports_rate_derivatives(provider, flow::ContinuousDynamics) =
-    hasmethod(rate_values_and_derivatives_for_grid!, Tuple{
-        AbstractMatrix,
-        AbstractMatrix,
-        typeof(_grid_provider(provider)),
-        AbstractPDMPState,
-        typeof(flow),
-        AbstractVector,
-        Integer,
-    })
-
-_curvature_grid_values(provider, state, flow, t_grid, n_cells) =
-    curvature_bounds_for_grid(_grid_provider(provider), state, flow, t_grid, n_cells)
-
-_channel_curvature_grid_values(provider, state, flow, t_grid, n_channels, n_cells) =
-    channel_curvature_bounds_for_grid(
-        _grid_provider(provider), state, flow, t_grid, n_channels, n_cells)
-
-function _fill_rate_values_and_derivatives!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider,
-    state,
-    flow,
-    t_grid,
-    n_points,
-)
-    return rate_values_and_derivatives_for_grid!(
-        values, derivatives, _grid_provider(provider), state, flow, t_grid, n_points)
-end
-
-function rate_values_and_derivatives_for_grid(provider, state, flow, t_grid, n_points::Integer)
-    values = Matrix{Float64}(undef, _rate_channel_count(state, flow), n_points)
-    derivatives = similar(values)
-    _fill_rate_values_and_derivatives!(values, derivatives, provider, state, flow, t_grid, n_points)
-    return values, derivatives
-end
-
-function _rate_derivative_scratch!(
-    value_buf::Vector{Float64},
-    derivative_buf::Vector{Float64},
-    n_channels::Integer,
-    n_points::Integer,
-)
-    len = n_channels * n_points
-    length(value_buf) < len && resize!(value_buf, len)
-    length(derivative_buf) < len && resize!(derivative_buf, len)
-    values = reshape(@view(value_buf[1:len]), n_channels, n_points)
-    derivatives = reshape(@view(derivative_buf[1:len]), n_channels, n_points)
-    return values, derivatives
 end
 
 function _curvature_bound_value(value)
@@ -874,39 +34,14 @@ function _evaluate_curvature_bound(curvature_bound, state::AbstractPDMPState, fl
     return value
 end
 
-function _normalize_grid_curvature_bounds(values_raw,
-    stats::Union{AbstractStatisticCounter,Nothing}, n_cells::Integer, flow::ContinuousDynamics)
-    if values_raw isa Real || values_raw === nothing
-        value = _curvature_bound_value(values_raw)
-        value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_cells))
-        return (global_value=value, first_value=nothing, has_first=false, cell_values=nothing)
-    elseif values_raw isa AbstractVector
-        length(values_raw) >= n_cells || throw(ArgumentError(
-            "curvature_bounds_for_grid returned $(length(values_raw)) values for $(n_cells) cells"))
-        values = Vector{Union{Nothing,Float64}}(undef, n_cells)
-        for i in 1:n_cells
-            value = _curvature_bound_value(values_raw[i])
-            value === nothing && stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, 1))
-            values[i] = value
-        end
-        return (global_value=nothing, first_value=nothing, has_first=false, cell_values=values)
-    else
-        throw(ArgumentError("unsupported grid curvature bound return type $(typeof(values_raw))"))
-    end
-end
-
 function _prepare_grid_curvature_bound(curvature_bound, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_cells::Integer, stats::Union{AbstractStatisticCounter,Nothing}, certification::Symbol)
+    t_grid::AbstractVector, n_cells::Integer, stats::Union{AbstractStatisticCounter,Nothing})
     if curvature_bound === nothing
         stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_cells))
         return (global_value=nothing, first_value=nothing, has_first=true, cell_values=nothing)
     elseif curvature_bound isa Real
         return (global_value=Float64(curvature_bound), first_value=nothing,
             has_first=false, cell_values=nothing)
-    elseif _has_curvature_grid_values(curvature_bound, flow)
-        stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
-        values = _curvature_grid_values(curvature_bound, state, flow, t_grid, n_cells)
-        return _normalize_grid_curvature_bounds(values, stats, n_cells, flow)
     end
 
     value = _evaluate_curvature_bound(curvature_bound, state, flow, t_grid[1], t_grid[n_cells + 1], stats)
@@ -915,7 +50,7 @@ end
 
 function _prepared_or_cell_curvature_value(prepared, cell::Integer, curvature_bound,
     state::AbstractPDMPState, flow::ContinuousDynamics, a::Real, b::Real,
-    stats::Union{AbstractStatisticCounter,Nothing}, certification::Symbol)
+    stats::Union{AbstractStatisticCounter,Nothing})
     prepared.global_value !== nothing && return prepared.global_value
     curvature_bound === nothing && return nothing
     if prepared.cell_values !== nothing
@@ -935,57 +70,24 @@ function _channel_curvature_matrix(
     n_channels::Integer,
     n_cells::Integer,
     stats::Union{AbstractStatisticCounter,Nothing},
-    certification::Symbol,
 )
     if curvature_bound === nothing
         stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_channels * n_cells))
         return zeros(Float64, n_channels, n_cells)
     elseif curvature_bound isa Real
         return fill(Float64(curvature_bound), n_channels, n_cells)
-    elseif _has_channel_curvature_grid_values(curvature_bound, flow)
-        stats !== nothing && (_inc_counter_grid_certificate_calls(stats))
-        values = _channel_curvature_grid_values(
-            curvature_bound, state, flow, t_grid, n_channels, n_cells)
-        return _normalize_channel_curvature_bounds(values, stats, n_channels, n_cells, flow)
     end
     prepared = _prepare_grid_curvature_bound(
-        curvature_bound, state, flow, t_grid, n_cells, stats, certification)
+        curvature_bound, state, flow, t_grid, n_cells, stats)
     L = Matrix{Float64}(undef, n_channels, n_cells)
     for cell in 1:n_cells
         a = t_grid[cell]
         b = t_grid[cell + 1]
         value = _prepared_or_cell_curvature_value(
-            prepared, cell, curvature_bound, state, flow, a, b, stats, certification)
+            prepared, cell, curvature_bound, state, flow, a, b, stats)
         L[:, cell] .= value === nothing ? 0.0 : Float64(value)
     end
     return L
-end
-
-function _normalize_channel_curvature_bounds(
-    values_raw,
-    stats::Union{AbstractStatisticCounter,Nothing},
-    n_channels::Integer,
-    n_cells::Integer,
-    flow::ContinuousDynamics,
-)
-    if values_raw isa Real || values_raw === nothing
-        value = _curvature_bound_value(values_raw)
-        value === nothing && stats !== nothing &&
-            (_inc_counter_grid_certificate_fallbacks(stats, n_channels * n_cells))
-        return fill(value === nothing ? 0.0 : value, n_channels, n_cells)
-    elseif values_raw isa AbstractMatrix
-        size(values_raw, 1) >= n_channels && size(values_raw, 2) >= n_cells ||
-            throw(ArgumentError("channel curvature bound matrix is too small"))
-        values = Matrix{Float64}(undef, n_channels, n_cells)
-        for cell in 1:n_cells, channel in 1:n_channels
-            value = _curvature_bound_value(values_raw[channel, cell])
-            value === nothing && stats !== nothing &&
-                (_inc_counter_grid_certificate_fallbacks(stats, 1))
-            values[channel, cell] = value === nothing ? 0.0 : Float64(value)
-        end
-        return values
-    end
-    throw(ArgumentError("unsupported channel curvature bound type $(typeof(values_raw))"))
 end
 
 function _affine_cell_tolerances(a::Real, b::Real, y_a::Real, y_b::Real, d_a::Real, d_b::Real, M::Real)
@@ -1001,7 +103,7 @@ function _affine_cell_tolerances(a::Real, b::Real, y_a::Real, y_b::Real, d_a::Re
 end
 
 function _append_constant_affine_cell!(bound::PiecewiseAffineBound, stats::Union{AbstractStatisticCounter,Nothing},
-    a::Real, b::Real, M::Real; certified_auto::Bool=false)
+    a::Real, b::Real, M::Real; auto::Bool=false)
     M_pos = pos(M)
     append_affine_segment!(bound, a, b, M_pos, zero(M_pos))
     h = b - a
@@ -1011,10 +113,10 @@ function _append_constant_affine_cell!(bound::PiecewiseAffineBound, stats::Union
         _inc_counter_affine_area_constant_equiv(stats, area)
         _inc_counter_affine_area_hybrid(stats, area)
         _inc_counter_affine_segments_added(stats, 1)
-        if certified_auto
-            _inc_counter_certified_auto_flat_cells(stats)
-            total = _get_counter_certified_auto_flat_cells(stats) + _get_counter_certified_auto_affine_cells(stats)
-            _set_counter_certified_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_certified_auto_affine_cells(stats) / total)
+        if auto
+            _inc_counter_auto_flat_cells(stats)
+            total = _get_counter_auto_flat_cells(stats) + _get_counter_auto_affine_cells(stats)
+            _set_counter_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_auto_affine_cells(stats) / total)
         end
     end
     return false
@@ -1121,7 +223,7 @@ function _append_positive_part_line_piece!(
     end
 end
 
-function _append_inflated_affine_cell!(bound::PiecewiseAffineBound, stats::Union{AbstractStatisticCounter,Nothing},
+function _append_linear_cell!(bound::PiecewiseAffineBound, stats::Union{AbstractStatisticCounter,Nothing},
     a::Real, b::Real, y_a::Real, y_b::Real, d_a::Real, d_b::Real, M::Real, L)
 
     L === nothing && return _append_constant_affine_cell!(bound, stats, a, b, M)
@@ -1138,7 +240,7 @@ function _append_inflated_affine_cell!(bound::PiecewiseAffineBound, stats::Union
     # cached endpoint values are for the positive-part rate; when an endpoint is
     # clamped at zero we no longer have the signed tangent needed to certify a
     # linearized roof across possible zero crossings.  Keep this first-stage
-    # envelope conservative and fall back to the existing constant cell.
+    # bound conservative and fall back to the existing constant cell.
     if !(y_a > rate_tol && y_b > rate_tol)
         return _append_constant_affine_cell!(bound, stats, a, b, M)
     end
@@ -1200,17 +302,17 @@ function _append_inflated_affine_cell!(bound::PiecewiseAffineBound, stats::Union
     return true
 end
 
-function _append_signed_inflated_affine_cell!(bound::PiecewiseAffineBound, stats::Union{AbstractStatisticCounter,Nothing},
+function _append_rate_linear_cell!(bound::PiecewiseAffineBound, stats::Union{AbstractStatisticCounter,Nothing},
     a::Real, b::Real, g_a::Real, g_b::Real, dg_a::Real, dg_b::Real, M::Real, L;
-    affine_area_threshold::Real=1.0,
-    affine_min_area_gain::Real=0.0,
-    certified_auto::Bool=false)
+    linear_area_threshold::Real=1.0,
+    linear_min_area_gain::Real=0.0,
+    auto::Bool=false)
 
-    L === nothing && return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+    L === nothing && return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
     h = b - a
     if !(isfinite(a) && isfinite(b) && isfinite(g_a) && isfinite(g_b) &&
          isfinite(dg_a) && isfinite(dg_b) && isfinite(M) && isfinite(L) && h > 0)
-        return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+        return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
     end
 
     _, slope_tol, time_tol, area_tol =
@@ -1263,27 +365,27 @@ function _append_signed_inflated_affine_cell!(bound::PiecewiseAffineBound, stats
         end
     catch err
         bound.n_segments = start_segments
-        return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+        return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
     end
 
     if !(clipped_area >= -area_tol)
         bound.n_segments = start_segments
-        return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+        return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
     end
 
     flat_area = pos(M) * h
     area_gain = flat_area - max(clipped_area, 0.0)
-    min_area_gain = max(float(affine_min_area_gain), 0.0)
+    min_area_gain = max(float(linear_min_area_gain), 0.0)
     if area_gain <= min_area_gain
         bound.n_segments = start_segments
         stats !== nothing && (_inc_counter_affine_cells_skipped_by_min_gain(stats))
-        return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+        return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
     end
 
-    threshold = float(affine_area_threshold)
+    threshold = float(linear_area_threshold)
     if threshold < 1.0 && flat_area > area_tol && clipped_area / flat_area >= threshold
         bound.n_segments = start_segments
-        return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+        return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
     end
 
     if stats !== nothing
@@ -1292,17 +394,17 @@ function _append_signed_inflated_affine_cell!(bound::PiecewiseAffineBound, stats
         _inc_counter_affine_area_hybrid(stats, max(clipped_area, 0.0))
         _inc_counter_affine_area_saved(stats, max(area_gain, 0.0))
         _inc_counter_affine_segments_added(stats, bound.n_segments - start_segments)
-        if certified_auto
-            _inc_counter_certified_auto_affine_cells(stats)
-            _inc_counter_certified_auto_area_saved(stats, max(area_gain, 0.0))
-            total = _get_counter_certified_auto_flat_cells(stats) + _get_counter_certified_auto_affine_cells(stats)
-            _set_counter_certified_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_certified_auto_affine_cells(stats) / total)
+        if auto
+            _inc_counter_auto_affine_cells(stats)
+            _inc_counter_auto_area_saved(stats, max(area_gain, 0.0))
+            total = _get_counter_auto_flat_cells(stats) + _get_counter_auto_affine_cells(stats)
+            _set_counter_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_auto_affine_cells(stats) / total)
         end
     end
     return true
 end
 
-function _signed_inflated_flat_upper(a::Real, b::Real, g_a::Real, g_b::Real, dg_a::Real, dg_b::Real, L)
+function _rate_flat_upper(a::Real, b::Real, g_a::Real, g_b::Real, dg_a::Real, dg_b::Real, L)
     h = b - a
     if !(isfinite(a) && isfinite(b) && isfinite(g_a) && isfinite(g_b) &&
          isfinite(dg_a) && isfinite(dg_b) && isfinite(L) && h > 0)
@@ -1428,7 +530,7 @@ function _append_componentwise_flat_cell!(
     a::Real,
     b::Real,
     M::Real;
-    certified_auto::Bool=false,
+    auto::Bool=false,
     reason::Symbol=:other,
 )
     if stats !== nothing
@@ -1447,7 +549,7 @@ function _append_componentwise_flat_cell!(
             _inc_counter_componentwise_flat_fallback_other(stats)
         end
     end
-    return _append_constant_affine_cell!(bound, stats, a, b, M; certified_auto)
+    return _append_constant_affine_cell!(bound, stats, a, b, M; auto)
 end
 
 function _componentwise_zero_crossing_count(
@@ -1476,16 +578,16 @@ function _append_componentwise_signed_affine_cell!(
     left::Integer,
     cell::Integer,
     M::Real;
-    affine_area_threshold::Real=1.0,
-    affine_min_area_gain::Real=0.0,
-    certified_auto::Bool=false,
+    linear_area_threshold::Real=1.0,
+    linear_min_area_gain::Real=0.0,
+    auto::Bool=false,
     max_segments::Integer=64,
 )
     h = b - a
     n_channels = size(G, 1)
     if !(isfinite(a) && isfinite(b) && isfinite(M) && h > 0)
         return _append_componentwise_flat_cell!(
-            bound, stats, a, b, M; certified_auto, reason=:numerical)
+            bound, stats, a, b, M; auto, reason=:numerical)
     end
 
     _, slope_tol, time_tol, area_tol =
@@ -1502,7 +604,7 @@ function _append_componentwise_signed_affine_cell!(
         )
         all(isfinite, values) ||
             return _append_componentwise_flat_cell!(
-                bound, stats, a, b, M; certified_auto, reason=:numerical)
+                bound, stats, a, b, M; auto, reason=:numerical)
         _add_signed_roof_breakpoints!(
             breakpoints, a, b, values[1], values[2], values[3], values[4],
             values[5], slope_tol, time_tol)
@@ -1513,7 +615,7 @@ function _append_componentwise_signed_affine_cell!(
         _record_counter_componentwise_cell_diagnostics!(
             stats, proposed_breakpoints, length(breakpoints) - 1, zero_crossings, 0.0, 0.0)
         return _append_componentwise_flat_cell!(
-            bound, stats, a, b, M; certified_auto, reason=:segment_cap)
+            bound, stats, a, b, M; auto, reason=:segment_cap)
     end
 
     start_segments = bound.n_segments
@@ -1540,35 +642,35 @@ function _append_componentwise_signed_affine_cell!(
     catch err
         bound.n_segments = start_segments
         return _append_componentwise_flat_cell!(
-            bound, stats, a, b, M; certified_auto, reason=:numerical)
+            bound, stats, a, b, M; auto, reason=:numerical)
     end
 
     flat_area = pos(M) * h
     if affine_area < -area_tol || affine_area > flat_area + max(area_tol, 1e-10 * max(1.0, flat_area))
         bound.n_segments = start_segments
         return _append_componentwise_flat_cell!(
-            bound, stats, a, b, M; certified_auto, reason=:numerical)
+            bound, stats, a, b, M; auto, reason=:numerical)
     end
 
     area_gain = flat_area - max(affine_area, 0.0)
     saved_fraction = flat_area <= area_tol ? 0.0 : max(area_gain, 0.0) / flat_area
     segments_added = bound.n_segments - start_segments
-    if area_gain <= max(float(affine_min_area_gain), 0.0)
+    if area_gain <= max(float(linear_min_area_gain), 0.0)
         bound.n_segments = start_segments
         stats !== nothing && (_inc_counter_affine_cells_skipped_by_min_gain(stats))
         _record_counter_componentwise_cell_diagnostics!(
             stats, proposed_breakpoints, segments_added, zero_crossings, area_gain, saved_fraction)
         return _append_componentwise_flat_cell!(
-            bound, stats, a, b, M; certified_auto, reason=:area_gate)
+            bound, stats, a, b, M; auto, reason=:area_gate)
     end
 
-    threshold = float(affine_area_threshold)
+    threshold = float(linear_area_threshold)
     if threshold < 1.0 && flat_area > area_tol && affine_area / flat_area >= threshold
         bound.n_segments = start_segments
         _record_counter_componentwise_cell_diagnostics!(
             stats, proposed_breakpoints, segments_added, zero_crossings, area_gain, saved_fraction)
         return _append_componentwise_flat_cell!(
-            bound, stats, a, b, M; certified_auto, reason=:area_gate)
+            bound, stats, a, b, M; auto, reason=:area_gate)
     end
 
     if stats !== nothing
@@ -1584,14 +686,14 @@ function _append_componentwise_signed_affine_cell!(
         _inc_counter_componentwise_affine_segments_added(stats, segments_added)
         _inc_counter_componentwise_breakpoints_merged(stats, merged)
         _inc_counter_componentwise_area_saved(stats, max(area_gain, 0.0))
-        if certified_auto
-            _inc_counter_certified_auto_affine_cells(stats)
-            _inc_counter_certified_auto_area_saved(stats, max(area_gain, 0.0))
-            total = _get_counter_certified_auto_flat_cells(stats) +
-                _get_counter_certified_auto_affine_cells(stats)
+        if auto
+            _inc_counter_auto_affine_cells(stats)
+            _inc_counter_auto_area_saved(stats, max(area_gain, 0.0))
+            total = _get_counter_auto_flat_cells(stats) +
+                _get_counter_auto_affine_cells(stats)
             fraction = total == 0 ? 0.0 :
-                _get_counter_certified_auto_affine_cells(stats) / total
-            _set_counter_certified_auto_affine_fraction(stats, fraction)
+                _get_counter_auto_affine_cells(stats) / total
+            _set_counter_auto_affine_fraction(stats, fraction)
         end
     end
     return true
@@ -1620,60 +722,59 @@ function build_hybrid_affine_bound!(bound::PiecewiseAffineBound, pcb::PiecewiseC
     return bound
 end
 
-function build_inflated_affine_bound!(bound::PiecewiseAffineBound, pcb::PiecewiseConstantBound,
+function build_linear_bound!(bound::PiecewiseAffineBound, pcb::PiecewiseConstantBound,
     n_cells::Integer, original_state::AbstractPDMPState, flow::ContinuousDynamics, curvature_bound,
-    stats::Union{AbstractStatisticCounter,Nothing}=nothing; certification::Symbol=:opportunistic)
+    stats::Union{AbstractStatisticCounter,Nothing}=nothing)
     reset_affine_bound!(bound)
     n = min(n_cells, length(pcb.Λ_vals))
     if n <= 0
         return bound
     end
     prepared = _prepare_grid_curvature_bound(
-        curvature_bound, original_state, flow, pcb.t_grid, n, stats, certification)
+        curvature_bound, original_state, flow, pcb.t_grid, n, stats)
     for i in 1:n
         a = pcb.t_grid[i]
         b = pcb.t_grid[i + 1]
         L_value = _prepared_or_cell_curvature_value(
-            prepared, i, curvature_bound, original_state, flow, a, b, stats, certification)
-        _append_inflated_affine_cell!(bound, stats,
+            prepared, i, curvature_bound, original_state, flow, a, b, stats)
+        _append_linear_cell!(bound, stats,
             a, b, pcb.y_vals[i], pcb.y_vals[i + 1], pcb.d_vals[i], pcb.d_vals[i + 1], pcb.Λ_vals[i], L_value)
     end
     return bound
 end
 
-function build_signed_inflated_affine_bound!(bound::PiecewiseAffineBound, pcb::PiecewiseConstantBound,
+function build_rate_linear_bound!(bound::PiecewiseAffineBound, pcb::PiecewiseConstantBound,
     n_cells::Integer, original_state::AbstractPDMPState, flow::ContinuousDynamics, curvature_bound,
-    stats::Union{AbstractStatisticCounter,Nothing}=nothing; certification::Symbol=:required,
-    affine_area_threshold::Real=1.0,
-    affine_min_area_gain::Real=0.0)
+    stats::Union{AbstractStatisticCounter,Nothing}=nothing; linear_area_threshold::Real=1.0,
+    linear_min_area_gain::Real=0.0)
     reset_affine_bound!(bound)
     n = min(n_cells, length(pcb.Λ_vals))
     if n <= 0
         return bound
     end
     prepared = _prepare_grid_curvature_bound(
-        curvature_bound, original_state, flow, pcb.t_grid, n, stats, certification)
+        curvature_bound, original_state, flow, pcb.t_grid, n, stats)
     for i in 1:n
         a = pcb.t_grid[i]
         b = pcb.t_grid[i + 1]
         L_value = _prepared_or_cell_curvature_value(
-            prepared, i, curvature_bound, original_state, flow, a, b, stats, certification)
+            prepared, i, curvature_bound, original_state, flow, a, b, stats)
         L_cell = L_value === nothing ? 0.0 : Float64(L_value)
-        M = max(pcb.Λ_vals[i], _signed_inflated_flat_upper(
+        M = max(pcb.Λ_vals[i], _rate_flat_upper(
             a, b, pcb.y_vals[i], pcb.y_vals[i + 1], pcb.d_vals[i], pcb.d_vals[i + 1], L_cell))
         pcb.Λ_vals[i] = M
-        _append_signed_inflated_affine_cell!(bound, stats,
+        _append_rate_linear_cell!(bound, stats,
             a, b, pcb.y_vals[i], pcb.y_vals[i + 1], pcb.d_vals[i], pcb.d_vals[i + 1], M, L_cell;
-            affine_area_threshold,
-            affine_min_area_gain)
+            linear_area_threshold,
+            linear_min_area_gain)
     end
     return bound
 end
 
-signed_rate_and_derivative(state::AbstractPDMPState, flow::ContinuousDynamics, provider, ::AbstractVector) =
-    signed_rate_and_derivative(state, flow, provider)
+rate_and_derivative(state::AbstractPDMPState, flow::ContinuousDynamics, provider, ::AbstractVector) =
+    rate_and_derivative(state, flow, provider)
 
-function _signed_rate_and_derivative_or_throw(
+function _rate_and_derivative_or_throw(
     ::NoGridBoundaryProbe,
     state::AbstractPDMPState,
     flow::ContinuousDynamics,
@@ -1682,10 +783,10 @@ function _signed_rate_and_derivative_or_throw(
     t_valid::Float64,
     t_invalid::Float64,
 )
-    return signed_rate_and_derivative(state, flow, provider, args...)
+    return rate_and_derivative(state, flow, provider, args...)
 end
 
-function _signed_rate_and_derivative_or_throw(
+function _rate_and_derivative_or_throw(
     probe_failure_handler::GridBoundaryProbeHandler,
     state::AbstractPDMPState,
     flow::ContinuousDynamics,
@@ -1695,13 +796,13 @@ function _signed_rate_and_derivative_or_throw(
     t_invalid::Float64,
 )
     try
-        return signed_rate_and_derivative(state, flow, provider, args...)
+        return rate_and_derivative(state, flow, provider, args...)
     catch err
         _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
     end
 end
 
-function construct_signed_rate_grid!(
+function construct_rate_grid!(
     pcb::PiecewiseConstantBound,
     state::AbstractPDMPState,
     flow::BouncyParticle,
@@ -1721,7 +822,7 @@ function construct_signed_rate_grid!(
             _inc_counter_grid_endpoint_gradient_calls(stats)
             _inc_counter_grid_endpoint_hessian_calls(stats)
         end
-        pcb.y_vals[1], pcb.d_vals[1] = signed_rate_and_derivative(state_t, flow, provider)
+        pcb.y_vals[1], pcb.d_vals[1] = rate_and_derivative(state_t, flow, provider)
     else
         !isnothing(stats) && (_inc_counter_grid_cached_endpoint_reuses(stats))
         pcb.y_vals[1] = cached_g0
@@ -1735,12 +836,12 @@ function construct_signed_rate_grid!(
             _inc_counter_grid_endpoint_gradient_calls(stats)
             _inc_counter_grid_endpoint_hessian_calls(stats)
         end
-        pcb.y_vals[i], pcb.d_vals[i] = signed_rate_and_derivative(state_t, flow, provider)
+        pcb.y_vals[i], pcb.d_vals[i] = rate_and_derivative(state_t, flow, provider)
     end
     return n
 end
 
-function construct_signed_inflated_grid!(
+function construct_rate_bound_grid!(
     bound::PiecewiseAffineBound,
     pcb::PiecewiseConstantBound,
     state::AbstractPDMPState,
@@ -1756,11 +857,10 @@ function construct_signed_inflated_grid!(
     state_cache::Union{AbstractPDMPState,Nothing}=nothing,
     stats::Union{AbstractStatisticCounter,Nothing}=nothing,
     max_time::Float64=Inf,
-    certification::Symbol=:required,
     build_affine::Bool=true,
-    affine_area_threshold::Real=1.0,
-    affine_min_area_gain::Real=0.0,
-    certified_auto::Bool=false,
+    linear_area_threshold::Real=1.0,
+    linear_min_area_gain::Real=0.0,
+    auto::Bool=false,
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
     start_cell::Integer=1,
     initial_integral::Float64=0.0,
@@ -1794,21 +894,21 @@ function construct_signed_inflated_grid!(
             _inc_counter_grid_endpoint_gradient_calls(stats)
             _inc_counter_grid_endpoint_hessian_calls(stats)
         end
-        y_vals[1], d_vals[1] = _signed_rate_and_derivative_or_throw(
+        y_vals[1], d_vals[1] = _rate_and_derivative_or_throw(
             probe_failure_handler, state_t, flow, provider; t_valid=0.0, t_invalid=0.0)
     else
         if stats !== nothing
             _inc_counter_grid_cached_endpoint_reuses(stats)
             _inc_counter_grid_endpoint_hessian_calls(stats)
         end
-        y_vals[1], d_vals[1] = _signed_rate_and_derivative_or_throw(
+        y_vals[1], d_vals[1] = _rate_and_derivative_or_throw(
             probe_failure_handler, state_t, flow, provider, cached_gradient; t_valid=0.0, t_invalid=0.0)
     end
 
     cumulative_integral = initial_integral
     N_evaluated = N
     prepared = _prepare_grid_curvature_bound(
-        curvature_bound, state, flow, t_grid, N, stats, certification)
+        curvature_bound, state, flow, t_grid, N, stats)
     for i in (start_cell + 1):(N + 1)
         if t_grid[i - 1] >= max_time
             for j in (i - 1):N
@@ -1832,7 +932,7 @@ function construct_signed_inflated_grid!(
                 _inc_counter_grid_endpoint_gradient_calls(stats)
                 _inc_counter_grid_endpoint_hessian_calls(stats)
             end
-            y_vals[i], d_vals[i] = _signed_rate_and_derivative_or_throw(
+            y_vals[i], d_vals[i] = _rate_and_derivative_or_throw(
                 probe_failure_handler, state_t, flow, provider; t_valid=t_grid[i - 1], t_invalid=t_grid[i])
         end
 
@@ -1840,29 +940,29 @@ function construct_signed_inflated_grid!(
         a = t_grid[cell]
         b = t_grid[cell + 1]
         L_value = _prepared_or_cell_curvature_value(
-            prepared, cell, curvature_bound, state, flow, a, b, stats, certification)
+            prepared, cell, curvature_bound, state, flow, a, b, stats)
         L_cell = L_value === nothing ? 0.0 : Float64(L_value)
-        M = _signed_inflated_flat_upper(
+        M = _rate_flat_upper(
             a, b, y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1], L_cell)
         Λ_vals[cell] = M
 
         cell_area = M * Δt
         if build_affine
             start_segments = bound.n_segments
-            _append_signed_inflated_affine_cell!(bound, stats,
+            _append_rate_linear_cell!(bound, stats,
                 a, b, y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1], M, L_cell;
-                affine_area_threshold,
-                affine_min_area_gain,
-                certified_auto)
+                linear_area_threshold,
+                linear_min_area_gain,
+                auto)
             cell_area = _affine_added_area(bound, start_segments)
         elseif stats !== nothing
             _inc_counter_affine_constant_cells(stats)
             _inc_counter_affine_area_constant_equiv(stats, cell_area)
             _inc_counter_affine_area_hybrid(stats, cell_area)
-            if certified_auto
-                _inc_counter_certified_auto_flat_cells(stats)
-                total = _get_counter_certified_auto_flat_cells(stats) + _get_counter_certified_auto_affine_cells(stats)
-                _set_counter_certified_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_certified_auto_affine_cells(stats) / total)
+            if auto
+                _inc_counter_auto_flat_cells(stats)
+                total = _get_counter_auto_flat_cells(stats) + _get_counter_auto_affine_cells(stats)
+                _set_counter_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_auto_affine_cells(stats) / total)
             end
         end
 
@@ -1888,7 +988,7 @@ function construct_signed_inflated_grid!(
     return N_evaluated
 end
 
-function construct_signed_inflated_grid!(
+function construct_rate_bound_grid!(
     bound::PiecewiseAffineBound,
     pcb::PiecewiseConstantBound,
     state::AbstractPDMPState,
@@ -1904,11 +1004,10 @@ function construct_signed_inflated_grid!(
     state_cache::Union{AbstractPDMPState,Nothing}=nothing,
     stats::Union{AbstractStatisticCounter,Nothing}=nothing,
     max_time::Float64=Inf,
-    certification::Symbol=:required,
     build_affine::Bool=true,
-    affine_area_threshold::Real=1.0,
-    affine_min_area_gain::Real=0.0,
-    certified_auto::Bool=false,
+    linear_area_threshold::Real=1.0,
+    linear_min_area_gain::Real=0.0,
+    auto::Bool=false,
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
     start_cell::Integer=1,
     initial_integral::Float64=0.0,
@@ -1942,7 +1041,7 @@ function construct_signed_inflated_grid!(
     end
     stats !== nothing && (_inc_counter_grid_endpoint_derivative_calls(stats))
     stats !== nothing && (_inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points))
-    _fill_rate_values_and_derivatives!(
+    _fill_rate_derivatives!(
         G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
     stats !== nothing && (_inc_counter_componentwise_channels(stats, n_channels))
     stats !== nothing && (_inc_counter_componentwise_channel_point_evaluations(
@@ -1955,7 +1054,7 @@ function construct_signed_inflated_grid!(
     end
 
     L = _channel_curvature_matrix(
-        curvature_bound, state, flow, t_grid, n_channels, N, stats, certification)
+        curvature_bound, state, flow, t_grid, n_channels, N, stats)
     cumulative_integral = initial_integral
     N_evaluated = N
     for cell in start_cell:n_time_cells
@@ -1965,7 +1064,7 @@ function construct_signed_inflated_grid!(
         for channel in 1:n_channels
             left = cell - start_point + 1
             right = left + 1
-            M += _signed_inflated_flat_upper(
+            M += _rate_flat_upper(
                 a, b, G[channel, left], G[channel, right],
                 dG[channel, left], dG[channel, right], L[channel, cell])
         end
@@ -1976,9 +1075,9 @@ function construct_signed_inflated_grid!(
             left = cell - start_point + 1
             _append_componentwise_signed_affine_cell!(
                 bound, stats, a, b, G, dG, L, left, cell, M;
-                affine_area_threshold,
-                affine_min_area_gain,
-                certified_auto,
+                linear_area_threshold,
+                linear_min_area_gain,
+                auto,
                 max_segments=max_componentwise_affine_segments_per_cell)
             cell_area = _affine_added_area(bound, start_segments)
         elseif stats !== nothing
@@ -1988,13 +1087,13 @@ function construct_signed_inflated_grid!(
             _inc_counter_componentwise_flat_fallback_cells(stats)
             _inc_counter_componentwise_affine_skipped_by_policy(stats)
             _inc_counter_componentwise_flat_fallback_policy(stats)
-            if certified_auto
-                _inc_counter_certified_auto_flat_cells(stats)
-                total = _get_counter_certified_auto_flat_cells(stats) +
-                    _get_counter_certified_auto_affine_cells(stats)
+            if auto
+                _inc_counter_auto_flat_cells(stats)
+                total = _get_counter_auto_flat_cells(stats) +
+                    _get_counter_auto_affine_cells(stats)
                 fraction = total == 0 ? 0.0 :
-                    _get_counter_certified_auto_affine_cells(stats) / total
-                _set_counter_certified_auto_affine_fraction(stats, fraction)
+                    _get_counter_auto_affine_cells(stats) / total
+                _set_counter_auto_affine_fraction(stats, fraction)
             end
         end
         cumulative_integral += cell_area
@@ -2027,7 +1126,7 @@ function _grid_bound_violation_message(
     bound_actual::Real,
     cumulative_exp::Real,
     λ_refresh::Real,
-    use_affine::Bool,
+    use_linear::Bool,
 )
     ratio = bound_actual == 0 ? Inf : l_actual / bound_actual
     cell_index = if isempty(alg.pcb.t_grid)
@@ -2055,7 +1154,7 @@ function _grid_bound_violation_message(
     seg_right = NaN
     seg_y_left = NaN
     seg_slope = NaN
-    if use_affine && alg.affine_bound.n_segments > 0
+    if use_linear && alg.affine_bound.n_segments > 0
         segment_index = τ == alg.affine_bound.t_breaks[alg.affine_bound.n_segments + 1] ?
             alg.affine_bound.n_segments :
             clamp(searchsortedlast(@view(alg.affine_bound.t_breaks[1:(alg.affine_bound.n_segments + 1)]), τ),
@@ -2069,7 +1168,7 @@ function _grid_bound_violation_message(
     x = state.ξ.x
     v = state.ξ.θ
     return string(
-        alg.envelope, " GridThinning envelope violated at proposal time",
+        alg.bound, " GridThinning bound violated at proposal time",
         " | acceptance_test_index=", _get_counter_grid_acceptance_tests(stats),
         " cell_index=", cell_index,
         " cell=[", a, ", ", b, "]",
@@ -2107,8 +1206,8 @@ function _piecewise_constant_area(pcb::PiecewiseConstantBound)
     return area
 end
 
-_grid_built_area(pcb::PiecewiseConstantBound, bound::PiecewiseAffineBound, use_affine::Bool) =
-    use_affine ? total_area(bound) : _piecewise_constant_area(pcb)
+_grid_built_area(pcb::PiecewiseConstantBound, bound::PiecewiseAffineBound, use_linear::Bool) =
+    use_linear ? total_area(bound) : _piecewise_constant_area(pcb)
 
 function _record_budget_grid_build!(
     stats::AbstractStatisticCounter,
@@ -2129,10 +1228,10 @@ end
 
 Adaptive GridThinning configuration.
 
-Preferred user-facing bounds are `:constant`, `:flat`, `:linear`, `:auto`,
-and `:sticky_auto`.  The older `envelope` keyword remains accepted as a
-compatibility alias.  Passing neither keyword keeps the historical constant
-GridThinning behavior used by downstream packages.
+Preferred user-facing bounds are `:constant`, `:flat`, `:linear`, and `:auto`.
+The older `bound` keyword remains accepted as a compatibility alias.
+Passing neither keyword keeps the historical constant GridThinning behavior
+used by downstream packages.
 """
 struct GridThinningStrategy <: PoissonTimeStrategy
     N::Int
@@ -2145,46 +1244,24 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     use_fd_hvp::Bool
     post_warmup_simplify::Bool
     lazy::Bool
-    envelope::Symbol
+    bound::Symbol
     curvature_bound
     bound_violation::Symbol
-    certification::Symbol
-    inflated_affine_threshold::Float64
-    inflated_affine_min_area_gain::Float64
+    linear_area_threshold::Float64
+    linear_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
-    certified_auto_probe_interval::Int
     max_componentwise_affine_segments_per_cell::Int
 end
 
-_normalize_grid_bound(::Nothing, envelope::Symbol) = _normalize_grid_bound(envelope)
-_normalize_grid_bound(bound::Symbol, ::Nothing) = _normalize_grid_bound(bound)
-_normalize_grid_bound(::Nothing, ::Nothing) = :constant
-function _normalize_grid_bound(bound::Symbol, envelope::Symbol)
-    normalized = _normalize_grid_bound(bound)
-    normalized == _normalize_grid_bound(envelope) && return normalized
-    throw(ArgumentError("bound=$(bound) conflicts with envelope=$(envelope)"))
-end
+_normalize_grid_bound(::Nothing) = :constant
 
 function _normalize_grid_bound(bound::Symbol)
     bound === :constant && return :constant
-    bound === :flat && return :inflated_constant
-    bound === :linear && return :inflated_linear
-    bound === :auto && return :certified_auto
-    bound === :sticky_auto && return :certified_auto_affine_sticky
-    bound === :inflated_constant && return :inflated_constant
-    bound === :inflated_linear && return :inflated_linear
-    bound === :certified_auto && return :certified_auto
-    bound === :certified_auto_affine_sticky && return :certified_auto_affine_sticky
-    bound === :hybrid_linear && return :hybrid_linear
+    bound === :flat && return :flat
+    bound === :linear && return :linear
+    bound === :auto && return :auto
+    bound === :sticky_auto && return :sticky_auto
     throw(ArgumentError("unknown GridThinning bound $(bound)"))
-end
-
-function _public_grid_bound_name(envelope::Symbol)
-    envelope === :inflated_constant && return :flat
-    envelope === :inflated_linear && return :linear
-    envelope === :certified_auto && return :auto
-    envelope === :certified_auto_affine_sticky && return :sticky_auto
-    return envelope
 end
 
 function GridThinningStrategy(;
@@ -2199,128 +1276,31 @@ function GridThinningStrategy(;
     post_warmup_simplify::Bool=false,
     lazy::Bool=true,
     bound=nothing,
-    envelope=nothing,
     curvature_bound=nothing,
     bound_violation=nothing,
-    certification::Symbol=:required,
-    inflated_affine_threshold::Real=0.95,
-    inflated_affine_min_area_gain::Real=0.0,
+    linear_area_threshold::Real=0.95,
+    linear_min_area_gain::Real=0.0,
     max_rejections_before_tail_restart::Int=100,
-    certified_auto_probe_interval::Int=20,
     max_componentwise_affine_segments_per_cell::Int=64,
 )
-    envelope_symbol = _normalize_grid_bound(bound, envelope)
+    bound_symbol = _normalize_grid_bound(bound)
     bound_violation_symbol = bound_violation === nothing ?
-        (envelope_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
+        (bound_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
         Float64(early_stop_threshold), use_fd_hvp, post_warmup_simplify,
-        lazy, envelope_symbol, curvature_bound, bound_violation_symbol,
-        certification, Float64(inflated_affine_threshold),
-        Float64(inflated_affine_min_area_gain),
-        max_rejections_before_tail_restart, certified_auto_probe_interval,
-        max_componentwise_affine_segments_per_cell)
+        lazy, bound_symbol, curvature_bound, bound_violation_symbol,
+        Float64(linear_area_threshold),
+        Float64(linear_min_area_gain),
+        max_rejections_before_tail_restart, max_componentwise_affine_segments_per_cell)
 end
-
-"""
-    certified_auto_scalar_bps_grid(; N=1, inflated_affine_threshold=0.9,
-        inflated_affine_min_area_gain=0.0, certified_auto_probe_interval=20,
-        kwargs...)
-
-Return the conservative automatic scalar signed-grid preset.
-
-It uses signed rate values and first derivatives, optionally strengthened by
-`curvature_bound`, then chooses between flat and affine grid bounds.  This is
-a good compromise
-when the user does not know which representation is faster.
-"""
-certified_auto_scalar_bps_grid(; N::Int=1, inflated_affine_threshold::Real=0.9,
-    inflated_affine_min_area_gain::Real=0.0, certified_auto_probe_interval::Int=20,
-    kwargs...) = GridThinningStrategy(;
-        N,
-        envelope=:certified_auto,
-        certification=:required,
-        inflated_affine_threshold=Float64(inflated_affine_threshold),
-        inflated_affine_min_area_gain=Float64(inflated_affine_min_area_gain),
-        certified_auto_probe_interval,
-        kwargs...)
-
-"""
-    certified_scalar_bps_grid(; N=1, inflated_affine_threshold=0.9,
-        inflated_affine_min_area_gain=0.0, kwargs...)
-
-Return the recommended scalar signed-grid `GridThinningStrategy` preset for
-expensive targets with analytic signed rate values and derivatives.
-
-This forces the affine signed-grid bound.  Use it for expensive scalar BPS
-targets when affine construction is cheaper than repeated target/rate
-evaluation.  Supply `curvature_bound=...` when a safe local curvature bound is
-available.
-"""
-certified_scalar_bps_grid(; N::Int=1, inflated_affine_threshold::Real=0.9,
-    inflated_affine_min_area_gain::Real=0.0, kwargs...) = GridThinningStrategy(;
-        N,
-        envelope=:inflated_linear,
-        certification=:required,
-        inflated_affine_threshold=Float64(inflated_affine_threshold),
-        inflated_affine_min_area_gain=Float64(inflated_affine_min_area_gain),
-        kwargs...)
-
-"""
-    certified_flat_scalar_bps_grid(; N=1, kwargs...)
-
-Return the cheaper flat scalar signed-grid `GridThinningStrategy` preset.
-This uses the same signed rate values and derivatives as the affine preset,
-then flattens each cell.  It is useful when target/rate evaluation is cheap or
-affine-segment overhead dominates.
-"""
-certified_flat_scalar_bps_grid(; N::Int=1, kwargs...) = GridThinningStrategy(;
-    N,
-    envelope=:inflated_constant,
-    certification=:required,
-    kwargs...)
-
-# `envelope=:certified_auto_affine_sticky` is an experimental
-# scalar-BPS auto mode for expensive targets.  It starts from affine and only
-# switches toward flat after repeated low savings, with probes to avoid getting
-# stuck.  It is not the generic GridThinning default.
-
-"""
-    certified_auto_signed_rate_grid(; kwargs...)
-
-Generic alias for `certified_auto_scalar_bps_grid`.
-
-The name reflects the signed-rate-channel abstraction.  The current
-implementation supports scalar BPS signed-rate geometry and an initial
-componentwise ZigZag path.
-"""
-certified_auto_signed_rate_grid(; kwargs...) =
-    certified_auto_scalar_bps_grid(; kwargs...)
-
-"""
-    certified_signed_rate_grid(; kwargs...)
-
-Generic alias for `certified_scalar_bps_grid`, the forced affine
-signed-rate preset.
-"""
-certified_signed_rate_grid(; kwargs...) =
-    certified_scalar_bps_grid(; kwargs...)
-
-"""
-    certified_flat_signed_rate_grid(; kwargs...)
-
-Generic alias for `certified_flat_scalar_bps_grid`, the flat
-signed-rate preset.
-"""
-certified_flat_signed_rate_grid(; kwargs...) =
-    certified_flat_scalar_bps_grid(; kwargs...)
 
 function Base.show(io::IO, strat::GridThinningStrategy)
     print(io, "GridThinningStrategy(")
     print(io, "N=", strat.N, ", N_min=", strat.N_min, ", t_max=", strat.t_max)
-    print(io, ", bound=", _public_grid_bound_name(strat.envelope))
-    strat.envelope in (:inflated_linear, :certified_auto, :certified_auto_affine_sticky) && print(io, ", inflated_affine_threshold=", strat.inflated_affine_threshold,
-        ", inflated_affine_min_area_gain=", strat.inflated_affine_min_area_gain)
+    print(io, ", bound=", strat.bound)
+    strat.bound in (:linear, :auto) && print(io, ", linear_area_threshold=", strat.linear_area_threshold,
+        ", linear_min_area_gain=", strat.linear_min_area_gain)
     print(io, ")")
 end
 
@@ -2329,11 +1309,9 @@ _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_s
 
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     T = typeof(strat.t_max)
-    _validate_certification_mode(strat.certification)
-    0.0 <= strat.inflated_affine_threshold || throw(ArgumentError("inflated_affine_threshold must be nonnegative"))
-    0.0 <= strat.inflated_affine_min_area_gain || throw(ArgumentError("inflated_affine_min_area_gain must be nonnegative"))
+    0.0 <= strat.linear_area_threshold || throw(ArgumentError("linear_area_threshold must be nonnegative"))
+    0.0 <= strat.linear_min_area_gain || throw(ArgumentError("linear_min_area_gain must be nonnegative"))
     strat.max_rejections_before_tail_restart > 0 || throw(ArgumentError("max_rejections_before_tail_restart must be positive"))
-    strat.certified_auto_probe_interval > 0 || throw(ArgumentError("certified_auto_probe_interval must be positive"))
     strat.max_componentwise_affine_segments_per_cell > 0 ||
         throw(ArgumentError("max_componentwise_affine_segments_per_cell must be positive"))
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
@@ -2408,23 +1386,13 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_bas
         Ref(strat.lazy),
         similar(state.ξ.x),
         Ref(false),
-        strat.envelope,
+        strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
-        strat.certification,
-        strat.inflated_affine_threshold,
-        strat.inflated_affine_min_area_gain,
+        strat.linear_area_threshold,
+        strat.linear_min_area_gain,
         strat.max_rejections_before_tail_restart,
-        strat.certified_auto_probe_interval,
         strat.max_componentwise_affine_segments_per_cell,
-        Ref(true),
-        Ref(true),
-        Ref(0),
-        Ref(0),
-        Ref(0),
-        Ref(0),
-        Ref(0),
-        Ref(0),
     )
 end
 
@@ -2455,23 +1423,13 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeS
     lazy_enabled::Base.RefValue{Bool}
     cached_gradient::Vector{Float64}
     has_cached_gradient::Base.RefValue{Bool}
-    envelope::Symbol
+    bound::Symbol
     curvature_bound
     bound_violation::Symbol
-    certification::Symbol
-    inflated_affine_threshold::Float64
-    inflated_affine_min_area_gain::Float64
+    linear_area_threshold::Float64
+    linear_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
-    certified_auto_probe_interval::Int
     max_componentwise_affine_segments_per_cell::Int
-    certified_auto_prefer_affine_next::Base.RefValue{Bool}
-    certified_auto_prefer_affine_current::Base.RefValue{Bool}
-    certified_auto_flat_grids_since_probe::Base.RefValue{Int}
-    certified_auto_low_saving_streak::Base.RefValue{Int}
-    certified_auto_flat_streak_current::Base.RefValue{Int}
-    certified_auto_affine_streak_current::Base.RefValue{Int}
-    certified_auto_current_grid_extensions::Base.RefValue{Int}
-    certified_auto_current_grid_rejections::Base.RefValue{Int}
 end
 
 accept_reflection_event(::Random.AbstractRNG, ::GridAdaptiveState, args...) = true
@@ -2491,133 +1449,6 @@ function _shrink_grid_after_bound_violation!(alg::GridAdaptiveState, stats::Abst
     new_t_max = max(alg.t_max[] * alg.α⁻, sqrt(eps(Float64)))
     reset_grid_scale!(alg, new_t_max)
     _inc_counter_grid_shrinks(stats)
-    return nothing
-end
-
-function _begin_certified_auto_grid!(alg::GridAdaptiveState)
-    _certified_auto_envelope(alg.envelope) || return nothing
-    alg.certified_auto_current_grid_extensions[] = 0
-    alg.certified_auto_current_grid_rejections[] = 0
-    prefer_affine = alg.certified_auto_prefer_affine_next[]
-    if !prefer_affine && alg.certified_auto_flat_grids_since_probe[] >= alg.certified_auto_probe_interval
-        prefer_affine = true
-        alg.certified_auto_flat_grids_since_probe[] = 0
-    end
-    alg.certified_auto_prefer_affine_current[] = prefer_affine
-    return nothing
-end
-
-function _set_certified_auto_next_preference!(
-    stats::AbstractStatisticCounter,
-    alg::GridAdaptiveState,
-    prefer_affine::Bool,
-)
-    old = alg.certified_auto_prefer_affine_next[]
-    if old != prefer_affine && _certified_auto_affine_sticky(alg.envelope)
-        prefer_affine ?
-            _inc_counter_certified_auto_switched_to_affine(stats) :
-            _inc_counter_certified_auto_switched_to_flat(stats)
-    end
-    alg.certified_auto_prefer_affine_next[] = prefer_affine
-    return nothing
-end
-
-function _force_certified_auto_affine_next!(stats::AbstractStatisticCounter, alg::GridAdaptiveState)
-    _certified_auto_envelope(alg.envelope) || return nothing
-    _set_certified_auto_next_preference!(stats, alg, true)
-    alg.certified_auto_low_saving_streak[] = 0
-    alg.certified_auto_flat_grids_since_probe[] = 0
-    return nothing
-end
-
-function _record_certified_auto_streaks!(stats::AbstractStatisticCounter, alg::GridAdaptiveState)
-    if alg.certified_auto_prefer_affine_current[]
-        alg.certified_auto_affine_streak_current[] += 1
-        alg.certified_auto_flat_streak_current[] = 0
-        _set_counter_certified_auto_affine_streak_grids(
-            stats,
-            max(_get_counter_certified_auto_affine_streak_grids(stats),
-                alg.certified_auto_affine_streak_current[]),
-        )
-    else
-        alg.certified_auto_flat_streak_current[] += 1
-        alg.certified_auto_affine_streak_current[] = 0
-        _set_counter_certified_auto_flat_streak_grids(
-            stats,
-            max(_get_counter_certified_auto_flat_streak_grids(stats),
-                alg.certified_auto_flat_streak_current[]),
-        )
-    end
-    return nothing
-end
-
-function _record_certified_auto_grid_choice!(
-    stats::AbstractStatisticCounter,
-    alg::GridAdaptiveState,
-    flat_before::Int,
-    affine_before::Int,
-    area_saved_before::Float64,
-    flat_area_before::Float64,
-    new_grid::Bool=true,
-)
-    _certified_auto_envelope(alg.envelope) || return nothing
-    forced_probe = !alg.certified_auto_prefer_affine_next[] && alg.certified_auto_prefer_affine_current[]
-    flat_cells = _get_counter_certified_auto_flat_cells(stats) - flat_before
-    affine_cells = _get_counter_certified_auto_affine_cells(stats) - affine_before
-    area_saved = _get_counter_certified_auto_area_saved(stats) - area_saved_before
-    flat_area = _get_counter_affine_area_constant_equiv(stats) - flat_area_before
-    saving_ratio = flat_area > 0 ? area_saved / flat_area : 0.0
-
-    if new_grid
-        _certified_auto_affine_sticky(alg.envelope) && _inc_counter_certified_auto_mode_affine_sticky(stats)
-        forced_probe && (_inc_counter_certified_auto_forced_probe_grids(stats))
-        alg.certified_auto_prefer_affine_current[] ?
-            (_inc_counter_certified_auto_affine_preferred_grids(stats)) :
-            (_inc_counter_certified_auto_flat_preferred_grids(stats))
-        _certified_auto_affine_sticky(alg.envelope) && _record_certified_auto_streaks!(stats, alg)
-    end
-
-    if new_grid
-        if affine_cells > 0
-            _inc_counter_certified_auto_used_affine_grids(stats)
-        elseif flat_cells > 0
-            _inc_counter_certified_auto_used_flat_grids(stats)
-        end
-    end
-
-    if _certified_auto_affine_sticky(alg.envelope)
-        if alg.certified_auto_prefer_affine_current[] && saving_ratio < 0.02
-            alg.certified_auto_low_saving_streak[] += 1
-        elseif saving_ratio >= 0.02
-            alg.certified_auto_low_saving_streak[] = 0
-        end
-        _set_counter_certified_auto_low_saving_streak_max(
-            stats,
-            max(_get_counter_certified_auto_low_saving_streak_max(stats),
-                alg.certified_auto_low_saving_streak[]),
-        )
-
-        if forced_probe && saving_ratio > 0.05
-            _force_certified_auto_affine_next!(stats, alg)
-        elseif alg.certified_auto_current_grid_extensions[] > 2 || alg.certified_auto_current_grid_rejections[] > 2
-            _force_certified_auto_affine_next!(stats, alg)
-        else
-            _set_certified_auto_next_preference!(stats, alg,
-                alg.certified_auto_low_saving_streak[] < 5)
-        end
-    else
-        _set_certified_auto_next_preference!(stats, alg, flat_area > 0 && saving_ratio >= 0.05)
-    end
-
-    if new_grid
-        if alg.certified_auto_prefer_affine_next[]
-            alg.certified_auto_flat_grids_since_probe[] = 0
-        else
-            alg.certified_auto_flat_grids_since_probe[] += 1
-        end
-    end
-    total = _get_counter_certified_auto_flat_cells(stats) + _get_counter_certified_auto_affine_cells(stats)
-    _set_counter_certified_auto_affine_fraction(stats, total == 0 ? 0.0 : _get_counter_certified_auto_affine_cells(stats) / total)
     return nothing
 end
 
@@ -2793,51 +1624,43 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     effective_horizon, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
 
     # Budget-first grid construction: draw the first exponential budget before
-    # building the grid, then construct only enough envelope area to cover it.
+    # building the grid, then construct only enough bound area to cover it.
     # Rejections add exponential increments and extend/rebuild the grid only
     # when the cumulative budget exceeds the already-built area.
-    _begin_certified_auto_grid!(alg)
     cumulative_exp = rand(rng, Exponential())
 
     # Build grid once for this event, capped at effective horizon
-    use_affine = _use_affine_envelope(alg, state, flow, grad_and_hvp)
-    use_inflated_constant = _use_inflated_constant_envelope(alg, state, flow, grad_and_hvp)
+    use_linear = _use_linear_bound(alg, state, flow, grad_and_hvp)
+    use_flat = _use_flat_bound(alg, state, flow, grad_and_hvp)
     use_single_pass_signed = _use_signed_grid_bound(alg, state, flow, grad_and_hvp)
     use_constant_batched_signed = !use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, grad_and_hvp)
     had_cached_gradient = alg.has_cached_gradient[]
     if use_single_pass_signed
         cached_gradient = had_cached_gradient ? alg.cached_gradient : nothing
         alg.has_cached_gradient[] = false
-        auto_flat_before = _get_counter_certified_auto_flat_cells(stats)
-        auto_affine_before = _get_counter_certified_auto_affine_cells(stats)
-        auto_saved_before = _get_counter_certified_auto_area_saved(stats)
-        auto_flat_area_before = _get_counter_affine_area_constant_equiv(stats)
-        n_cells_bounded = construct_signed_inflated_grid!(
+        n_cells_bounded = construct_rate_bound_grid!(
             alg.affine_bound, pcb, state, flow, grad_and_hvp, alg.curvature_bound;
             cached_gradient,
             early_stop_threshold=cumulative_exp,
             state_cache=state_,
             stats,
             max_time=effective_horizon,
-            certification=alg.certification,
-            build_affine=use_affine,
-            affine_area_threshold=alg.inflated_affine_threshold,
-            affine_min_area_gain=alg.inflated_affine_min_area_gain,
-            certified_auto=_certified_auto_envelope(alg.envelope),
+            build_affine=use_linear,
+            linear_area_threshold=alg.linear_area_threshold,
+            linear_min_area_gain=alg.linear_min_area_gain,
+            auto=_auto_policy(alg.bound),
             max_componentwise_affine_segments_per_cell=
                 alg.max_componentwise_affine_segments_per_cell,
             rate_value_buf=alg.rate_value_buf,
             rate_derivative_buf=alg.rate_derivative_buf,
             probe_failure_handler,
         )
-        _record_certified_auto_grid_choice!(
-            stats, alg, auto_flat_before, auto_affine_before, auto_saved_before, auto_flat_area_before)
     elseif had_cached_gradient && !use_constant_batched_signed
         cached_y0, cached_d0 = _get_rate_and_deriv_or_throw(
             probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
             t_valid=0.0, t_invalid=0.0)
-        cached_g0, cached_dg0 = if alg.envelope === :inflated_linear
-            signed_rate_and_derivative(state_, flow, grad_and_hvp, alg.cached_gradient)
+        cached_g0, cached_dg0 = if alg.bound === :linear
+            rate_and_derivative(state_, flow, grad_and_hvp, alg.cached_gradient)
         else
             (NaN, NaN)
         end
@@ -2853,26 +1676,25 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             early_stop_threshold=cumulative_exp, stats, state_cache=state_,
             max_time=effective_horizon, probe_failure_handler)
     end
-    if use_affine && !use_single_pass_signed
-        if alg.envelope === :inflated_linear
-            construct_signed_rate_grid!(pcb, state, flow, grad_and_hvp, n_cells_bounded;
+    if use_linear && !use_single_pass_signed
+        if alg.bound === :linear
+            construct_rate_grid!(pcb, state, flow, grad_and_hvp, n_cells_bounded;
                 cached_g0, cached_dg0, state_cache=state_, stats)
-            build_signed_inflated_affine_bound!(alg.affine_bound, pcb, n_cells_bounded, state, flow, alg.curvature_bound, stats;
-                certification=alg.certification,
-                affine_area_threshold=alg.inflated_affine_threshold,
-                affine_min_area_gain=alg.inflated_affine_min_area_gain)
+            build_rate_linear_bound!(alg.affine_bound, pcb, n_cells_bounded, state, flow, alg.curvature_bound, stats;
+                linear_area_threshold=alg.linear_area_threshold,
+                linear_min_area_gain=alg.linear_min_area_gain)
         else
             build_hybrid_affine_bound!(alg.affine_bound, pcb, n_cells_bounded, stats)
         end
     end
     _record_grid_schedule!(stats, alg)
     _set_counter_grid_N_current(stats, alg.N[])
-    built_area = _grid_built_area(pcb, alg.affine_bound, use_affine)
+    built_area = _grid_built_area(pcb, alg.affine_bound, use_linear)
     _record_budget_grid_build!(stats, n_cells_bounded, built_area, cumulative_exp, false)
 
     # Budget-first exactness invariant:
     #   * once proposal times have been generated from the built dominating
-    #     envelope prefix, that prefix must never be changed;
+    #     bound prefix, that prefix must never be changed;
     #   * after a rejection, a larger exponential budget may only append later
     #     cells/segments to the existing prefix;
     #   * if many rejections force a safety rebuild, the old local origin is
@@ -2887,7 +1709,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
     safety_limit = alg.safety_limit
     while safety_limit > 0
-        τ_reflection, lb_reflection = if use_affine
+        τ_reflection, lb_reflection = if use_linear
             propose_event_time(rng, alg.affine_bound, cumulative_exp)
         else
             propose_event_time(rng, pcb, cumulative_exp)
@@ -2917,8 +1739,8 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             signed_reflection = flow isa BouncyParticle ? dot(∇ϕx, state_.ξ.θ) : NaN
             msg = _grid_bound_violation_message(
                 alg, stats, state_, flow, τ_reflection, signed_reflection, l_reflection,
-                lb_reflection, cumulative_exp, λ_refresh, use_affine)
-            if use_affine
+                lb_reflection, cumulative_exp, λ_refresh, use_linear)
+            if use_linear
                 _inc_counter_affine_bound_violations(stats)
             end
             if alg.bound_violation === :throw
@@ -2944,34 +1766,27 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         # Rejection: cumulative_exp has advanced, next proposal will be at a later time
         rejection_count += 1
-        alg.certified_auto_current_grid_rejections[] = rejection_count
-        rejection_count > 2 && _force_certified_auto_affine_next!(stats, alg)
         last_rejected_time = τ_reflection
         cumulative_exp += rand(rng, Exponential())
         if cumulative_exp > built_area * (1 + 64eps(Float64)) + 64eps(Float64)
             start_cell = n_cells_bounded + 1
             effective_horizon, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
-            use_affine = _use_affine_envelope(alg, state, flow, grad_and_hvp)
-            use_inflated_constant = _use_inflated_constant_envelope(alg, state, flow, grad_and_hvp)
+            use_linear = _use_linear_bound(alg, state, flow, grad_and_hvp)
+            use_flat = _use_flat_bound(alg, state, flow, grad_and_hvp)
             use_single_pass_signed = _use_signed_grid_bound(alg, state, flow, grad_and_hvp)
             use_constant_batched_signed = !use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, grad_and_hvp)
             use_constant_batched_signed && (alg.has_cached_gradient[] = false)
             if use_single_pass_signed
-                auto_flat_before = _get_counter_certified_auto_flat_cells(stats)
-                auto_affine_before = _get_counter_certified_auto_affine_cells(stats)
-                auto_saved_before = _get_counter_certified_auto_area_saved(stats)
-                auto_flat_area_before = _get_counter_affine_area_constant_equiv(stats)
-                n_cells_bounded = construct_signed_inflated_grid!(
+                                                n_cells_bounded = construct_rate_bound_grid!(
                     alg.affine_bound, pcb, state, flow, grad_and_hvp, alg.curvature_bound;
                     early_stop_threshold=cumulative_exp,
                     state_cache=state_,
                     stats,
                     max_time=effective_horizon,
-                    certification=alg.certification,
-                    build_affine=use_affine,
-                    affine_area_threshold=alg.inflated_affine_threshold,
-                    affine_min_area_gain=alg.inflated_affine_min_area_gain,
-                    certified_auto=_certified_auto_envelope(alg.envelope),
+                    build_affine=use_linear,
+                    linear_area_threshold=alg.linear_area_threshold,
+                    linear_min_area_gain=alg.linear_min_area_gain,
+                    auto=_auto_policy(alg.bound),
                     max_componentwise_affine_segments_per_cell=
                         alg.max_componentwise_affine_segments_per_cell,
                     rate_value_buf=alg.rate_value_buf,
@@ -2981,31 +1796,26 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                     initial_integral=built_area,
                     append=true,
                 )
-                _record_certified_auto_grid_choice!(
-                    stats, alg, auto_flat_before, auto_affine_before, auto_saved_before, auto_flat_area_before, false)
             else
                 n_cells_bounded = construct_upper_bound_grad_and_hess!(pcb, state, flow, grad_and_hvp, false;
                     early_stop_threshold=cumulative_exp, stats, state_cache=state_,
                     max_time=effective_horizon, probe_failure_handler,
                     start_cell, initial_integral=built_area)
             end
-            if use_affine && !use_single_pass_signed
-                if alg.envelope === :inflated_linear
-                    construct_signed_rate_grid!(pcb, state, flow, grad_and_hvp, n_cells_bounded;
+            if use_linear && !use_single_pass_signed
+                if alg.bound === :linear
+                    construct_rate_grid!(pcb, state, flow, grad_and_hvp, n_cells_bounded;
                         state_cache=state_, stats)
-                    build_signed_inflated_affine_bound!(alg.affine_bound, pcb, n_cells_bounded, state, flow, alg.curvature_bound, stats;
-                        certification=alg.certification,
-                        affine_area_threshold=alg.inflated_affine_threshold,
-                        affine_min_area_gain=alg.inflated_affine_min_area_gain)
+                    build_rate_linear_bound!(alg.affine_bound, pcb, n_cells_bounded, state, flow, alg.curvature_bound, stats;
+                        linear_area_threshold=alg.linear_area_threshold,
+                        linear_min_area_gain=alg.linear_min_area_gain)
                 else
                     build_hybrid_affine_bound!(alg.affine_bound, pcb, n_cells_bounded, stats)
                 end
             end
             _record_grid_schedule!(stats, alg)
-            built_area = _grid_built_area(pcb, alg.affine_bound, use_affine)
+            built_area = _grid_built_area(pcb, alg.affine_bound, use_linear)
             _record_budget_grid_build!(stats, n_cells_bounded, built_area, cumulative_exp, true)
-            alg.certified_auto_current_grid_extensions[] += 1
-            alg.certified_auto_current_grid_extensions[] > 2 && _force_certified_auto_affine_next!(stats, alg)
         end
         if rejection_count >= max_rejections
             # Too many rejections.  Do not restart the dominating process at
@@ -3268,7 +2078,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             _inc_counter_lazy_fallback_bound_violation(stats)
             _inc_counter_grid_bound_violations(stats)
             if alg.bound_violation === :throw
-                throw(ErrorException("lazy constant GridThinning envelope violated at proposal time"))
+                throw(ErrorException("lazy constant GridThinning bound violated at proposal time"))
             elseif alg.bound_violation === :shrink
                 _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 alg.lazy_enabled[] = false

@@ -58,6 +58,8 @@ include("support_boundary.jl")
 # Algorithms
 include("poisson_time_strategies/interface.jl")
 include("poisson_time_strategies/piecewise_affine_bound.jl")
+include("poisson_time_strategies/rate_derivatives.jl")
+include("poisson_time_strategies/grid_bounds.jl")
 include("poisson_time_strategies/gridthinning.jl")
 include("poisson_time_strategies/thinning.jl")
 include("poisson_time_strategies/sticky.jl")

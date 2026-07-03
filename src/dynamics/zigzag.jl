@@ -73,7 +73,7 @@ function move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag)
     ξ.x .+= τ .* ξ.θ
 end
 
-function rate_values_and_derivatives_for_grid!(
+function rate_derivatives_for_grid!(
     values::AbstractMatrix,
     derivatives::AbstractMatrix,
     (grad, hvp)::Tuple{G,H},

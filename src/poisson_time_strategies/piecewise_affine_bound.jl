@@ -1,7 +1,7 @@
 """
     PiecewiseAffineBound{T}
 
-Reusable internal representation of a nonnegative piecewise-affine envelope.
+Reusable internal representation of a nonnegative piecewise-affine bound.
 
 Each active segment `j` is represented on `[t_breaks[j], t_breaks[j+1]]`
 as
@@ -10,9 +10,9 @@ as
 q_j(u) = y_left[j] + slopes[j] * u,  u = t - t_breaks[j].
 ```
 
-`cum_area` stores the exact integrated envelope at the break points. This
+`cum_area` stores the exact integrated bound at the break points. This
 type is intentionally independent of PDMP state movement; GridThinning can
-later use it as a proposal envelope.
+later use it as a proposal bound.
 """
 mutable struct PiecewiseAffineBound{T<:Real}
     t_breaks::Vector{T}
