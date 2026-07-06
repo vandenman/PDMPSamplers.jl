@@ -131,7 +131,7 @@ function neg_partial(t::MvTDistTarget, x::AbstractVector, i::Integer)
     return (t.scalar_coeff / denominator) * t.mahal_num[i]
 end
 
-function gen_data(::Type{Distributions.AbstractMvTDist}, d, η,
+function gen_data(::Type{<:Distributions.AbstractMvTDist}, d, η,
                   μ = rand(Normal(0, 5), d),
                   σs = rand(LogNormal(0, 1), d);
                   ν=20.0)
