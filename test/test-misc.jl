@@ -4,6 +4,8 @@ import ADTypes
 import DifferentiationInterface as DI
 import ForwardDiff
 
+struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
+
 @testset "Miscellaneous" begin
 
     @testset "HVP sign for FullGradient path" begin
@@ -112,6 +114,61 @@ import ForwardDiff
 
     @testset "Sticky constructor error for bare Function κ" begin
         @test_throws ArgumentError Sticky(GridThinningStrategy(), (i, x, γ, θ) -> 1.0)
+    end
+
+    @testset "Statistic counter composition and defaults" begin
+        c1 = PDMPSamplers.GridThinningCounter()
+        c2 = PDMPSamplers.GridThinningCounter()
+        auto1 = PDMPSamplers.CertifiedAutoCounter()
+        auto2 = PDMPSamplers.CertifiedAutoCounter()
+        basic = PDMPSamplers.BasicEventCounter()
+        multi = PDMPSamplers.MultiCounter((c1, c2))
+        auto_multi = PDMPSamplers.MultiCounter((auto1, auto2))
+        noop = TestNoopCounter()
+
+        @test basic.last_rejected == false
+        phase = PDMPSamplers.PhaseSummaryCounter()
+        @test phase.stop_reason === :none
+        @test PDMPSamplers._get_counter_grid_acceptance_tests(noop) == 0
+        @test PDMPSamplers._get_counter_auto_area_saved(noop) == 0.0
+        @test !PDMPSamplers._get_counter_last_rejected(noop)
+
+        PDMPSamplers._inc_counter_grid_acceptance_tests(c1)
+        PDMPSamplers._inc_counter_grid_acceptance_tests(c2)
+        PDMPSamplers._inc_counter_grid_acceptance_tests(c2)
+        @test PDMPSamplers._get_counter_grid_acceptance_tests(multi) == 3
+
+        PDMPSamplers._inc_counter_auto_area_saved(auto1, 0.25)
+        PDMPSamplers._inc_counter_auto_area_saved(auto2, 0.5)
+        @test PDMPSamplers._get_counter_auto_area_saved(auto_multi) == 0.75
+
+        PDMPSamplers._set_counter_last_rejected(basic, true)
+        @test PDMPSamplers._get_counter_last_rejected(PDMPSamplers.MultiCounter((c1, basic)))
+        @test multi.grid_acceptance_tests == 1
+        multi.grid_acceptance_tests = 7
+        @test c1.grid_acceptance_tests == 7
+
+        @test_throws ErrorException multi.not_a_counter_field
+        @test_throws ErrorException setproperty!(multi, :not_a_counter_field, 1)
+
+        monitor = PDMPSamplers.HealthMonitor(; consecutive_reject_limit=1)
+        PDMPSamplers.check_health!(monitor, basic)
+        @test_throws ErrorException PDMPSamplers.check_health!(monitor, basic)
+
+        @test PDMPSamplers._counter_struct_name(:MyCounter) === :MyCounter
+        @test PDMPSamplers._counter_struct_name(:(MyCounter <: PDMPSamplers.AbstractStatisticCounter)) === :MyCounter
+        @test PDMPSamplers._counter_struct_name(:(MyCounter{T})) === :MyCounter
+        @test_throws ErrorException PDMPSamplers._counter_struct_name(1)
+
+        component = PDMPSamplers.ComponentwiseAffineCounter()
+        PDMPSamplers._record_counter_componentwise_cell_diagnostics!(
+            component, 3, 2, 1, 0.75, 0.25)
+        @test component.componentwise_proposed_breakpoints_per_cell == [3.0]
+        @test component.componentwise_segments_per_cell == [2.0]
+        @test component.componentwise_zero_crossings_per_cell == [1.0]
+        @test component.componentwise_area_saved_per_cell == [0.75]
+        @test component.componentwise_area_saved_fraction_per_cell == [0.25]
+        @test isnothing(PDMPSamplers._record_counter_componentwise_cell_diagnostics!(nothing, 1, 2, 3))
     end
 
     # @testset "PreconditionedDynamics with warmup adaptation" begin

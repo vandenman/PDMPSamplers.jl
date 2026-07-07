@@ -82,6 +82,31 @@ end
         @test length(pcb.Λ_vals) == 10
     end
 
+    @testset "legacy grid upper bound error path and safety errors" begin
+        flow = BouncyParticle(1, 0.0)
+        ξ = SkeletonPoint([0.25], [1.0])
+        grad!(out, x) = (out[1] = x[1]; out)
+
+        @test_throws ErrorException PDMPSamplers.construct_upper_bound!(
+            PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], zeros(1)),
+            ξ, flow, grad!, false)
+
+        model = PDMPModel(1, FullGradient(grad!))
+        err = try
+            PDMPSamplers._throw_grid_safety_limit_error(
+                PDMPState(0.0, ξ), flow, model;
+                t_invalid=0.0,
+                message="Safety limit reached in test")
+        catch err
+            err
+        end
+        @test err isa PDMPSamplers._GridSafetyLimitException
+        @test err.ctx.t_invalid == eps(Float64)
+        @test err.ctx.original_error.msg == "Safety limit reached in test"
+        @test err.ctx.flow_type === typeof(flow)
+        @test err.ctx.algorithm_type === GridThinningStrategy
+    end
+
     @testset "propose_event_time" begin
         t_grid = [0.0, 1.0, 2.0, 3.0]
         Λ_vals = [2.0, 3.0, 1.0]
@@ -175,6 +200,32 @@ end
         @test lb4 == 0.0
     end
 
+    @testset "PiecewiseAffineBound constructors and inverse errors" begin
+        pab = PDMPSamplers.PiecewiseAffineBound([0.0, 1.0, 3.0], [1.0, 2.0], [0.0, -0.5])
+        @test pab.n_segments == 2
+        @test pab(0.5) ≈ 1.0
+        @test pab(2.0) ≈ 1.5
+        @test PDMPSamplers.total_area(pab) ≈ 1.0 + 3.0
+
+        @test_throws ArgumentError PDMPSamplers.PiecewiseAffineBound([0.0, 1.0], [1.0], [0.0, 1.0])
+        @test_throws ArgumentError PDMPSamplers.PiecewiseAffineBound([0.0, 1.0, 2.0], [1.0], [0.0])
+
+        empty = PDMPSamplers.PiecewiseAffineBound(0)
+        empty.cum_area = Float64[]
+        PDMPSamplers.reset_affine_bound!(empty)
+        @test empty.n_segments == 0
+        @test empty.cum_area == [0.0]
+
+        @test_throws ArgumentError PDMPSamplers._invert_affine_segment(0.0, 0.0, 1.0, 0.1)
+        @test_throws ArgumentError PDMPSamplers._invert_affine_segment(1.0, 0.0, 1.0, 1.1)
+        @test_throws ArgumentError PDMPSamplers._invert_affine_segment(0.1, -10.0, 1.0, 0.001)
+
+        τ0, lb0 = PDMPSamplers.propose_event_time(pab, 0.0)
+        @test τ0 == 0.0
+        @test lb0 == pab(0.0)
+        @test_throws ArgumentError PDMPSamplers.propose_event_time(pab, -0.1)
+    end
+
     @testset "PiecewiseAffineBound rejects invalid segments" begin
         pab = PDMPSamplers.PiecewiseAffineBound(1)
         @test_throws ArgumentError PDMPSamplers.append_affine_segment!(pab, 0.0, 0.0, 1.0, 0.0)
@@ -228,6 +279,48 @@ end
         @test stats.affine_constant_cells == 1
         @test pab(0.5) == 2.0
         @test PDMPSamplers.total_area(pab) == 2.0
+    end
+
+    @testset "Grid bound normalization and curvature matrix helpers" begin
+        @test PDMPSamplers._normalize_grid_bound(nothing) === :constant
+        @test PDMPSamplers._normalize_grid_bound(:flat) === :flat
+        @test PDMPSamplers._normalize_grid_bound(:linear) === :linear
+        @test PDMPSamplers._normalize_grid_bound(:auto) === :auto
+        @test PDMPSamplers._normalize_grid_bound(:sticky_auto) === :sticky_auto
+        @test_throws ArgumentError PDMPSamplers._normalize_grid_bound(:bogus)
+
+        strat = GridThinningStrategy(; N=3, N_min=1, t_max=2.0, bound=:linear,
+            linear_area_threshold=0.8, linear_min_area_gain=0.1)
+        shown = sprint(show, strat)
+        @test occursin("GridThinningStrategy", shown)
+        @test occursin("bound=linear", shown)
+        @test occursin("linear_area_threshold=0.8", shown)
+
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        t_grid = [0.0, 0.5, 1.0]
+        stats = PDMPSamplers.DevelStatisticCounter()
+        L_none = PDMPSamplers._channel_curvature_matrix(nothing, state, flow, t_grid, 2, 2, stats)
+        @test L_none == zeros(2, 2)
+        @test stats.grid_certificate_fallbacks == 4
+
+        L_real = PDMPSamplers._channel_curvature_matrix(1.25, state, flow, t_grid, 2, 2, nothing)
+        @test L_real == fill(1.25, 2, 2)
+
+        calls = Ref(0)
+        cert = (state, flow, a, b) -> begin
+            calls[] += 1
+            calls[] == 1 ? 2.0 : 3.0
+        end
+        stats2 = PDMPSamplers.DevelStatisticCounter()
+        L_callable = PDMPSamplers._channel_curvature_matrix(cert, state, flow, t_grid, 2, 2, stats2)
+        @test L_callable == [2.0 3.0; 2.0 3.0]
+        @test calls[] == 2
+        @test stats2.grid_certificate_calls == 2
+
+        prepared = (global_value=nothing, first_value=nothing, has_first=false, cell_values=[4.0, 5.0])
+        @test PDMPSamplers._prepared_or_cell_curvature_value(
+            prepared, 2, cert, state, flow, 0.5, 1.0, nothing) == 5.0
     end
 
     @testset "inflated affine builder uses bounded curvature bound" begin
