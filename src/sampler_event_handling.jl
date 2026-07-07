@@ -65,7 +65,7 @@ function _handle_global_event_impl!(
     cache,
     event_type::Symbol,
     meta,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     wrap_boundary::Bool,
 )
     move_forward_time!(state, τ, flow)
@@ -73,13 +73,13 @@ function _handle_global_event_impl!(
 
     needs_saving = false
     saving_args = nothing
-    stats.last_rejected = false
+    _set_counter_last_rejected(stats, false)
 
     if event_type == :reflect
-        stats.reflections_events += 1
+        _inc_counter_reflections_events(stats)
 
         if alg isa ExactStrategy
-            stats.reflections_accepted += 1
+            _inc_counter_reflections_accepted(stats)
 
             if flow isa ZigZag
                 i = meta.i
@@ -94,23 +94,23 @@ function _handle_global_event_impl!(
             ∇ϕx = _compute_reflection_gradient!(state, gradient_strategy, flow, cache, meta, alg, τ, wrap_boundary)
 
             if accept_reflection_event(rng, alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
-                stats.reflections_accepted += 1
+                _inc_counter_reflections_accepted(stats)
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
                 needs_saving = true
                 (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
             else
-                stats.last_rejected = true
+                _set_counter_last_rejected(stats, true)
             end
         end
 
     elseif event_type == :refresh
         refresh_velocity!(rng, state, flow)
         needs_saving = true
-        stats.refreshment_events += 1
+        _inc_counter_refreshment_events(stats)
         (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
-        stats.sticky_events += 1
+        _inc_counter_sticky_events(stats)
         i = meta.i
         stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
         validate_state(state, flow, "after stick_or_unstick!")
@@ -121,18 +121,18 @@ function _handle_global_event_impl!(
 
     elseif event_type == :horizon_hit
         (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
-        stats.last_rejected = true
+        _set_counter_last_rejected(stats, true)
     end
 
     _check_sticky_times!(alg, state)
     return needs_saving, saving_args
 end
 
-function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::StatisticCounter)
+function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::AbstractStatisticCounter)
     return _handle_global_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, event_type, meta, stats, false)
 end
 
-function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::StatisticCounter)
+function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::AbstractStatisticCounter)
     return _handle_global_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, event_type, meta, stats, true)
 end
 
@@ -160,10 +160,10 @@ function _handle_coordinatewise_event_impl!(
     state::PDMPState,
     cache,
     meta,
-    stats::StatisticCounter,
+    stats::AbstractStatisticCounter,
     wrap_boundary::Bool,
 )
-    stats.last_rejected = false
+    _set_counter_last_rejected(stats, false)
     pq = cache.pq
     i₀ = meta.i
     ξ = state.ξ
@@ -183,7 +183,7 @@ function _handle_coordinatewise_event_impl!(
     l_i₀ = λ_i(i₀, ξ, ∇ϕ_i₀, flow)
     l_bound_i₀ = pos(abc_i₀_old[1] + abc_i₀_old[2] * τ)
 
-    stats.reflections_events += 1
+    _inc_counter_reflections_events(stats)
 
     needs_saving = false
     saving_args = nothing
@@ -195,7 +195,7 @@ function _handle_coordinatewise_event_impl!(
 
         saving_args = reflect!(state, ∇ϕ_i₀, i₀, flow)
         needs_saving = true
-        stats.reflections_accepted += 1
+        _inc_counter_reflections_accepted(stats)
 
         empty!(pq)
         for i in eachindex(ξ.x)
@@ -207,16 +207,16 @@ function _handle_coordinatewise_event_impl!(
         abc_i₀_new = ab_i(i₀, ξ, alg, flow, nothing)
         t_event = state.t[] + poisson_time(abc_i₀_new[1], abc_i₀_new[2], rand(rng))
         push!(pq, i₀ => t_event)
-        stats.last_rejected = true
+        _set_counter_last_rejected(stats, true)
     end
 
     return needs_saving, saving_args
 end
 
-function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::StatisticCounter)
+function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter)
     return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, false)
 end
 
-function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::StatisticCounter)
+function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter)
     return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, true)
 end

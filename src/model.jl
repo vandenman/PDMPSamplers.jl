@@ -71,7 +71,9 @@ const GlobalGradientModel{H} = PDMPModel{<:GlobalGradientStrategy,H}
 const CoordinateWiseGradientModel{H} = PDMPModel{<:CoordinateWiseGradientStrategy,H}
 
 function PDMPModel(f::Function, args...; kwargs...)
-    throw(ArgumentError("PDMPModel(f::Function, args..; kwargs...) is intentionally not implemented because it's unclear if this is a log density or gradient. Use PDMPModel(LogDensity(f), args..; kwargs...) or PDMPModel(FullGradient(f), args..; kwargs...) instead."))
+    msg = "PDMPModel(f::Function, args..; kwargs...) is intentionally not implemented because it's unclear if this is a log density or gradient. " *
+        "Use PDMPModel(LogDensity(f), args..; kwargs...) or PDMPModel(FullGradient(f), args..; kwargs...) instead."
+    throw(ArgumentError(msg))
 end
 
 PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true, true)
@@ -161,7 +163,7 @@ function PDMPModel(d::Integer, ldf::LogDensity, backend::ADTypes.AbstractADType=
     return PDMPModel(d, FullGradient(grad_f), hvp_f, vhv_f, false, false, joint_f)
 end
 
-function with_stats(model::PDMPModel, stats::StatisticCounter)
+function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
     grad_new = with_stats(model.grad, stats)
     hvp_new = model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
     vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
@@ -173,29 +175,32 @@ struct InplaceHVP{F, O<:AbstractVector} <: Function
     f::F
     out::O
 end
-(h::InplaceHVP)(x::AbstractVector, v::AbstractVector) = h.f(h.out, x, v)
+function (h::InplaceHVP)(x::AbstractVector, v::AbstractVector)
+    h.f(h.out, x, v)
+    return h.out
+end
 _copy_callable(h::InplaceHVP) = InplaceHVP(_copy_callable(h.f), copy(h.out))
 
 struct WithStatsHVP{F,S} <: Function
     f::F
     stats::S
 end
-(ws::WithStatsHVP)(x::AbstractVector, v::AbstractVector) = (ws.stats.∇²f_calls += 1; ws.f(x, v))
-(ws::WithStatsHVP)(args...) = (ws.stats.∇²f_calls += 1; ws.f(args...))
+(ws::WithStatsHVP)(x::AbstractVector, v::AbstractVector) = (_inc_counter_∇²f_calls(ws.stats); ws.f(x, v))
+(ws::WithStatsHVP)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
 
 struct WithStatsVHV{F,S} <: Function
     f::F
     stats::S
 end
-(ws::WithStatsVHV)(x::AbstractVector, v::AbstractVector, w::AbstractVector) = (ws.stats.∇²f_calls += 1; ws.f(x, v, w))
-(ws::WithStatsVHV)(args...) = (ws.stats.∇²f_calls += 1; ws.f(args...))
+(ws::WithStatsVHV)(x::AbstractVector, v::AbstractVector, w::AbstractVector) = (_inc_counter_∇²f_calls(ws.stats); ws.f(x, v, w))
+(ws::WithStatsVHV)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
 
 struct WithStatsJoint{F,S} <: Function
     f::F
     stats::S
 end
 function (ws::WithStatsJoint)(x::AbstractVector, v::AbstractVector)
-    ws.stats.∇²f_calls += 1
+    _inc_counter_∇²f_calls(ws.stats)
     ws.f(x, v)
 end
 

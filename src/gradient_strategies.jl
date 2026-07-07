@@ -52,20 +52,20 @@ end
 
 Base.copy(g::CoordinateWiseGradient) = CoordinateWiseGradient(_copy_callable(g.f))
 
-with_stats(grad::FullGradient,       stats::StatisticCounter) = FullGradient(with_stats(grad.f, stats))
-function with_stats(grad::SubsampledGradient, stats::StatisticCounter)
+with_stats(grad::FullGradient,       stats::AbstractStatisticCounter) = FullGradient(with_stats(grad.f, stats))
+function with_stats(grad::SubsampledGradient, stats::AbstractStatisticCounter)
     SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.full, grad.nsub,
                        grad.no_anchor_updates, grad.use_full_gradient_for_reflections, grad.resample_dt)
 end
-with_stats(grad::CoordinateWiseGradient, stats::StatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))
+with_stats(grad::CoordinateWiseGradient, stats::AbstractStatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))
 
-with_stats(f, stats::StatisticCounter) = WithStats(f, stats)
+with_stats(f, stats::AbstractStatisticCounter) = WithStats(f, stats)
 
 struct WithStats{F,S} <: Function
     f::F
     stats::S
 end
-(ws::WithStats)(args...) = (ws.stats.∇f_calls += 1; ws.f(args...))
+(ws::WithStats)(args...) = (_inc_counter_∇f_calls(ws.stats); ws.f(args...))
 
 
 # struct ControlVariateGradient{F} <: GradientStrategy

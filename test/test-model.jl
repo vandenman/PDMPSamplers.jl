@@ -46,6 +46,9 @@ import ForwardDiff
         @test model_fg_hvp.hvp isa Function
         hvp_result2 = model_fg_hvp.hvp(x_test, [0.0, 1.0])
         @test hvp_result2 isa AbstractVector
+
+        err = @test_throws ArgumentError PDMPModel(x -> -sum(abs2, x))
+        @test occursin("Use PDMPModel(LogDensity(f)", err.value.msg)
     end
 
     @testset "LogDensity + HVP" begin
@@ -74,6 +77,17 @@ import ForwardDiff
         @test dphi2 ≈ dphi
         @test d2phi2 ≈ d2phi
         @test stats.∇²f_calls == 1
+    end
+
+    @testset "WithStats vararg HVP and VHV wrappers" begin
+        stats = PDMPSamplers.StatisticCounter()
+        hvp = PDMPSamplers.WithStatsHVP((args...) -> length(args), stats)
+        vhv = PDMPSamplers.WithStatsVHV((args...) -> sum(length, args), stats)
+
+        @test hvp(:x, :v, :extra) == 3
+        @test stats.∇²f_calls == 1
+        @test vhv([1.0], [2.0], [3.0], [4.0]) == 4
+        @test stats.∇²f_calls == 2
     end
 
     @testset "SkeletonPoint copyto!" begin

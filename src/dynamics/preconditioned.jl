@@ -117,6 +117,24 @@ move_forward_time!(state::AbstractPDMPState, τ, pd::PreconditionedDynamics) = m
 # 2. Event Rates (Dot products are invariant)
 λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics) = λ(ξ, ∇ϕ, pd.dynamics)
 
+function rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+    provider,
+    args...,
+)
+    return rate_and_derivative(state, flow.dynamics, provider, args...)
+end
+
+function rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+    provider,
+    cached_gradient::AbstractVector,
+)
+    return rate_and_derivative(state, flow.dynamics, provider, cached_gradient)
+end
+
 # 3. Reflection Logic (Mirroring is invariant)
 reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, ξ, ∇ϕ, pd.dynamics, cache)
 reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, state, ∇ϕ, pd.dynamics, cache)
@@ -178,6 +196,80 @@ end
 
 const DensePreconditionedZigZag = PreconditionedDynamics{DensePreconditioner, <:ZigZag}
 const DensePreconditionedBPS = PreconditionedDynamics{DensePreconditioner, <:BouncyParticle}
+
+function rate_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    provider::Union{Tuple,GradHVPProvider},
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
+    t_grid::AbstractVector,
+    n_points::Integer,
+)
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    n_channels = length(θ)
+    size(values, 1) >= n_channels && size(values, 2) >= n_points ||
+        throw(ArgumentError("values matrix is too small"))
+    size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
+        throw(ArgumentError("derivatives matrix is too small"))
+    grad = _provider_grad(provider)
+    hvp = _provider_hvp(provider)
+    for k in 1:n_points
+        x = @view derivatives[:, k]
+        @inbounds for j in 1:n_channels
+            x[j] = x0[j] + t_grid[k] * θ[j]
+        end
+        ∇U = grad(x)
+        Hθ = hvp(x, θ)
+        value_col = @view values[:, k]
+        derivative_col = @view derivatives[:, k]
+        for j in 1:n_channels
+            value_col[j] = θ[j] * ∇U[j]
+            derivative_col[j] = θ[j] * Hθ[j]
+        end
+    end
+    return values, derivatives
+end
+
+function rate_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    provider::Union{Tuple,GradHVPProvider},
+    state::AbstractPDMPState,
+    flow::DensePreconditionedZigZag,
+    t_grid::AbstractVector,
+    n_points::Integer,
+)
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    L = flow.metric.L
+    v = flow.metric.v_canonical
+    n_channels = length(v)
+    size(values, 1) >= n_channels && size(values, 2) >= n_points ||
+        throw(ArgumentError("values matrix is too small"))
+    size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
+        throw(ArgumentError("derivatives matrix is too small"))
+    grad = _provider_grad(provider)
+    hvp = _provider_hvp(provider)
+    for k in 1:n_points
+        x = @view derivatives[:, k]
+        @inbounds for j in 1:n_channels
+            x[j] = x0[j] + t_grid[k] * θ[j]
+        end
+        ∇U = grad(x)
+        Hθ = hvp(x, θ)
+        grad_z = @view values[:, k]
+        hθ_z = @view derivatives[:, k]
+        mul!(grad_z, L', ∇U)
+        mul!(hθ_z, L', Hθ)
+        for j in 1:n_channels
+            grad_z[j] = v[j] * grad_z[j]
+            hθ_z[j] = v[j] * hθ_z[j]
+        end
+    end
+    return values, derivatives
+end
 
 function λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::DensePreconditionedZigZag)
     M = pd.metric

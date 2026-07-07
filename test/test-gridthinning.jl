@@ -2,6 +2,62 @@
 
 import DifferentiationInterface as DI
 
+struct TestCellBound
+    calls::Base.RefValue{Int}
+end
+
+function (cert::TestCellBound)(state, flow, a, b)
+    cert.calls[] += 1
+    return 0.0
+end
+
+struct TestGridRateDerivatives
+    calls::Base.RefValue{Int}
+end
+
+function PDMPSamplers.rate_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    provider::TestGridRateDerivatives,
+    state::PDMPSamplers.AbstractPDMPState,
+    flow::PDMPSamplers.ContinuousDynamics,
+    t_grid::AbstractVector,
+    n_points::Integer,
+)
+    provider.calls[] += 1
+    for i in 1:n_points
+        values[1, i] = -0.5 + t_grid[i]
+        derivatives[1, i] = 1.0
+    end
+    return values, derivatives
+end
+
+struct TestBoomerangLogisticBound
+    X::Matrix{Float64}
+end
+
+function (cert::TestBoomerangLogisticBound)(state, flow, a, b)
+    y = state.ξ.x .- flow.μ
+    cubic_sum = 0.0
+    quadratic_sum = 0.0
+    linear_sum = 0.0
+    @inbounds for i in axes(cert.X, 1)
+        α = 0.0
+        β = 0.0
+        for j in axes(cert.X, 2)
+            xij = cert.X[i, j]
+            α += xij * y[j]
+            β += xij * state.ξ.θ[j]
+        end
+        r = hypot(α, β)
+        cubic_sum += r^3
+        quadratic_sum += r^2
+        linear_sum += r
+    end
+    L = cubic_sum / (6sqrt(3.0)) + (3 / 8) * quadratic_sum + linear_sum
+    return L
+end
+
 @testset "Grid thinning" begin
 
     @testset "PiecewiseConstantBound functor" begin
@@ -24,6 +80,31 @@ import DifferentiationInterface as DI
         @test pcb.t_grid[1] ≈ 0.0
         @test pcb.t_grid[end] ≈ 5.0
         @test length(pcb.Λ_vals) == 10
+    end
+
+    @testset "legacy grid upper bound error path and safety errors" begin
+        flow = BouncyParticle(1, 0.0)
+        ξ = SkeletonPoint([0.25], [1.0])
+        grad!(out, x) = (out[1] = x[1]; out)
+
+        @test_throws ErrorException PDMPSamplers.construct_upper_bound!(
+            PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], zeros(1)),
+            ξ, flow, grad!, false)
+
+        model = PDMPModel(1, FullGradient(grad!))
+        err = try
+            PDMPSamplers._throw_grid_safety_limit_error(
+                PDMPState(0.0, ξ), flow, model;
+                t_invalid=0.0,
+                message="Safety limit reached in test")
+        catch err
+            err
+        end
+        @test err isa PDMPSamplers._GridSafetyLimitException
+        @test err.ctx.t_invalid == eps(Float64)
+        @test err.ctx.original_error.msg == "Safety limit reached in test"
+        @test err.ctx.flow_type === typeof(flow)
+        @test err.ctx.algorithm_type === GridThinningStrategy
     end
 
     @testset "propose_event_time" begin
@@ -51,6 +132,1212 @@ import DifferentiationInterface as DI
         τ4, lb4 = PDMPSamplers.propose_event_time(pcb_zero, 0.25, 1.0)
         @test τ4 ≈ 0.25 / 1.0 atol=1e-14
         @test lb4 ≈ 1.0
+    end
+
+    @testset "PiecewiseAffineBound mechanics" begin
+        pab = PDMPSamplers.PiecewiseAffineBound(2)
+        PDMPSamplers.append_affine_segment!(pab, 0.0, 1.0, 1.0, 2.0)
+        PDMPSamplers.append_affine_segment!(pab, 1.0, 3.0, 3.0, -1.0)
+
+        @test pab.n_segments == 2
+        @test PDMPSamplers.total_area(pab) ≈ (1.0 * 1.0 + 0.5 * 2.0 * 1.0^2) +
+                                               (3.0 * 2.0 + 0.5 * -1.0 * 2.0^2)
+        @test pab(0.0) ≈ 1.0
+        @test pab(0.5) ≈ 2.0
+        @test pab(1.0) ≈ 3.0
+        @test pab(2.0) ≈ 2.0
+        @test pab(3.0) ≈ 1.0
+        @test pab(-0.1) == 0.0
+        @test pab(3.1) == 0.0
+
+        PDMPSamplers.reset_affine_bound!(pab)
+        @test pab.n_segments == 0
+        @test PDMPSamplers.total_area(pab) == 0.0
+    end
+
+    @testset "PiecewiseAffineBound inverse integrated hazard" begin
+        cases = (
+            (2.0, 0.0, 3.0),
+            (0.0, 2.0, 3.0),
+            (3.0, -1.0, 3.0),
+            (1.0, 1e-12, 2.0),
+            (1.0, -1e-12, 2.0),
+        )
+
+        for (α, β, h) in cases
+            full_area = PDMPSamplers._affine_segment_area(α, β, h)
+            @test full_area >= 0
+            for p in (0.0, 1e-12, 0.1, 0.5, 0.9, 1.0 - 1e-12, 1.0)
+                r = p * full_area
+                u = PDMPSamplers._invert_affine_segment(α, β, h, r)
+                @test 0.0 <= u <= h
+                @test PDMPSamplers._affine_segment_area(α, β, u) ≈ r rtol=1e-10 atol=1e-10
+            end
+        end
+    end
+
+    @testset "PiecewiseAffineBound proposal and zero-area segments" begin
+        pab = PDMPSamplers.PiecewiseAffineBound(3)
+        PDMPSamplers.append_affine_segment!(pab, 0.0, 1.0, 0.0, 0.0)
+        PDMPSamplers.append_affine_segment!(pab, 1.0, 2.0, 2.0, 0.0)
+        PDMPSamplers.append_affine_segment!(pab, 2.0, 3.0, 2.0, -1.0)
+
+        τ, lb = PDMPSamplers.propose_event_time(pab, 1.0)
+        @test τ ≈ 1.5
+        @test lb ≈ 2.0
+
+        τ2, lb2 = PDMPSamplers.propose_event_time(pab, 2.5)
+        @test 2.0 < τ2 < 3.0
+        @test lb2 ≈ pab(τ2)
+
+        τ3, lb3 = PDMPSamplers.propose_event_time(pab, PDMPSamplers.total_area(pab))
+        @test isinf(τ3)
+        @test lb3 == 0.0
+
+        empty = PDMPSamplers.PiecewiseAffineBound()
+        τ4, lb4 = PDMPSamplers.propose_event_time(empty, 0.1)
+        @test isinf(τ4)
+        @test lb4 == 0.0
+    end
+
+    @testset "PiecewiseAffineBound constructors and inverse errors" begin
+        pab = PDMPSamplers.PiecewiseAffineBound([0.0, 1.0, 3.0], [1.0, 2.0], [0.0, -0.5])
+        @test pab.n_segments == 2
+        @test pab(0.5) ≈ 1.0
+        @test pab(2.0) ≈ 1.5
+        @test PDMPSamplers.total_area(pab) ≈ 1.0 + 3.0
+
+        @test_throws ArgumentError PDMPSamplers.PiecewiseAffineBound([0.0, 1.0], [1.0], [0.0, 1.0])
+        @test_throws ArgumentError PDMPSamplers.PiecewiseAffineBound([0.0, 1.0, 2.0], [1.0], [0.0])
+
+        empty = PDMPSamplers.PiecewiseAffineBound(0)
+        empty.cum_area = Float64[]
+        PDMPSamplers.reset_affine_bound!(empty)
+        @test empty.n_segments == 0
+        @test empty.cum_area == [0.0]
+
+        @test_throws ArgumentError PDMPSamplers._invert_affine_segment(0.0, 0.0, 1.0, 0.1)
+        @test_throws ArgumentError PDMPSamplers._invert_affine_segment(1.0, 0.0, 1.0, 1.1)
+        @test_throws ArgumentError PDMPSamplers._invert_affine_segment(0.1, -10.0, 1.0, 0.001)
+
+        τ0, lb0 = PDMPSamplers.propose_event_time(pab, 0.0)
+        @test τ0 == 0.0
+        @test lb0 == pab(0.0)
+        @test_throws ArgumentError PDMPSamplers.propose_event_time(pab, -0.1)
+    end
+
+    @testset "PiecewiseAffineBound rejects invalid segments" begin
+        pab = PDMPSamplers.PiecewiseAffineBound(1)
+        @test_throws ArgumentError PDMPSamplers.append_affine_segment!(pab, 0.0, 0.0, 1.0, 0.0)
+        @test_throws ArgumentError PDMPSamplers.append_affine_segment!(pab, 0.0, 1.0, -1.0, 0.0)
+        @test_throws ArgumentError PDMPSamplers.append_affine_segment!(pab, 0.0, 1.0, 1.0, -2.0)
+
+        PDMPSamplers.append_affine_segment!(pab, 0.0, 1.0, 1.0, 0.0)
+        @test_throws ArgumentError PDMPSamplers.append_affine_segment!(pab, 2.0, 3.0, 1.0, 0.0)
+    end
+
+    @testset "hybrid affine roof builder on concave maximum cell" begin
+        # λ(t) = 2 - 0.5(t - 1)^2 on [0, 2].
+        # Endpoint tangents intersect at the interior maximum.
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 2.0], [2.5])
+        pcb.y_vals[1] = 1.5
+        pcb.y_vals[2] = 1.5
+        pcb.d_vals[1] = 1.0
+        pcb.d_vals[2] = -1.0
+
+        pab = PDMPSamplers.PiecewiseAffineBound(2)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.build_hybrid_affine_bound!(pab, pcb, 1, stats)
+
+        @test pab.n_segments == 2
+        @test stats.affine_roof_cells == 1
+        @test stats.affine_constant_cells == 0
+        @test PDMPSamplers.total_area(pab) < 5.0
+        @test stats.affine_area_hybrid ≈ PDMPSamplers.total_area(pab)
+        @test stats.affine_area_constant_equiv ≈ 5.0
+
+        for t in range(0.0, 2.0; length=101)
+            λ_true = 2.0 - 0.5 * (t - 1.0)^2
+            @test λ_true <= pab(t) + 1e-12
+            @test pab(t) <= 2.5 + 1e-12
+        end
+    end
+
+    @testset "hybrid affine builder falls back for monotone cells" begin
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [2.0])
+        pcb.y_vals[1] = 1.0
+        pcb.y_vals[2] = 2.0
+        pcb.d_vals[1] = 1.0
+        pcb.d_vals[2] = 1.0
+
+        pab = PDMPSamplers.PiecewiseAffineBound(2)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.build_hybrid_affine_bound!(pab, pcb, 1, stats)
+
+        @test pab.n_segments == 1
+        @test stats.affine_roof_cells == 0
+        @test stats.affine_constant_cells == 1
+        @test pab(0.5) == 2.0
+        @test PDMPSamplers.total_area(pab) == 2.0
+    end
+
+    @testset "Grid bound normalization and curvature matrix helpers" begin
+        @test PDMPSamplers._normalize_grid_bound(nothing) === :constant
+        @test PDMPSamplers._normalize_grid_bound(:flat) === :flat
+        @test PDMPSamplers._normalize_grid_bound(:linear) === :linear
+        @test PDMPSamplers._normalize_grid_bound(:auto) === :auto
+        @test PDMPSamplers._normalize_grid_bound(:sticky_auto) === :sticky_auto
+        @test_throws ArgumentError PDMPSamplers._normalize_grid_bound(:bogus)
+
+        strat = GridThinningStrategy(; N=3, N_min=1, t_max=2.0, bound=:linear,
+            linear_area_threshold=0.8, linear_min_area_gain=0.1)
+        shown = sprint(show, strat)
+        @test occursin("GridThinningStrategy", shown)
+        @test occursin("bound=linear", shown)
+        @test occursin("linear_area_threshold=0.8", shown)
+
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        t_grid = [0.0, 0.5, 1.0]
+        stats = PDMPSamplers.DevelStatisticCounter()
+        L_none = PDMPSamplers._channel_curvature_matrix(nothing, state, flow, t_grid, 2, 2, stats)
+        @test L_none == zeros(2, 2)
+        @test stats.grid_certificate_fallbacks == 4
+
+        L_real = PDMPSamplers._channel_curvature_matrix(1.25, state, flow, t_grid, 2, 2, nothing)
+        @test L_real == fill(1.25, 2, 2)
+
+        calls = Ref(0)
+        cert = (state, flow, a, b) -> begin
+            calls[] += 1
+            calls[] == 1 ? 2.0 : 3.0
+        end
+        stats2 = PDMPSamplers.DevelStatisticCounter()
+        L_callable = PDMPSamplers._channel_curvature_matrix(cert, state, flow, t_grid, 2, 2, stats2)
+        @test L_callable == [2.0 3.0; 2.0 3.0]
+        @test calls[] == 2
+        @test stats2.grid_certificate_calls == 2
+
+        prepared = (global_value=nothing, first_value=nothing, has_first=false, cell_values=[4.0, 5.0])
+        @test PDMPSamplers._prepared_or_cell_curvature_value(
+            prepared, 2, cert, state, flow, 0.5, 1.0, nothing) == 5.0
+    end
+
+    @testset "inflated affine builder uses bounded curvature bound" begin
+        # λ(t) = 1 + t^2 on [0, 1] has λ'' = 2.  The bounded inflated
+        # bound from both endpoints is 1 + t, which dominates λ and is
+        # tighter than the constant cap 2.
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [2.0])
+        pcb.y_vals[1] = 1.0
+        pcb.y_vals[2] = 2.0
+        pcb.d_vals[1] = 0.0
+        pcb.d_vals[2] = 2.0
+
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pab = PDMPSamplers.PiecewiseAffineBound(2)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        cert = (state, flow, a, b) -> (2.0)
+        PDMPSamplers.build_linear_bound!(pab, pcb, 1, state, flow, cert, stats)
+
+        @test pab.n_segments == 1
+        @test stats.affine_inflated_cells == 1
+        @test stats.affine_constant_cells == 0
+        @test PDMPSamplers.total_area(pab) ≈ 1.5
+        for t in range(0.0, 1.0; length=21)
+            @test 1 + t^2 <= pab(t) + 1e-12
+            @test pab(t) ≈ 1 + t
+        end
+    end
+
+    @testset "inflated affine builder falls back at positive-part kinks" begin
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [1.0])
+        pcb.y_vals[1] = 0.0
+        pcb.y_vals[2] = 0.0
+        pcb.d_vals[1] = 0.0
+        pcb.d_vals[2] = 0.0
+
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pab = PDMPSamplers.PiecewiseAffineBound(2)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        cert = (state, flow, a, b) -> (2.0)
+        PDMPSamplers.build_linear_bound!(pab, pcb, 1, state, flow, cert, stats)
+
+        @test pab.n_segments == 1
+        @test stats.affine_inflated_cells == 0
+        @test stats.affine_constant_cells == 1
+        @test pab(0.5) == 1.0
+        @test PDMPSamplers.total_area(pab) == 1.0
+    end
+
+    @testset "signed inflated builder clips Gaussian zero crossing exactly" begin
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [1.0])
+        # Signed Gaussian BPS rate g(t) = x(t)v = -0.5 + t.
+        pcb.y_vals[1] = -0.5
+        pcb.y_vals[2] = 0.5
+        pcb.d_vals[1] = 1.0
+        pcb.d_vals[2] = 1.0
+
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pab = PDMPSamplers.PiecewiseAffineBound(4)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.build_rate_linear_bound!(
+            pab, pcb, 1, state, flow,
+            (state, flow, a, b) -> (0.0), stats)
+
+        @test stats.affine_inflated_cells == 1
+        @test stats.affine_area_saved ≈ 0.875
+        @test stats.affine_segments_added == 2
+        @test pab.n_segments == 2
+        @test pab(0.25) ≈ 0.0 atol=1e-12
+        @test pab(0.5) ≈ 0.0 atol=1e-12
+        @test pab(0.75) ≈ 0.25 atol=1e-12
+        @test PDMPSamplers.total_area(pab) ≈ 0.125
+        for t in (0.0, 0.5, 1.0)
+            @test pab(t) ≈ max(-0.5 + t, 0.0) atol=1e-12
+        end
+    end
+
+    @testset "signed inflated builder skips affine cells below absolute area gain" begin
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [0.5])
+        pcb.y_vals[1] = -0.5
+        pcb.y_vals[2] = 0.5
+        pcb.d_vals[1] = 1.0
+        pcb.d_vals[2] = 1.0
+
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pab = PDMPSamplers.PiecewiseAffineBound(4)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.build_rate_linear_bound!(
+            pab, pcb, 1, state, flow,
+            (0.0), stats;
+            linear_area_threshold=1.0,
+            linear_min_area_gain=0.4)
+
+        @test stats.affine_inflated_cells == 0
+        @test stats.affine_cells_skipped_by_min_gain == 1
+        @test stats.affine_constant_cells == 1
+        @test stats.affine_segments_added == 1
+        @test pab.n_segments == 1
+        @test PDMPSamplers.total_area(pab) ≈ 0.5
+    end
+
+    @testset "signed inflated Gaussian one-cell flat and affine bounds dominate dense grid" begin
+        flow = BouncyParticle(1, 0.0)
+        cert = (0.0)
+
+        for (x0, v0, tmax) in ((-0.5, 1.0, 1.0), (0.5, 1.0, 1.0))
+            state = PDMPState(0.0, SkeletonPoint([x0], [v0]))
+            provider = (x -> [x[1]], (x, v) -> [v[1]])
+
+            pcb_flat = PDMPSamplers.PiecewiseConstantBound([0.0, tmax], zeros(1))
+            pab_flat = PDMPSamplers.PiecewiseAffineBound(2)
+            n_flat = PDMPSamplers.construct_rate_bound_grid!(
+                pab_flat, pcb_flat, state, flow, provider, cert;
+                build_affine=false,)
+
+            pcb_affine = PDMPSamplers.PiecewiseConstantBound([0.0, tmax], zeros(1))
+            pab_affine = PDMPSamplers.PiecewiseAffineBound(4)
+            n_affine = PDMPSamplers.construct_rate_bound_grid!(
+                pab_affine, pcb_affine, state, flow, provider, cert;
+                build_affine=true,)
+
+            @test n_flat == 1
+            @test n_affine == 1
+            @test pab_affine.n_segments >= 1
+            for t in range(0.0, tmax; length=101)
+                actual = max((x0 + t * v0) * v0, 0.0)
+                @test pcb_flat.Λ_vals[1] + 1e-12 >= actual
+                @test pab_affine(t) + 1e-12 >= actual
+            end
+        end
+    end
+
+    @testset "auto chooses flat or affine cells by area gain" begin
+        flow = BouncyParticle(1, 0.0)
+        cert = (0.0)
+        provider = (x -> [x[1]], (x, v) -> [v[1]])
+
+        flat_state = PDMPState(0.0, SkeletonPoint([1.0], [0.0]))
+        flat_pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], zeros(1))
+        flat_pab = PDMPSamplers.PiecewiseAffineBound(2)
+        flat_stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.construct_rate_bound_grid!(
+            flat_pab, flat_pcb, flat_state, flow, provider, cert;
+            stats=flat_stats,
+            build_affine=true,
+            auto=true,
+            linear_area_threshold=0.9)
+
+        @test flat_stats.auto_flat_cells == 1
+        @test flat_stats.auto_affine_cells == 0
+        @test flat_stats.auto_area_saved == 0.0
+
+        affine_state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        affine_pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], zeros(1))
+        affine_pab = PDMPSamplers.PiecewiseAffineBound(4)
+        affine_stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.construct_rate_bound_grid!(
+            affine_pab, affine_pcb, affine_state, flow, provider, cert;
+            stats=affine_stats,
+            build_affine=true,
+            auto=true,
+            linear_area_threshold=0.9)
+
+        @test affine_stats.auto_flat_cells == 0
+        @test affine_stats.auto_affine_cells == 1
+        @test affine_stats.auto_area_saved > 0
+        for t in range(0.0, 1.0; length=101)
+            actual = max(-0.5 + t, 0.0)
+            @test affine_pab(t) + 1e-12 >= actual
+        end
+    end
+
+    @testset "signed inflated builder uses flat cell when affine gain is tiny" begin
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [1.0])
+        pcb.y_vals[1] = 1.0
+        pcb.y_vals[2] = 1.0
+        pcb.d_vals[1] = 0.0
+        pcb.d_vals[2] = 0.0
+
+        state = PDMPState(0.0, SkeletonPoint([1.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pab = PDMPSamplers.PiecewiseAffineBound(4)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.build_rate_linear_bound!(
+            pab, pcb, 1, state, flow, (0.0), stats;
+            linear_area_threshold=0.95)
+
+        @test stats.grid_certificate_calls == 0
+        @test stats.affine_inflated_cells == 0
+        @test stats.affine_constant_cells == 1
+        @test pab.n_segments == 1
+        @test PDMPSamplers.total_area(pab) ≈ 1.0
+    end
+
+    @testset "single-pass signed inflated grid avoids duplicate endpoint pass" begin
+        grad = x -> [x[1]]
+        hvp = (x, v) -> [v[1]]
+        provider = (grad, hvp)
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [0.0])
+        pab = PDMPSamplers.PiecewiseAffineBound(4)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        cert_calls = Ref(0)
+        cert = (state, flow, a, b) -> begin
+            cert_calls[] += 1
+            (0.0)
+        end
+
+        n = PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, provider, cert;
+            stats,
+            build_affine=true)
+
+        @test n == 1
+        @test stats.grid_endpoint_evaluations == 0
+        @test stats.grid_endpoint_derivative_calls == 1
+        @test stats.grid_certificate_calls == 1
+        @test cert_calls[] == 1
+        @test stats.grid_certificate_fallbacks == 0
+        @test stats.affine_inflated_cells == 1
+        @test pab(0.25) ≈ 0.0 atol=1e-12
+        @test pab(0.75) ≈ 0.25 atol=1e-12
+    end
+
+    @testset "single-pass signed inflated grid accepts callable cell certificates" begin
+        grad = x -> [x[1]]
+        hvp = (x, v) -> [v[1]]
+        provider = (grad, hvp)
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 0.5, 1.0], zeros(2))
+        pab = PDMPSamplers.PiecewiseAffineBound(6)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        cert = TestCellBound(Ref(0))
+
+        n = PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, provider, cert;
+            stats,
+            build_affine=true)
+
+        @test n == 2
+        @test cert.calls[] == 2
+        @test stats.grid_certificate_calls == 2
+        @test stats.grid_certificate_fallbacks == 0
+    end
+
+    @testset "end-to-end signed inflated Gaussian is exact across zero crossing" begin
+        function gaussian_grad!(out, x)
+            out[1] = x[1]
+            return out
+        end
+        function gaussian_hvp!(out, x, v)
+            out[1] = v[1]
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(gaussian_grad!), gaussian_hvp!)
+        flow = BouncyParticle(1, 0.0)
+        alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+            bound=:linear,
+            curvature_bound=(state, flow, a, b) -> (0.0),
+            bound_violation=:throw)
+        ξ0 = SkeletonPoint([-0.5], [1.0])
+        rng = Xoshiro(20260630)
+
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        for _ in 1:20
+            τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
+            @test isfinite(τ) || τ === Inf
+            event_type === :horizon_hit && break
+            PDMPSamplers._handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+        end
+
+        @test stats.grid_bound_violations == 0
+        @test stats.affine_bound_violations == 0
+    end
+
+    @testset "end-to-end inflated constant Gaussian has no proposal-time violations" begin
+        function gaussian_grad!(out, x)
+            out[1] = x[1]
+            return out
+        end
+        function gaussian_hvp!(out, x, v)
+            out[1] = v[1]
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(gaussian_grad!), gaussian_hvp!)
+        flow = BouncyParticle(1, 0.05)
+        alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+            bound=:flat,
+            curvature_bound=(0.0),
+            bound_violation=:throw)
+        ξ0 = SkeletonPoint([0.25], [1.0])
+
+        for seed in 20260701:20260705
+            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 20.0; seed, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test length(trace) > 0
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+        end
+    end
+
+    @testset "bounded scalar-BPS smoke has no proposal-time violations" begin
+        function quartic_grad!(out, x)
+            out[1] = x[1]^3 - x[1]
+            return out
+        end
+        function quartic_hvp!(out, x, v)
+            out[1] = (3x[1]^2 - 1) * v[1]
+            return out
+        end
+        quartic_cert = (state, flow, a, b) -> begin
+            x0 = state.ξ.x[1]
+            v0 = state.ξ.θ[1]
+            c = 6 * v0^3
+            return max(c * (x0 + a * v0), c * (x0 + b * v0))
+        end
+
+        function trig_grad!(out, x)
+            out[1] = 2sin(x[1]) + 0.1x[1]
+            return out
+        end
+        function trig_hvp!(out, x, v)
+            out[1] = (2cos(x[1]) + 0.1) * v[1]
+            return out
+        end
+        trig_cert = (state, flow, a, b) -> 2abs(state.ξ.θ[1])^3
+
+        for (grad!, hvp!, cert, ξ0, T, seed) in (
+            (quartic_grad!, quartic_hvp!, quartic_cert, SkeletonPoint([0.25], [1.0]), 5.0, 701),
+            (trig_grad!, trig_hvp!, trig_cert, SkeletonPoint([0.75], [1.0]), 5.0, 702),
+        )
+            model = PDMPModel(1, FullGradient(grad!), hvp!)
+            flow = BouncyParticle(1, 0.05)
+            alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+                bound=:linear,
+                curvature_bound=cert,
+                bound_violation=:throw,
+                linear_area_threshold=0.9)
+
+            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; seed, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test length(trace) > 0
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+        end
+    end
+
+    @testset "auto scalar-BPS smoke has no proposal-time violations" begin
+        function gaussian_grad!(out, x)
+            out[1] = x[1]
+            return out
+        end
+        function gaussian_hvp!(out, x, v)
+            out[1] = v[1]
+            return out
+        end
+        gaussian_cert = (0.0)
+
+        function quartic_grad!(out, x)
+            out[1] = x[1]^3 - x[1]
+            return out
+        end
+        function quartic_hvp!(out, x, v)
+            out[1] = (3x[1]^2 - 1) * v[1]
+            return out
+        end
+        quartic_cert = (state, flow, a, b) -> begin
+            x0 = state.ξ.x[1]
+            v0 = state.ξ.θ[1]
+            c = 6 * v0^3
+            return max(c * (x0 + a * v0), c * (x0 + b * v0))
+        end
+
+        function trig_grad!(out, x)
+            out[1] = 2sin(x[1]) + 0.1x[1]
+            return out
+        end
+        function trig_hvp!(out, x, v)
+            out[1] = (2cos(x[1]) + 0.1) * v[1]
+            return out
+        end
+        trig_cert = (state, flow, a, b) -> 2abs(state.ξ.θ[1])^3
+
+        for (grad!, hvp!, cert, ξ0, seed) in (
+            (gaussian_grad!, gaussian_hvp!, gaussian_cert, SkeletonPoint([0.25], [1.0]), 711),
+            (quartic_grad!, quartic_hvp!, quartic_cert, SkeletonPoint([0.25], [1.0]), 712),
+            (trig_grad!, trig_hvp!, trig_cert, SkeletonPoint([0.75], [1.0]), 713),
+        )
+            model = PDMPModel(1, FullGradient(grad!), hvp!)
+            flow = BouncyParticle(1, 0.05)
+            alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+                bound=:auto,
+                curvature_bound=cert,
+                bound_violation=:throw,
+                linear_area_threshold=0.9)
+
+            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5.0; seed, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test length(trace) > 0
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+            @test stats.auto_flat_cells + stats.auto_affine_cells > 0
+        end
+    end
+
+    @testset "budget-first tail restart offsets returned event time" begin
+        function neg_gaussian_grad!(out, x)
+            out[1] = -x[1]
+            return out
+        end
+        function neg_gaussian_hvp!(out, x, v)
+            out[1] = -v[1]
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(neg_gaussian_grad!), neg_gaussian_hvp!)
+        flow = BouncyParticle(1, 0.0)
+        alg = GridThinningStrategy(; N=1, N_min=1, t_max=2.0, lazy=false,
+            bound=:flat,
+            curvature_bound=(0.0),
+            bound_violation=:throw,
+            max_rejections_before_tail_restart=1,
+            safety_limit=20)
+        ξ0 = SkeletonPoint([-1.0], [1.0])
+        rng = Xoshiro(3)
+
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
+
+        @test event_type === :horizon_hit
+        @test τ > alg.t_max
+        @test stats.grid_budget_tail_restarts > 0
+        @test alg_.pcb.t_grid[1] == 0.0
+        @test stats.grid_bound_violations == 0
+        @test stats.affine_bound_violations == 0
+    end
+
+    @testset "componentwise bounded ZigZag Gaussian channels" begin
+        flow = ZigZag(2)
+        state = PDMPState(0.0, SkeletonPoint([-0.5, 0.25], [1.0, -1.0]))
+        t_grid = collect(range(0.0, 1.0, 5))
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
+        pab = PDMPSamplers.PiecewiseAffineBound(8)
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = (0.0)
+
+        @test PDMPSamplers._rate_aggregation(flow) === :componentwise
+        @test PDMPSamplers._can_use_signed_grid(state, flow, (grad, hvp))
+        @test !PDMPSamplers._can_use_signed_grid(state, flow, (grad, nothing))
+        G, dG = PDMPSamplers.rate_derivatives_for_grid(
+            (grad, hvp), state, flow, t_grid, length(t_grid))
+        @test size(G) == (2, length(t_grid))
+        @test all(dG .≈ 1.0)
+
+        stats = PDMPSamplers.DevelStatisticCounter()
+        n = PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            build_affine=true,
+            stats)
+        @test n == length(pcb.Λ_vals)
+
+        flat_area = sum(pcb.Λ_vals[i] * (t_grid[i + 1] - t_grid[i])
+            for i in eachindex(pcb.Λ_vals))
+        @test PDMPSamplers.total_area(pab) <= flat_area + 1e-12
+        @test stats.componentwise_affine_cells > 0
+        @test stats.componentwise_affine_segments_added > 0
+
+        for cell in eachindex(pcb.Λ_vals)
+            a, b = t_grid[cell], t_grid[cell + 1]
+            for t in range(a, b; length=11)
+                channels = state.ξ.θ .* (state.ξ.x .+ t .* state.ξ.θ)
+                positive_channels = max.(channels, 0.0)
+                @test all(positive_channels[j] <= pcb.Λ_vals[cell] + 1e-12 for j in 1:2)
+                @test sum(positive_channels) <= pcb.Λ_vals[cell] + 1e-12
+                @test sum(positive_channels) <= pab(t) + 1e-12
+            end
+        end
+    end
+
+    @testset "componentwise ZigZag affine aggregate handles zero crossings" begin
+        flow = ZigZag(2)
+        state = PDMPState(0.0, SkeletonPoint([-0.5, 0.25], [1.0, -1.0]))
+        t_grid = [0.0, 1.0]
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
+        pab = PDMPSamplers.PiecewiseAffineBound(8)
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = (0.0)
+        stats = PDMPSamplers.DevelStatisticCounter()
+
+        PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            build_affine=true,
+            stats)
+
+        @test pab.n_segments == 3
+        @test stats.componentwise_flat_fallback_cells == 0
+        @test stats.componentwise_affine_cells == 1
+        @test PDMPSamplers.total_area(pab) <= pcb.Λ_vals[1] + 1e-12
+        for t in range(0.0, 1.0; length=41)
+            channels = state.ξ.θ .* (state.ξ.x .+ t .* state.ξ.θ)
+            @test sum(max.(channels, 0.0)) <= pab(t) + 1e-12
+        end
+    end
+
+    @testset "componentwise ZigZag high-dimensional crossing diagnostic" begin
+        d = 100
+        flow = ZigZag(d)
+        θ = ones(d)
+        x = [-i / (d + 1) for i in 1:d]
+        state = PDMPState(0.0, SkeletonPoint(x, θ))
+        t_grid = [0.0, 1.0]
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = (0.0)
+        crossings = count(i -> 0.0 < -θ[i] * x[i] < 1.0, 1:d)
+
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
+        pab = PDMPSamplers.PiecewiseAffineBound(2d + 2)
+        stats = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            build_affine=true,
+            stats,
+            max_componentwise_affine_segments_per_cell=256)
+
+        @test crossings == d
+        @test pab.n_segments == crossings + 1
+        @test stats.componentwise_flat_fallback_cells == 0
+        @test PDMPSamplers.total_area(pab) <= pcb.Λ_vals[1] + 1e-12
+        for t in range(0.0, 1.0; length=51)
+            exact = sum(max(x[i] + t, 0.0) for i in 1:d)
+            @test exact <= pab(t) + 1e-10
+        end
+
+        pcb_cap = PDMPSamplers.PiecewiseConstantBound(t_grid, [0.0])
+        pab_cap = PDMPSamplers.PiecewiseAffineBound(8)
+        stats_cap = PDMPSamplers.DevelStatisticCounter()
+        PDMPSamplers.construct_rate_bound_grid!(
+            pab_cap, pcb_cap, state, flow, (grad, hvp), cert;
+            build_affine=true,
+            stats=stats_cap,
+            max_componentwise_affine_segments_per_cell=32)
+
+        @test stats_cap.componentwise_flat_fallback_cells == 1
+        @test pab_cap.n_segments == 1
+        @test PDMPSamplers.total_area(pab_cap) ≈ pcb_cap.Λ_vals[1]
+    end
+
+    @testset "Boomerang rate derivatives use corrected-gradient convention" begin
+        Γ = Diagonal([1.5, 2.0, 2.5])
+        μ = [0.2, -0.3, 0.4]
+        flow = Boomerang(Γ, μ, 0.0)
+        x = [0.7, -0.1, -0.2]
+        θ = [0.4, -0.5, 0.3]
+        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+        corrected_grad = x -> zeros(length(x))
+        raw_hvp = (x, v) -> Γ * v
+
+        @test PDMPSamplers._rate_aggregation(flow) === :scalar
+        @test PDMPSamplers._can_use_signed_grid(state, flow, (corrected_grad, raw_hvp))
+        g, dg = PDMPSamplers.rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        @test g ≈ 0.0 atol=1e-12
+        @test dg ≈ 0.0 atol=1e-12
+    end
+
+    @testset "Boomerang quadratic residual rate derivatives and certificate" begin
+        Γ = Diagonal([1.2, 1.6, 2.1])
+        μ = [0.1, -0.2, 0.3]
+        A = Symmetric([0.7 0.1 -0.05; 0.1 0.5 0.02; -0.05 0.02 0.4])
+        b = [0.3, -0.2, 0.15]
+        flow = Boomerang(Γ, μ, 0.0)
+        x = [0.8, -0.4, 0.1]
+        θ = [0.25, -0.7, 0.35]
+        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+        corrected_grad = x -> A * (x .- μ) .+ b
+        raw_hvp = (x, v) -> (Γ + A) * v
+
+        y = x .- μ
+        a = A * y .+ b
+        g_expected = dot(a, θ)
+        dg_expected = dot(θ, A * θ) - dot(a, y)
+        g, dg = PDMPSamplers.rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        @test g ≈ g_expected atol=1e-12
+        @test dg ≈ dg_expected atol=1e-12
+
+        R = sqrt(dot(y, y) + dot(θ, θ))
+        Lcert = 2opnorm(Matrix(A)) * R^2 + norm(b) * R
+        for t in range(0.0, 2π; length=31)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            yt = st.ξ.x .- μ
+            gdd = -4dot(yt, A * st.ξ.θ) - dot(b, st.ξ.θ)
+            @test abs(gdd) <= Lcert + 1e-10
+        end
+    end
+
+    @testset "Boomerang signed derivative matches sampler convention" begin
+        Γ = Diagonal([1.2, 1.6, 2.0])
+        μ = [0.1, -0.25, 0.3]
+        A = Symmetric([0.6 0.12 -0.04; 0.12 0.4 0.08; -0.04 0.08 0.5])
+        b = [0.2, -0.3, 0.1]
+        flow = Boomerang(Γ, μ, 0.0)
+        x = [0.55, -0.45, 0.05]
+        θ = [0.35, -0.2, 0.45]
+        state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+
+        function residual_grad!(out, x)
+            y = x .- μ
+            out .= Γ * y .+ A * y .+ b
+            return out
+        end
+        function residual_hvp!(out, x, v)
+            out .= (Γ + A) * v
+            return out
+        end
+        model = PDMPModel(3, FullGradient(residual_grad!), residual_hvp!)
+        alg = GridThinningStrategy()
+
+        function actual_rate(t)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            cache = PDMPSamplers.initialize_cache(Xoshiro(31), flow, model.grad, alg, st.t[], st.ξ)
+            cache = PDMPSamplers.add_gradient_to_cache(cache, st.ξ)
+            ∇corr = compute_gradient!(st, model.grad, flow, cache)
+            return dot(∇corr, st.ξ.θ)
+        end
+
+        corrected_grad = x -> A * (x .- μ) .+ b
+        raw_hvp = (x, v) -> (Γ + A) * v
+        g, dg = PDMPSamplers.rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        h = 1e-6
+        fd = (actual_rate(h) - actual_rate(-h)) / (2h)
+
+        @test g ≈ actual_rate(0.0) atol=1e-12
+        @test dg ≈ fd rtol=1e-7 atol=1e-8
+    end
+
+    @testset "Boomerang signed grid accepts optional generic curvature bound" begin
+        Γ = Diagonal([1.0, 1.4])
+        μ = [0.0, 0.1]
+        A = Symmetric([0.3 0.05; 0.05 0.2])
+        b = [0.15, -0.1]
+        flow = Boomerang(Γ, μ, 0.0)
+        function residual_grad!(out, x)
+            y = x .- μ
+            out .= Γ * y .+ A * y .+ b
+            return out
+        end
+        function residual_hvp!(out, x, v)
+            out .= (Γ + A) * v
+            return out
+        end
+        model = PDMPModel(2, FullGradient(residual_grad!), residual_hvp!)
+        ξ0 = SkeletonPoint([0.25, -0.2], [0.4, -0.3])
+        generic = GridThinningStrategy(;
+            N=2,
+            bound=:flat,
+            curvature_bound=(1.0),
+            lazy=false)
+        adaptive = GridThinningStrategy(;
+            N=2,
+            bound=:flat,
+            lazy=false)
+        bounded = GridThinningStrategy(;
+            N=2,
+            bound=:flat,
+            curvature_bound=(10.0),
+            bound_violation=:throw,
+            lazy=false)
+
+        _, generic_stats = pdmp_sample(
+            ξ0, flow, model, generic, 0.0, 0.5;
+            seed=32,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        _, adaptive_stats = pdmp_sample(
+            ξ0, flow, model, adaptive, 0.0, 0.5;
+            seed=34,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        _, stats = pdmp_sample(
+            ξ0, flow, model, bounded, 0.0, 0.5;
+            seed=33,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test generic_stats.grid_bound_violations == 0
+        @test adaptive_stats.grid_bound_violations >= 0
+        @test stats.grid_bound_violations == 0
+        @test stats.grid_certificate_fallbacks == 0
+    end
+
+    @testset "bounded Boomerang quadratic residual has no violations" begin
+        Γ = Diagonal([1.1, 1.7])
+        μ = [0.05, -0.15]
+        A = Symmetric([0.4 0.08; 0.08 0.3])
+        b = [0.12, -0.2]
+        flow = Boomerang(Γ, μ, 0.0)
+        function residual_grad!(out, x)
+            y = x .- μ
+            out .= Γ * y .+ A * y .+ b
+            return out
+        end
+        function residual_hvp!(out, x, v)
+            out .= (Γ + A) * v
+            return out
+        end
+        model = PDMPModel(2, FullGradient(residual_grad!), residual_hvp!)
+        ξ0 = SkeletonPoint([0.3, -0.45], [0.5, -0.25])
+        cert = (25.0)
+
+        for bound in (:flat, :linear, :auto)
+            alg = GridThinningStrategy(;
+                N=2,
+                N_min=1,
+                t_max=0.5,
+                bound,
+                curvature_bound=cert,
+                linear_area_threshold=1.0,
+                linear_min_area_gain=0.0,
+                bound_violation=:throw,
+                lazy=false)
+            _, stats = pdmp_sample(
+                ξ0, flow, model, alg, 0.0, 1.0;
+                seed=34,
+                progress=false,
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+            @test stats.grid_certificate_fallbacks == 0
+        end
+    end
+
+    @testset "exact-reference Boomerang has no reflection events" begin
+        Γ = Diagonal([1.0, 1.6])
+        μ = [0.2, -0.1]
+        flow = Boomerang(Γ, μ, 0.25)
+        function reference_grad!(out, x)
+            out .= Γ * (x .- μ)
+            return out
+        end
+        function reference_hvp!(out, x, v)
+            out .= Γ * v
+            return out
+        end
+        model = PDMPModel(2, FullGradient(reference_grad!), reference_hvp!)
+        alg = GridThinningStrategy(;
+            N=2,
+            bound=:flat,
+            curvature_bound=(0.0),
+            bound_violation=:throw,
+            lazy=false)
+        ξ0 = SkeletonPoint([0.45, -0.35], [0.25, 0.4])
+        _, stats = pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 2.0;
+            seed=35,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+
+        @test stats.reflections_events == 0
+        @test stats.reflections_accepted == 0
+        @test stats.grid_bound_violations == 0
+        @test stats.grid_certificate_fallbacks == 0
+    end
+
+    @testset "Boomerang logistic certificate matches sampler convention" begin
+        X = [0.4 -0.2 0.1; -0.3 0.5 0.2; 0.2 0.1 -0.4; -0.1 -0.3 0.35]
+        yobs = [1.0, 0.0, 1.0, 0.0]
+        Γ = Diagonal([1.3, 1.6, 2.0])
+        μ = [0.1, -0.2, 0.05]
+        flow = Boomerang(Γ, μ, 0.0)
+        x0 = [0.35, -0.45, 0.2]
+        θ0 = [0.25, -0.15, 0.4]
+        state = PDMPState(0.0, SkeletonPoint(copy(x0), copy(θ0)))
+        sigmoid(z) = inv(1 + exp(-z))
+
+        function logistic_grad!(out, x)
+            η = X * x
+            w = sigmoid.(η) .- yobs
+            mul!(out, transpose(X), w)
+            out .+= Γ * (x .- μ)
+            return out
+        end
+        function logistic_hvp!(out, x, v)
+            η = X * x
+            Xv = X * v
+            w = sigmoid.(η) .* (1 .- sigmoid.(η)) .* Xv
+            mul!(out, transpose(X), w)
+            out .+= Γ * v
+            return out
+        end
+        model = PDMPModel(3, FullGradient(logistic_grad!), logistic_hvp!)
+        alg = GridThinningStrategy()
+
+        function actual_rate(t)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            cache = PDMPSamplers.initialize_cache(Xoshiro(41), flow, model.grad, alg, st.t[], st.ξ)
+            cache = PDMPSamplers.add_gradient_to_cache(cache, st.ξ)
+            ∇corr = compute_gradient!(st, model.grad, flow, cache)
+            return dot(∇corr, st.ξ.θ)
+        end
+
+        corrected_grad = x -> begin
+            η = X * x
+            vec(transpose(X) * (sigmoid.(η) .- yobs))
+        end
+        raw_hvp = (x, v) -> begin
+            η = X * x
+            Xv = X * v
+            w = sigmoid.(η) .* (1 .- sigmoid.(η)) .* Xv
+            vec(transpose(X) * w .+ Γ * v)
+        end
+        g, dg = PDMPSamplers.rate_and_derivative(
+            state, flow, (corrected_grad, raw_hvp))
+        h = 1e-6
+        fd = (actual_rate(h) - actual_rate(-h)) / (2h)
+        @test g ≈ actual_rate(0.0) atol=1e-12
+        @test dg ≈ fd rtol=1e-7 atol=1e-8
+
+        cert = TestBoomerangLogisticBound(X)
+        L = cert(state, flow, 0.0, 1.0)
+        for t in range(0.0, 2π; length=41)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            gdd = 0.0
+            for i in axes(X, 1)
+                z = dot(view(X, i, :), st.ξ.x)
+                q = dot(view(X, i, :), st.ξ.θ)
+                u = dot(view(X, i, :), st.ξ.x .- μ)
+                s = sigmoid(z)
+                gdd += s * (1 - s) * (1 - 2s) * q^3
+                gdd -= 3s * (1 - s) * q * u
+                gdd -= (s - yobs[i]) * q
+            end
+            @test abs(gdd) <= L + 1e-10
+        end
+
+        t_grid = collect(range(0.0, 1.0, 5))
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
+        pab = PDMPSamplers.PiecewiseAffineBound(16)
+        PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, (corrected_grad, raw_hvp), cert;
+            build_affine=true,
+            stats=PDMPSamplers.DevelStatisticCounter())
+        for cell in eachindex(pcb.Λ_vals), t in range(t_grid[cell], t_grid[cell + 1]; length=11)
+            @test max(actual_rate(t), 0.0) <= pcb.Λ_vals[cell] + 1e-10
+            @test max(actual_rate(t), 0.0) <= pab(t) + 1e-10
+        end
+    end
+
+    @testset "bounded Boomerang logistic smoke has no violations" begin
+        rng = Xoshiro(42)
+        n, p = 100, 5
+        X = randn(rng, n, p) ./ sqrt(p)
+        β_true = range(-0.4, 0.4; length=p)
+        yobs = Float64.(rand.(Ref(rng), Bernoulli.(inv.(1 .+ exp.(-(X * β_true))))))
+        Γ = Diagonal(fill(1.25, p))
+        μ = zeros(p)
+        flow = Boomerang(Γ, μ, 0.05)
+        sigmoid(z) = inv(1 + exp(-z))
+
+        function logistic_grad!(out, x)
+            η = X * x
+            w = sigmoid.(η) .- yobs
+            mul!(out, transpose(X), w)
+            out .+= Γ * (x .- μ)
+            return out
+        end
+        function logistic_hvp!(out, x, v)
+            η = X * x
+            Xv = X * v
+            s = sigmoid.(η)
+            mul!(out, transpose(X), s .* (1 .- s) .* Xv)
+            out .+= Γ * v
+            return out
+        end
+
+        model = PDMPModel(p, FullGradient(logistic_grad!), logistic_hvp!)
+        cert = TestBoomerangLogisticBound(X)
+        ξ0 = SkeletonPoint(fill(0.05, p), collect(range(-0.4, 0.4; length=p)))
+        for bound in (:flat, :linear, :auto)
+            alg = GridThinningStrategy(;
+                N=2,
+                N_min=1,
+                t_max=1.0,
+                bound,
+                curvature_bound=cert,
+                linear_area_threshold=1.0,
+                linear_min_area_gain=0.0,
+                bound_violation=:throw,
+                lazy=false)
+            _, stats = pdmp_sample(
+                ξ0, flow, model, alg, 0.0, 20.0;
+                seed=44,
+                progress=false,
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            @test stats.grid_bound_violations == 0
+            @test stats.affine_bound_violations == 0
+            @test stats.grid_certificate_fallbacks == 0
+        end
+    end
+
+    @testset "preconditioned signed-rate geometry conventions" begin
+        d = 3
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        state = PDMPState(0.0, SkeletonPoint([0.4, -0.3, 0.2], [1.2, -0.8, 0.5]))
+
+        dbps = PreconditionedBPS(d; refresh_rate=0.0, scale=[0.5, 1.5, 2.0])
+        @test PDMPSamplers._rate_aggregation(dbps) === :scalar
+        @test PDMPSamplers._can_use_signed_grid(state, dbps, (grad, hvp))
+        g, dg = PDMPSamplers.rate_and_derivative(state, dbps, (grad, hvp))
+        @test g ≈ dot(state.ξ.x, state.ξ.θ)
+        @test dg ≈ dot(state.ξ.θ, state.ξ.θ)
+
+        dense_bps = DensePreconditionedBPS(d; refresh_rate=0.0)
+        @test PDMPSamplers._rate_aggregation(dense_bps) === :scalar
+        @test PDMPSamplers._can_use_signed_grid(state, dense_bps, (grad, hvp))
+        g_dense, dg_dense = PDMPSamplers.rate_and_derivative(
+            state, dense_bps, (grad, hvp))
+        @test g_dense ≈ dot(state.ξ.x, state.ξ.θ)
+        @test dg_dense ≈ dot(state.ξ.θ, state.ξ.θ)
+
+        dzz = PreconditionedZigZag(d; scale=[0.5, 1.5, 2.0])
+        @test PDMPSamplers._rate_aggregation(dzz) === :componentwise
+        @test PDMPSamplers._can_use_signed_grid(state, dzz, (grad, hvp))
+        G_diag, dG_diag = PDMPSamplers.rate_derivatives_for_grid(
+            (grad, hvp), state, dzz, [0.0], 1)
+        @test vec(G_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.x
+        @test vec(dG_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.θ
+
+        L = [1.0 0.0 0.0; 0.25 1.1 0.0; -0.2 0.15 0.9]
+        dense = PDMPSamplers.DensePreconditioner(d)
+        dense.L .= L
+        dense.Linv .= inv(LowerTriangular(L))
+        flow = PDMPSamplers.PreconditionedDynamics(dense, ZigZag(d))
+        v = [1.0, -1.0, 1.0]
+        copyto!(flow.metric.v_canonical, v)
+        θ = L * v
+        zz_state = PDMPState(0.0, SkeletonPoint([0.3, -0.4, 0.2], θ))
+        @test PDMPSamplers._rate_aggregation(flow) === :componentwise
+        @test PDMPSamplers._can_use_signed_grid(zz_state, flow, (grad, hvp))
+        G, dG = PDMPSamplers.rate_derivatives_for_grid(
+            (grad, hvp), zz_state, flow, [0.0], 1)
+        η = L' * zz_state.ξ.x
+        Hθ_z = L' * θ
+        @test vec(G[:, 1]) ≈ v .* η
+        @test vec(dG[:, 1]) ≈ v .* Hθ_z
+        @test sum(max.(G[:, 1], 0.0)) ≈ PDMPSamplers.λ(zz_state.ξ, zz_state.ξ.x, flow)
+    end
+
+    @testset "dense preconditioned ZigZag bounded aggregate dominates rate" begin
+        d = 3
+        L = [1.0 0.0 0.0; 0.2 1.0 0.0; -0.1 0.3 0.8]
+        dense = PDMPSamplers.DensePreconditioner(d)
+        dense.L .= L
+        dense.Linv .= inv(LowerTriangular(L))
+        flow = PDMPSamplers.PreconditionedDynamics(dense, ZigZag(d))
+        v = [1.0, -1.0, 1.0]
+        copyto!(flow.metric.v_canonical, v)
+        θ = L * v
+        state = PDMPState(0.0, SkeletonPoint([-0.4, 0.25, -0.1], θ))
+        grad = x -> copy(x)
+        hvp = (x, v) -> copy(v)
+        cert = (0.0)
+        t_grid = collect(range(0.0, 1.0, 4))
+        pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
+        pab = PDMPSamplers.PiecewiseAffineBound(16)
+
+        PDMPSamplers.construct_rate_bound_grid!(
+            pab, pcb, state, flow, (grad, hvp), cert;
+            build_affine=true,
+            stats=PDMPSamplers.DevelStatisticCounter())
+        for t in range(0.0, 1.0; length=31)
+            st = copy(state)
+            move_forward_time!(st, t, flow)
+            @test PDMPSamplers.λ(st.ξ, st.ξ.x, flow) <= pab(t) + 1e-12
+        end
+    end
+
+    @testset "componentwise bounded ZigZag smoke has no violations" begin
+        function zz_gaussian_grad!(out, x)
+            copyto!(out, x)
+            return out
+        end
+        function zz_gaussian_hvp!(out, x, v)
+            copyto!(out, v)
+            return out
+        end
+        model = PDMPModel(2, FullGradient(zz_gaussian_grad!), zz_gaussian_hvp!)
+        flow = ZigZag(2)
+        alg = GridThinningStrategy(;
+            N=4,
+            bound=:linear,
+            curvature_bound=(0.0),
+            bound_violation=:throw,
+            lazy=false)
+        ξ0 = SkeletonPoint([-0.5, 0.25], [1.0, -1.0])
+        trace, stats = pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 2.0;
+            seed=23,
+            progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test length(trace) >= 1
+        @test stats.grid_bound_violations == 0
+        @test stats.affine_bound_violations == 0
     end
 
     @testset "_compute_cell_bound!" begin
@@ -136,7 +1423,7 @@ import DifferentiationInterface as DI
         alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress)
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
         @test length(trace) > 20
         @test all(isfinite, mean(trace))
     end
@@ -299,6 +1586,108 @@ import DifferentiationInterface as DI
         strat = GridThinningStrategy(; use_fd_hvp=true, N=30)
         @test strat.use_fd_hvp
         @test strat.N == 30
+
+        strat_linear = GridThinningStrategy(; bound=:linear, lazy=false,
+            curvature_bound=(args...) -> (0.0))
+        @test strat_linear.bound === :linear
+        @test strat_linear.curvature_bound !== nothing
+        @test strat_linear.linear_area_threshold == 0.95
+        @test strat_linear.linear_min_area_gain == 0.0
+
+        auto_strategy = GridThinningStrategy(;
+            bound=:auto,
+            N=1,
+            linear_area_threshold=0.9,
+            curvature_bound=(0.0))
+        @test auto_strategy.N == 1
+        @test auto_strategy.bound === :auto
+        @test auto_strategy.linear_area_threshold == 0.9
+        @test auto_strategy.linear_min_area_gain == 0.0
+
+        scalar_strategy = GridThinningStrategy(;
+            bound=:linear,
+            N=1,
+            linear_area_threshold=0.9,
+            curvature_bound=(0.0))
+        @test scalar_strategy.N == 1
+        @test scalar_strategy.bound === :linear
+        @test scalar_strategy.linear_area_threshold == 0.9
+        @test scalar_strategy.linear_min_area_gain == 0.0
+
+        flat_strategy = GridThinningStrategy(;
+            bound=:flat,
+            N=1,
+            curvature_bound=(0.0))
+        @test flat_strategy.N == 1
+        @test flat_strategy.bound === :flat
+    end
+
+    @testset "R bridge GridThinning compatibility surface" begin
+        d = 2
+        Γ = Diagonal([1.2, 1.8])
+        μ = [0.1, -0.2]
+        function compat_grad!(out, x)
+            out .= Γ * (x .- μ)
+            return out
+        end
+        function compat_hvp!(out, x, v)
+            out .= Γ * v
+            return out
+        end
+        model = PDMPModel(d, FullGradient(compat_grad!), compat_hvp!)
+        alg = GridThinningStrategy(;
+            N=30,
+            t_max=2.0,
+            use_fd_hvp=false,
+            post_warmup_simplify=true)
+        @test alg.bound === :constant
+
+        fields = (
+            :reflections_events,
+            :reflections_accepted,
+            :refreshment_events,
+            :sticky_events,
+            :support_boundary_events,
+            :support_boundary_refresh_attempts,
+            :support_boundary_refresh_failures,
+            :∇f_calls,
+            :∇²f_calls,
+            :elapsed_time,
+            :grid_builds,
+            :grid_shrinks,
+            :grid_grows,
+            :grid_early_stops,
+            :grid_points_evaluated,
+            :grid_points_skipped,
+            :grid_N_current,
+            :lazy_fallback_low_tightness,
+            :lazy_fallback_bound_violation,
+            :lazy_proposal_attempts,
+            :lazy_proposal_rejections,
+            :grid_resets_from_dynamics_adaptation,
+        )
+
+        flows = (
+            ZigZag(Γ, μ),
+            BouncyParticle(Γ, μ),
+            Boomerang(Γ, μ),
+            AdaptiveBoomerang(Γ, μ; λref=0.1),
+            PreconditionedZigZag(Matrix(Γ), μ),
+            PreconditionedBPS(Matrix(Γ), μ),
+        )
+        for (i, flow) in enumerate(flows)
+            rng = Xoshiro(20_260_702 + i)
+            θ0 = PDMPSamplers.initialize_velocity(rng, flow, d)
+            ξ0 = SkeletonPoint(copy(μ), θ0)
+            _, stats = pdmp_sample(
+                ξ0, flow, model, alg, 0.0, 0.05;
+                seed=20_260_800 + i,
+                progress=false)
+            for field in fields
+                @test field in propertynames(stats)
+                @test getproperty(stats, field) !== nothing
+            end
+        end
     end
 
     @testset "Early stopping in construct_upper_bound_grad_and_hess!" begin
@@ -322,11 +1711,129 @@ import DifferentiationInterface as DI
             out
         end
 
-        stats = PDMPSamplers.StatisticCounter()
+        stats = PDMPSamplers.DevelStatisticCounter()
         PDMPSamplers.construct_upper_bound_grad_and_hess!(pcb, state, flow, (grad_func, hvp_func);
             early_stop_threshold=0.001, stats=stats)
         # With a very low threshold, early stopping should trigger
         @test stats.grid_builds == 1
+    end
+
+    @testset "constant BPS grid uses batched rate derivatives when available" begin
+        flow = BouncyParticle(1, 0.0)
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 0.5, 1.0], zeros(2))
+        stats = PDMPSamplers.DevelStatisticCounter()
+        provider = TestGridRateDerivatives(Ref(0))
+
+        n = PDMPSamplers.construct_upper_bound_grad_and_hess!(
+            pcb, state, flow, provider, false;
+            stats,
+        )
+
+        @test n == 2
+        @test provider.calls[] == 1
+        @test stats.grid_endpoint_derivative_calls == 1
+        @test stats.grid_endpoint_evaluations == 0
+        @test stats.grid_endpoint_gradient_calls == 0
+        @test stats.grid_endpoint_hessian_calls == 0
+        @test pcb.y_vals[1:3] ≈ [0.0, 0.0, 0.5]
+        @test pcb.d_vals[1:3] ≈ [0.0, 0.0, 1.0]
+        @test pcb.Λ_vals ≈ [0.0, 0.5]
+    end
+
+    @testset "append-only constant budget extension matches full construction" begin
+        flow = BouncyParticle(1, 0.0)
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        provider_full = TestGridRateDerivatives(Ref(0))
+        provider_append = TestGridRateDerivatives(Ref(0))
+        t_grid = collect(range(0.0, 1.0, 11))
+
+        full = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
+        n_full = PDMPSamplers.construct_upper_bound_grad_and_hess!(
+            full, state, flow, provider_full, false; early_stop_threshold=0.08)
+
+        appended = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
+        n_first = PDMPSamplers.construct_upper_bound_grad_and_hess!(
+            appended, state, flow, provider_append, false; early_stop_threshold=0.01)
+        prefix_Λ = copy(appended.Λ_vals[1:n_first])
+        prefix_y = copy(appended.y_vals[1:(n_first + 1)])
+        prefix_d = copy(appended.d_vals[1:(n_first + 1)])
+        built_area = PDMPSamplers._piecewise_constant_area(appended)
+
+        n_appended = PDMPSamplers.construct_upper_bound_grad_and_hess!(
+            appended, state, flow, provider_append, false;
+            early_stop_threshold=0.08,
+            start_cell=n_first + 1,
+            initial_integral=built_area)
+
+        @test n_appended == n_full
+        @test appended.Λ_vals[1:n_full] ≈ full.Λ_vals[1:n_full]
+        @test appended.y_vals[1:(n_full + 1)] ≈ full.y_vals[1:(n_full + 1)]
+        @test appended.d_vals[1:(n_full + 1)] ≈ full.d_vals[1:(n_full + 1)]
+        @test appended.Λ_vals[1:n_first] == prefix_Λ
+        @test appended.y_vals[1:(n_first + 1)] == prefix_y
+        @test appended.d_vals[1:(n_first + 1)] == prefix_d
+
+        for budget in (0.01, 0.04, 0.08)
+            τ_full, lb_full = PDMPSamplers.propose_event_time(full, budget)
+            τ_app, lb_app = PDMPSamplers.propose_event_time(appended, budget)
+            @test τ_app ≈ τ_full
+            @test lb_app ≈ lb_full
+        end
+    end
+
+    @testset "append-only inflated affine budget extension preserves prefix" begin
+        flow = BouncyParticle(1, 0.0)
+        state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
+        provider_full = TestGridRateDerivatives(Ref(0))
+        provider_append = TestGridRateDerivatives(Ref(0))
+        cert = (0.0)
+        t_grid = collect(range(0.0, 1.0, 11))
+
+        full_pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
+        full_pab = PDMPSamplers.PiecewiseAffineBound(32)
+        n_full = PDMPSamplers.construct_rate_bound_grid!(
+            full_pab, full_pcb, state, flow, provider_full, cert;
+            early_stop_threshold=0.08,
+            build_affine=true)
+
+        app_pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
+        app_pab = PDMPSamplers.PiecewiseAffineBound(32)
+        n_first = PDMPSamplers.construct_rate_bound_grid!(
+            app_pab, app_pcb, state, flow, provider_append, cert;
+            early_stop_threshold=0.01,
+            build_affine=true)
+        prefix_segments = app_pab.n_segments
+        prefix_breaks = copy(app_pab.t_breaks[1:(prefix_segments + 1)])
+        prefix_y_left = copy(app_pab.y_left[1:prefix_segments])
+        prefix_slopes = copy(app_pab.slopes[1:prefix_segments])
+        prefix_cum_area = copy(app_pab.cum_area[1:(prefix_segments + 1)])
+        built_area = PDMPSamplers.total_area(app_pab)
+
+        n_appended = PDMPSamplers.construct_rate_bound_grid!(
+            app_pab, app_pcb, state, flow, provider_append, cert;
+            early_stop_threshold=0.08,
+            build_affine=true,
+            start_cell=n_first + 1,
+            initial_integral=built_area,
+            append=true)
+
+        @test n_appended == n_full
+        @test app_pcb.Λ_vals[1:n_full] ≈ full_pcb.Λ_vals[1:n_full]
+        @test app_pcb.y_vals[1:(n_full + 1)] ≈ full_pcb.y_vals[1:(n_full + 1)]
+        @test app_pcb.d_vals[1:(n_full + 1)] ≈ full_pcb.d_vals[1:(n_full + 1)]
+        @test app_pab.t_breaks[1:(prefix_segments + 1)] == prefix_breaks
+        @test app_pab.y_left[1:prefix_segments] == prefix_y_left
+        @test app_pab.slopes[1:prefix_segments] == prefix_slopes
+        @test app_pab.cum_area[1:(prefix_segments + 1)] == prefix_cum_area
+        @test PDMPSamplers.total_area(app_pab) ≈ PDMPSamplers.total_area(full_pab)
+
+        for budget in (0.01, 0.04, 0.08)
+            τ_full, lb_full = PDMPSamplers.propose_event_time(full_pab, budget)
+            τ_app, lb_app = PDMPSamplers.propose_event_time(app_pab, budget)
+            @test τ_app ≈ τ_full
+            @test lb_app ≈ lb_full
+        end
     end
 
     @testset "construct_upper_bound_grad_and_hess! with cached values" begin
@@ -349,7 +1856,7 @@ import DifferentiationInterface as DI
             out
         end
 
-        stats = PDMPSamplers.StatisticCounter()
+        stats = PDMPSamplers.DevelStatisticCounter()
         # With cached_y0 and cached_d0
         PDMPSamplers.construct_upper_bound_grad_and_hess!(pcb, state, flow, (grad_func, hvp_func);
             cached_y0=1.0, cached_d0=0.5, stats=stats)
@@ -369,7 +1876,7 @@ import DifferentiationInterface as DI
         alg = GridThinningStrategy(; use_fd_hvp=true)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
     end
@@ -385,14 +1892,14 @@ import DifferentiationInterface as DI
         alg = GridThinningStrategy()  # no FD-HVP either
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
     end
 
     @testset "Strategy interface defaults and roots acceptance" begin
         roots = PDMPSamplers.RootsPoissonTimeStrategy()
-        stats = PDMPSamplers.StatisticCounter()
+        stats = PDMPSamplers.DevelStatisticCounter()
 
         @test PDMPSamplers._reset_inner_grid!(roots) === nothing
         @test PDMPSamplers._maybe_activate_constant_bound!(roots, stats) === nothing
@@ -405,7 +1912,7 @@ import DifferentiationInterface as DI
         strat = GridThinningStrategy(; N=20, t_max=2.0, post_warmup_simplify=true)
         alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
 
-        stats = PDMPSamplers.StatisticCounter()
+        stats = PDMPSamplers.DevelStatisticCounter()
         stats.reflections_accepted = 2
         stats.refreshment_events = 18
         alg.max_observed_rate[] = 3.5
@@ -454,7 +1961,7 @@ import DifferentiationInterface as DI
         alg = GridThinningStrategy(; N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
 
         @test length(trace) > 20
         @test stats.∇²f_calls > 0
@@ -471,9 +1978,98 @@ import DifferentiationInterface as DI
         alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
         @test length(trace) > 10
         @test all(isfinite, mean(trace))
+    end
+
+    @testset "End-to-end eager inflated affine GridThinning uses certificate" begin
+        function convex_rate_grad!(out, x)
+            out[1] = x[1]^2 + 1.0
+            return out
+        end
+        function convex_rate_hvp!(out, x, v)
+            out[1] = 2.0 * x[1] * v[1]
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(convex_rate_grad!), convex_rate_hvp!)
+        flow = BouncyParticle(1, 0.0)
+        cert = (state, flow, a, b) -> begin
+            v = state.ξ.θ[1]
+            (2.0 * v^3)
+        end
+        alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+            bound=:linear, curvature_bound=cert)
+        ξ0 = SkeletonPoint([0.0], [1.0])
+        rng = Xoshiro(20260629)
+
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
+
+        @test isfinite(τ)
+        @test event_type === :reflect
+        @test stats.affine_inflated_cells > 0
+        @test stats.affine_area_hybrid < stats.affine_area_constant_equiv
+        @test stats.grid_bound_violations == 0
+    end
+
+    @testset "inflated affine GridThinning accepts finite-diff derivatives" begin
+        function convex_rate_grad_only!(out, x)
+            out[1] = x[1]^2 + 1.0
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(convex_rate_grad_only!))
+        flow = BouncyParticle(1, 0.0)
+        alg = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+            bound=:linear,
+            curvature_bound=(state, flow, a, b) -> (2.0),)
+        ξ0 = SkeletonPoint([0.0], [1.0])
+        rng = Xoshiro(20260630)
+
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
+
+        @test isfinite(τ)
+        @test stats.affine_inflated_cells > 0
+        @test stats.affine_area_hybrid > 0.0
+        @test stats.affine_area_constant_equiv > 0.0
+        @test stats.grid_bound_violations == 0
+    end
+
+    @testset "inflated affine bound works without mandatory curvature certificates" begin
+        function simple_grad!(out, x)
+            out[1] = x[1]
+            return out
+        end
+
+        model_grad_only = PDMPModel(1, FullGradient(simple_grad!))
+        flow = BouncyParticle(1, 0.0)
+        alg_required_fd = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+            bound=:linear,
+            curvature_bound=(state, flow, a, b) -> (0.0),)
+        ξ0 = SkeletonPoint([0.0], [1.0])
+        rng = Xoshiro(20260630)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model_grad_only, alg_required_fd, 0.0, ξ0)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, Inf, false)
+        @test isfinite(τ)
+
+        function simple_hvp!(out, x, v)
+            out[1] = v[1]
+            return out
+        end
+        model_hvp = PDMPModel(1, FullGradient(simple_grad!), simple_hvp!)
+        alg_raw_cert = GridThinningStrategy(; N=1, N_min=1, t_max=1.0, lazy=false,
+            bound=:linear,
+            curvature_bound=(state, flow, a, b) -> 0.0,)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model_hvp, alg_raw_cert, 0.0, ξ0)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, Inf, false)
+        @test isfinite(τ)
     end
 
     @testset "_constant_bound_event_time direct call" begin
@@ -490,7 +2086,7 @@ import DifferentiationInterface as DI
         strat = GridThinningStrategy(; N=16, t_max=2.0, post_warmup_simplify=true)
         alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 16, 5, 5.0)
         cache = (; z=similar(ξ0.x), ∇ϕx=similar(ξ0.x))
-        stats = PDMPSamplers.StatisticCounter()
+        stats = PDMPSamplers.DevelStatisticCounter()
 
         # Arm the constant bound to a deliberately high value so thinning always accepts
         alg.constant_bound_rate[] = 1e6

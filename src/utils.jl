@@ -8,72 +8,43 @@ end
 
 pos(x) = max(zero(x), x)
 
-# TODO: these two need to go, actually, do they?
-normsq(x::Real)           = abs2(x)
-normsq(x::AbstractVector) = sum(abs2, x)
-
-mutable struct StatisticCounter
-    reflections_events::Int
-    reflections_accepted::Int
-    refreshment_events::Int
-    sticky_events::Int
-    boundary_reflections::Int
-    support_boundary_events::Int
-    support_boundary_refresh_attempts::Int
-    support_boundary_refresh_failures::Int
-    ∇f_calls::Int
-    ∇²f_calls::Int
-    last_rejected::Bool
-    grid_builds::Int
-    grid_shrinks::Int
-    grid_grows::Int
-    grid_early_stops::Int
-    grid_points_evaluated::Int
-    grid_points_skipped::Int
-    grid_N_current::Int
-    lazy_fallback_low_tightness::Int
-    lazy_fallback_bound_violation::Int
-    lazy_proposal_attempts::Int
-    lazy_proposal_rejections::Int
-    grid_resets_from_dynamics_adaptation::Int
-    elapsed_time::Float64
-    stop_reason::Symbol
-end
-StatisticCounter() = StatisticCounter(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, :none)
-
-
-
-mutable struct HealthMonitor
-    consecutive_rejects::Int
-    const limit::Int
-    HealthMonitor(; consecutive_reject_limit=1000) = new(0, consecutive_reject_limit)
-end
-
-function check_health!(monitor::HealthMonitor, stats::StatisticCounter)
-    if stats.last_rejected
-        monitor.consecutive_rejects += 1
-    else
-        monitor.consecutive_rejects = 0
-    end
-
-    if monitor.consecutive_rejects > monitor.limit
-        # error("Stuck! Rejected $(monitor.limit) consecutive moves.")
-        error("The algorithm rejected $(monitor.limit) consecutive proposals. Check the algorithm and model settings.")
-    end
-end
-
 # TODO: remove these!
 function idot(A, j, x)
     return dot((@view A[:, j]), x)
 end
 
-# function idot(A::SparseMatrixCSC, j, x)
-#     rows = rowvals(A)
-#     vals = nonzeros(A)
-#     s = zero(eltype(x))
-#     # @inbounds
-#     for i in nzrange(A, j)
-#         s += vals[i]'*x[rows[i]]
-#     end
-#     s
-# end
+struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}}
+    grad::G
+    vhv::V
+    w_buf::W
+end
+VHVProvider(grad, vhv) = VHVProvider(grad, vhv, nothing)
+
+struct GradientProvider{V,F,G,C} <: Function
+    θ::V
+    flow::F
+    gradient_strategy::G
+    cache::C
+end
+(p::GradientProvider)(x::AbstractVector) =
+    compute_gradient!(x, p.θ, p.gradient_strategy, p.flow, p.cache)
+
+struct GradHVPProvider{G,H}
+    grad::G
+    hvp::H
+end
+_provider_grad((grad, hvp)::Tuple) = grad
+_provider_hvp((grad, hvp)::Tuple) = hvp
+_provider_grad(provider::GradHVPProvider) = provider.grad
+_provider_hvp(provider::GradHVPProvider) = provider.hvp
+
+struct FiniteDiffVHV{G}
+    grad::G
+    buf::Vector{Float64}
+    grad_buf::Vector{Float64}
+    w_buf::Vector{Float64}
+end
+FiniteDiffVHV(grad, buf::Vector{Float64}) =
+    FiniteDiffVHV(grad, buf, similar(buf), similar(buf))
+FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) =
+    FiniteDiffVHV(grad, buf, similar(buf), w_buf)

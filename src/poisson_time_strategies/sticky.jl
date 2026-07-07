@@ -51,7 +51,7 @@ accept_reflection_event(rng::Random.AbstractRNG, alg::StickyLoopState, args...) 
 accept_reflection_event(alg::StickyLoopState, args...) = accept_reflection_event(alg.inner_alg_state, args...)
 
 # this could use less memory by looking at
-function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
 
     d = length(state.ξ)
     sticky_times = fill(Inf, d)
@@ -310,7 +310,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
     validate_state(state, flow, "after stick_or_unstick! at index $i")
 end
 
-function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::StatisticCounter)
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter)
 
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
@@ -350,16 +350,20 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         τ_refresh = rand_refresh_time(rng, flow)
         tʳ = t + τ_refresh
 
+        _inc_counter_sticky_inner_searches(stats)
         τ, event_type, meta = next_event_time(rng, model, flow, inner_alg_state, state, cache, stats, Inf, false)
 
         t′ = t + τ
 
         if tᶠ < t′ && tᶠ < tʳ #  sticky event happens first
+            _inc_counter_sticky_inner_wasted_by_sticky(stats)
             Δt = tᶠ - t
             return Δt, :sticky, CoordinateMeta(i)
         elseif tʳ < t′
+            _inc_counter_sticky_inner_wasted_by_refresh(stats)
             return τ_refresh, :refresh, GradientMeta(alg.empty_∇ϕx)
         else
+            _inc_counter_sticky_inner_wins(stats)
             return τ, event_type, meta
         end
 
@@ -372,6 +376,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         #     return τ, event_type, meta
         # end
     else
+        _inc_counter_sticky_all_frozen_events(stats)
         Δt = tᶠ - t
         return Δt, :sticky, CoordinateMeta(i)
     end
@@ -380,6 +385,6 @@ end
 _reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)
 _invalidate_cached_gradient!(alg::StickyLoopState) = _invalidate_cached_gradient!(alg.inner_alg_state)
 
-function _maybe_activate_constant_bound!(alg::StickyLoopState, stats::StatisticCounter)
+function _maybe_activate_constant_bound!(alg::StickyLoopState, stats::AbstractStatisticCounter)
     _maybe_activate_constant_bound!(alg.inner_alg_state, stats)
 end

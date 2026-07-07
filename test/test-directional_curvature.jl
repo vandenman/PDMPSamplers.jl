@@ -206,7 +206,7 @@ end
         @test all(isfinite, mean(trace))
     end
 
-    @testset "GridThinning prefers JointProvider for FullGradient backend BPS" begin
+    @testset "GridThinning uses joint directional derivatives for FullGradient backend BPS" begin
         d = 4
         f_grad!(out, x) = (out .= x)
         grad = FullGradient(f_grad!)
@@ -218,6 +218,6 @@ end
         state, model_, alg_, cache, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
         grad_func = PDMPSamplers.make_grad_U_func(state, flow, model_.grad, cache)
         provider = PDMPSamplers._make_grad_provider(grad_func, model_, flow, alg_)
-        @test provider isa PDMPSamplers.JointProvider
+        @test provider isa PDMPSamplers.WithStatsJoint
     end
 end

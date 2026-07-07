@@ -387,6 +387,53 @@ end
 
 λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang) = pos(dot(∇ϕ, ξ.θ))
 
+function _reference_mul!(out::AbstractVector, flow::AnyBoomerang, x::AbstractVector)
+    mul!(out, flow.Γ, x)
+    return out
+end
+
+function _reference_mul!(
+    out::AbstractVector,
+    flow::MutableBoomerang{<:LowRankPrecision},
+    x::AbstractVector,
+)
+    lowrank_mul!(out, flow.Γ, x, 1.0, 0.0)
+    return out
+end
+
+function _boomerang_rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    grad,
+    hvp,
+    corrected_gradient::AbstractVector,
+)
+    x = state.ξ.x
+    θ = state.ξ.θ
+    Hθ = hvp(x, θ)
+    return dot(corrected_gradient, θ), ∂λ∂t(state, corrected_gradient, Hθ, flow)
+end
+
+function rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    provider::Union{Tuple,GradHVPProvider},
+)
+    grad = _provider_grad(provider)
+    return _boomerang_rate_and_derivative(
+        state, flow, grad, _provider_hvp(provider), grad(state.ξ.x))
+end
+
+function rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    provider::Union{Tuple,GradHVPProvider},
+    cached_gradient::AbstractVector,
+)
+    return _boomerang_rate_and_derivative(
+        state, flow, _provider_grad(provider), _provider_hvp(provider), cached_gradient)
+end
+
 function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]

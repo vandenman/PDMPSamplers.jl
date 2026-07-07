@@ -117,7 +117,7 @@ end
 accept_reflection_event(::Random.AbstractRNG, ::OptimisticState, args...) = true
 accept_reflection_event(::OptimisticState, args...) = true
 
-function _to_internal(strat::OptimisticStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::StatisticCounter)
+function _to_internal(strat::OptimisticStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     OptimisticState(
         PiecewiseLinearBound(strat.N),
         strat.N,
@@ -166,7 +166,7 @@ end
 # ─── Main event time proposal ────────────────────────────────────────────────
 
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
-    alg::OptimisticState, state::AbstractPDMPState, cache, stats::StatisticCounter,
+    alg::OptimisticState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
     max_horizon::Float64=Inf, include_refresh::Bool=true) where {FL<:ContinuousDynamics}
 
     plb = alg.plb
@@ -189,8 +189,8 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     reinitialize_grid!(plb, effective_horizon, N_active)
     evaluate_grid_rates!(plb, state2_, state_, flow, grad_func)
     compute_cumulative_integral!(plb)
-    stats.grid_builds += 1
-    stats.grid_points_evaluated += N_active + 1
+    _inc_counter_grid_builds(stats)
+    _inc_counter_grid_points_evaluated(stats, N_active + 1)
 
     max_t_max = max_grid_horizon(flow)
     rewind_count = 0
@@ -207,7 +207,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
             end
             t_max = alg.t_max[]
             alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
-            stats.grid_grows += 1
+            _inc_counter_grid_grows(stats)
             return t_max, :horizon_hit, default_return
         end
 
@@ -232,15 +232,15 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
                 reinitialize_grid!(plb, effective_horizon, N_active)
                 evaluate_grid_rates!(plb, state2_, state_, flow, grad_func)
                 compute_cumulative_integral!(plb)
-                stats.grid_builds += 1
-                stats.grid_points_evaluated += N_active + 1
+                _inc_counter_grid_builds(stats)
+                _inc_counter_grid_points_evaluated(stats, N_active + 1)
                 rewind_count = 0
                 cumulative_exp = 0.0
                 continue
             end
 
             insert_grid_point!(plb, τ, l_true)
-            stats.grid_points_evaluated += 1
+            _inc_counter_grid_points_evaluated(stats, 1)
             cumulative_exp = 0.0
             continue
         end

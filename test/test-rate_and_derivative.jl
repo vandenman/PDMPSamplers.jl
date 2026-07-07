@@ -2,6 +2,117 @@
     include(joinpath(@__DIR__, "testsetup.jl"))
     import DifferentiationInterface as DI
 end
+
+@testset "rate_and_derivative provider overloads" begin
+    A = Diagonal([2.0, 3.0])
+    grad = x -> A * x
+    hvp = (x, v) -> A * v
+    vhv = (x, v, w) -> dot(w, A * v)
+    x = [1.0, -2.0]
+    θ = [0.5, -1.5]
+    state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+    flow = BouncyParticle(2, 0.0)
+    cached = grad(x)
+
+    expected_rate = dot(cached, θ)
+    expected_deriv = dot(θ, A * θ)
+
+    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, hvp), cached) ==
+        (expected_rate, expected_deriv)
+
+    vhv_provider = PDMPSamplers.VHVProvider(grad, vhv)
+    @test PDMPSamplers.rate_and_derivative(state, flow, vhv_provider) ==
+        (expected_rate, expected_deriv)
+    @test PDMPSamplers.rate_and_derivative(state, flow, vhv_provider, cached) ==
+        (expected_rate, expected_deriv)
+
+    stats = PDMPSamplers.StatisticCounter()
+    joint = PDMPSamplers.WithStatsJoint((x, v) -> (dot(grad(x), v), dot(v, hvp(x, v))), stats)
+    @test PDMPSamplers.rate_and_derivative(state, flow, joint) ==
+        (expected_rate, expected_deriv)
+    @test stats.∇²f_calls == 1
+
+    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, nothing)) ==
+        (expected_rate, 0.0)
+    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, nothing), cached) ==
+        (expected_rate, 0.0)
+
+    fd = PDMPSamplers.FiniteDiffVHV(grad, zeros(2))
+    fd_rate, fd_deriv = PDMPSamplers.rate_and_derivative(state, flow, fd, cached)
+    @test fd_rate ≈ expected_rate
+    @test fd_deriv ≈ expected_deriv rtol=1e-6
+    @test fd.grad_buf == cached
+
+    preconditioned = PreconditionedDynamics(DiagonalPreconditioner([2.0, 4.0]), flow)
+    @test PDMPSamplers.rate_and_derivative(state, preconditioned, (grad, hvp), cached) ==
+        (expected_rate, expected_deriv)
+end
+
+@testset "Boomerang cached derivatives and reference multiplication" begin
+    A = Diagonal([2.0, 3.0])
+    grad = x -> A * x
+    hvp = (x, v) -> A * v
+    x = [0.25, -0.5]
+    θ = [0.75, -0.25]
+    state = PDMPState(0.0, SkeletonPoint(copy(x), copy(θ)))
+    flow = Boomerang(Diagonal([1.5, 2.5]), zeros(2), 0.0)
+    cached = grad(x)
+
+    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, hvp), cached) ==
+        PDMPSamplers.rate_and_derivative(state, flow, (grad, hvp))
+
+    out = zeros(2)
+    @test PDMPSamplers._reference_mul!(out, flow, x) === out
+    @test out ≈ flow.Γ * x
+
+    lowrank = PDMPSamplers.LowRankPrecision(2, 1)
+    lowrank.V[:, 1] .= [0.25, -0.5]
+    lowrank.Λ[1] = 0.75
+    PDMPSamplers.lowrank_precompute!(lowrank)
+    lowrank_flow = PDMPSamplers.MutableBoomerang(lowrank, zeros(2), 0.0, 0.0, nothing, nothing, nothing)
+    fill!(out, NaN)
+    @test PDMPSamplers._reference_mul!(out, lowrank_flow, x) === out
+    expected = similar(x)
+    PDMPSamplers.lowrank_mul!(expected, lowrank, x, 1.0, 0.0)
+    @test out ≈ expected
+end
+
+@testset "rate derivative grid capability predicates" begin
+    state = PDMPState(0.0, SkeletonPoint([1.0, 2.0], [1.0, -1.0]))
+    grad = x -> copy(x)
+    hvp = (x, v) -> copy(v)
+    provider = (grad, hvp)
+    no_hvp = (grad, nothing)
+
+    @test PDMPSamplers._rate_aggregation(BouncyParticle(2)) === :scalar
+    @test PDMPSamplers._rate_aggregation(Boomerang(2)) === :scalar
+    @test PDMPSamplers._rate_aggregation(ZigZag(2)) === :componentwise
+    @test PDMPSamplers._rate_aggregation(PreconditionedDynamics(DiagonalPreconditioner([1.0, 2.0]), BouncyParticle(2))) === :scalar
+    @test PDMPSamplers._rate_aggregation(PreconditionedDynamics(DiagonalPreconditioner([1.0, 2.0]), ZigZag(2))) === :componentwise
+
+    @test PDMPSamplers._rate_channel_count(state, BouncyParticle(2)) == 1
+    @test PDMPSamplers._rate_channel_count(state, ZigZag(2)) == 2
+    @test PDMPSamplers._provider_has_directional_derivative(provider)
+    @test !PDMPSamplers._provider_has_directional_derivative(no_hvp)
+    @test PDMPSamplers._supports_rate_derivatives(provider, BouncyParticle(2))
+    @test !PDMPSamplers._supports_rate_derivatives(no_hvp, Boomerang(2))
+    @test PDMPSamplers._uses_builtin_grid_provider(PDMPSamplers.GradHVPProvider(grad, hvp))
+    @test PDMPSamplers._joint_compatible(BouncyParticle(2))
+    @test !PDMPSamplers._joint_compatible(ZigZag(2))
+    @test PDMPSamplers.max_grid_horizon(BouncyParticle(2)) == 1e10
+    @test PDMPSamplers.max_grid_horizon(Boomerang(2)) == 8π
+
+    values = zeros(1, 3)
+    derivatives = zeros(1, 3)
+    t_grid = [0.0, 0.5, 1.0]
+    pd = PreconditionedDynamics(DiagonalPreconditioner([1.0, 1.0]), BouncyParticle(2, 0.0))
+    PDMPSamplers.rate_derivatives_for_grid!(values, derivatives, provider, state, pd, t_grid, 3)
+    @test values[1, :] ≈ [dot(state.ξ.x .+ t .* state.ξ.θ, state.ξ.θ) for t in t_grid]
+    @test derivatives[1, :] ≈ fill(dot(state.ξ.θ, state.ξ.θ), 3)
+
+    @test_throws ArgumentError PDMPSamplers.rate_derivatives_for_grid!(
+        values, derivatives, provider, state, ZigZag(2), t_grid, 3)
+end
 import ForwardDiff
 
 @testset "Test get_rate_and_deriv against ad" begin

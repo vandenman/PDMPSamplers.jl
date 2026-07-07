@@ -101,7 +101,7 @@ root finding (Roots.jl).
 """
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
                         alg::RootsPoissonTimeStrategy, state::AbstractPDMPState,
-                        cache, stats::StatisticCounter)
+                        cache, stats::AbstractStatisticCounter)
 
     grad = model.grad
     # Compare with refresh time --  TODO: we can always use this as an upper bound for the root finding?

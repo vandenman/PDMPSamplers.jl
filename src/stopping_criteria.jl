@@ -52,12 +52,12 @@ mutable struct EventCountCriterion <: StoppingCriterion
 end
 
 function initialize!(c::EventCountCriterion, state, trace_manager, stats)
-    c.baseline = stats.reflections_events + stats.refreshment_events + stats.sticky_events
+    c.baseline = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
     return nothing
 end
 
 function is_satisfied(c::EventCountCriterion, state, trace_manager, stats)
-    total = stats.reflections_events + stats.refreshment_events + stats.sticky_events
+    total = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
     return (total - c.baseline) >= c.max_events
 end
 

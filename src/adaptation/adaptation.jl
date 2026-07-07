@@ -750,7 +750,7 @@ function RefreshRateAdapter(base_dt::Float64, min_start_time::Float64;
 end
 
 function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::MutableBoomerang, grad, trace_mgr;
-    phase::Symbol=:warmup, stats::Union{StatisticCounter,Nothing}=nothing, kwargs...)
+    phase::Symbol=:warmup, stats::Union{AbstractStatisticCounter,Nothing}=nothing, kwargs...)
     ad.did_update = false
     phase === :warmup || return
     stats === nothing && return

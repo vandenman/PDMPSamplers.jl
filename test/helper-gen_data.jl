@@ -71,10 +71,10 @@ function gen_data(::Type{Distributions.ZeroMeanIsoNormal}, d)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MvTDist target
+# AbstractMvTDist target
 # ──────────────────────────────────────────────────────────────────────────────
 
-struct MvTDistTarget{T<:Distributions.MvTDist, S<:AbstractMatrix{Float64}}
+struct MvTDistTarget{T<:Distributions.AbstractMvTDist, S<:AbstractMatrix{Float64}}
     D::T
     Σ_inv::Symmetric{Float64, S}
     μ::Vector{Float64}
@@ -131,7 +131,7 @@ function neg_partial(t::MvTDistTarget, x::AbstractVector, i::Integer)
     return (t.scalar_coeff / denominator) * t.mahal_num[i]
 end
 
-function gen_data(::Type{Distributions.MvTDist}, d, η,
+function gen_data(::Type{<:Distributions.AbstractMvTDist}, d, η,
                   μ = rand(Normal(0, 5), d),
                   σs = rand(LogNormal(0, 1), d);
                   ν=20.0)
@@ -141,7 +141,7 @@ function gen_data(::Type{Distributions.MvTDist}, d, η,
 
     D = MvTDist(ν, μ, Σ)
 
-    Σ_inv = Symmetric(inv(Σ))
+    Σ_inv = Symmetric(Matrix(inv(Σ)))
     scalar_coeff = (ν + d) / ν
 
     x_centered = similar(μ)
@@ -456,7 +456,7 @@ function marginal_pdfs_at_zero(D::Distributions.AbstractMvNormal)
     [pdf(Normal(μ[i], sqrt(Σ[i, i])), 0.0) for i in 1:length(D)]
 end
 
-function marginal_pdfs_at_zero(D::Distributions.MvTDist)
+function marginal_pdfs_at_zero(D::Distributions.AbstractMvTDist)
     ν = D.df
     μ = mean(D)
     Σ = Matrix(D.Σ)  # scale matrix (not covariance)
@@ -467,14 +467,14 @@ end
 # The slab_target provides the gradient/hvp for the continuous slab part;
 # the test files combine it with the spike structure.
 
-function gen_data(::Type{<:SpikeAndSlabDist{<:Bernoulli, <:Distributions.MvTDist}}, d, η)
+function gen_data(::Type{<:SpikeAndSlabDist{<:Bernoulli, <:Distributions.AbstractMvTDist}}, d, η)
     prob = rand(d)
     D1 = product_distribution([Bernoulli(prob[i]) for i in 1:d])
     # Zero mean and unit scales: ensures fast sticky mixing while
-    # still exercising the position-dependent MvTDist gradient code.
+    # still exercising the position-dependent AbstractMvTDist gradient code.
     μ = zeros(d)
     σs = ones(d)
-    slab_target = gen_data(Distributions.MvTDist, d, η, μ, σs)
+    slab_target = gen_data(Distributions.AbstractMvTDist, d, η, μ, σs)
     D = SpikeAndSlabDist(D1, slab_target.D)
     κ = prob ./ (1 .- prob) .* marginal_pdfs_at_zero(slab_target.D)
     return D, κ, slab_target
@@ -641,7 +641,7 @@ end
 data_name(::Type{Distributions.ZeroMeanIsoNormal}, d) = "N(0, I($d))"
 data_name(::Type{Distributions.MvNormal}, d) = "N(μ, Σ$d)"
 data_name(::Type{Distributions.FullNormal}, d) = "N(μ, Σ$d)"
-data_name(::Type{<:Distributions.MvTDist}, d) = "T(ν, μ, Σ$d)"
+data_name(::Type{<:Distributions.AbstractMvTDist}, d) = "T(ν, μ, Σ$d)"
 data_name(::Type{<:Distributions.AbstractMvNormal}, d) = "N($d)"
 
 data_name(::Type{<:Distributions.Product{<:Any, T, <:Any}}, d) where T = data_name(T, d)
@@ -808,7 +808,7 @@ function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributi
                    d, min_ess, elapsed, passed)
 end
 
-function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.MvTDist;
+function test_approximation(trace::PDMPSamplers.AbstractPDMPTrace, D::Distributions.AbstractMvTDist;
                             elapsed::Union{Real,Nothing}=nothing, check_only::Bool=false)
 
     ν_D, μ_D, Σ_D = Distributions.params(D)
@@ -1032,7 +1032,7 @@ function test_approximation(trace, D::SpikeAndSlabDist; elapsed::Union{Real,Noth
     # Use a norm-based check: the per-coordinate `all(...)` test is too strict for d >= 5 because
     # the probability that at least one coordinate exceeds the tolerance grows with d.
     # A norm-based tolerance scales correctly: atol * sqrt(d).
-    incl_atol_per = D.slab_dist isa Distributions.MvTDist ? (0.15 + 1.5 * mc) : (0.06 + 1.5 * mc)
+    incl_atol_per = D.slab_dist isa Distributions.AbstractMvTDist ? (0.15 + 1.5 * mc) : (0.06 + 1.5 * mc)
     incl_atol = incl_atol_per * sqrt(d)
 
     @test isapprox(est_incl_probs, true_incl_probs; atol=incl_atol)
