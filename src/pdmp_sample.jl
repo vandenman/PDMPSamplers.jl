@@ -437,7 +437,7 @@ function initialize_state(rng::Random.AbstractRNG, flow::ContinuousDynamics, mod
     ξ = copy(ξ₀)
     t = t₀
     stats = statistic_counter()
-    state = alg isa Sticky ? StickyPDMPState(t, ξ) : PDMPState(t, ξ)
+    state = requires_sticky_state(alg) ? StickyPDMPState(t, ξ) : PDMPState(t, ξ)
     initialize_flow_state!(state, flow)
     cache = add_gradient_to_cache(initialize_cache(rng, flow, model.grad, alg, t, ξ), ξ)
     model_ = with_stats(model, stats)

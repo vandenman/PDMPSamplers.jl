@@ -7,6 +7,12 @@ function _check_sticky_times!(alg::StickyLoopState, state::AbstractPDMPState)
     return nothing
 end
 
+function _check_sticky_times!(alg::AggregateStickyLoopState, state::AbstractPDMPState)
+    all(>=(state.t[]), alg.sticky_times) || error("some sticky_times are negative!")
+    alg.aggregate_unstick_time >= state.t[] || error("aggregate_unstick_time is in the past")
+    return nothing
+end
+
 function _compute_exact_reflection_gradient!(
     state::AbstractPDMPState,
     gradient_strategy::GlobalGradientStrategy,
@@ -89,7 +95,7 @@ function _handle_global_event_impl!(
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
             end
             needs_saving = true
-            (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
+            (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
         else
             ∇ϕx = _compute_reflection_gradient!(state, gradient_strategy, flow, cache, meta, alg, τ, wrap_boundary)
 
@@ -97,7 +103,7 @@ function _handle_global_event_impl!(
                 _inc_counter_reflections_accepted(stats)
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
                 needs_saving = true
-                (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
+                (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
             else
                 _set_counter_last_rejected(stats, true)
             end
@@ -107,7 +113,7 @@ function _handle_global_event_impl!(
         refresh_velocity!(rng, state, flow)
         needs_saving = true
         _inc_counter_refreshment_events(stats)
-        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+        (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
         _inc_counter_sticky_events(stats)
@@ -121,7 +127,7 @@ function _handle_global_event_impl!(
         end
 
     elseif event_type == :horizon_hit
-        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
+        (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
         _set_counter_last_rejected(stats, true)
     end
 

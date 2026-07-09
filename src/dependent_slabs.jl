@@ -1,5 +1,73 @@
+"""
+    AbstractModelPriorOdds
+
+Interface for model-prior odds used by dependent slab clocks. Subtypes implement
+`log_model_add_odds(prior, active, j)`, the log prior odds for adding inactive
+beta coordinate `j` to the active model encoded by `active`.
+"""
 abstract type AbstractModelPriorOdds end
 
+"""
+    AbstractSlabBoundary
+
+Interface for active-face slab boundary providers. A boundary provider supplies
+the beta coordinate map, active-face negative gradients, and boundary densities
+at zero for inactive coordinates.
+"""
+abstract type AbstractSlabBoundary end
+
+"""
+    AbstractUnstickClock
+    AbstractAggregateUnstickClock
+
+Clock interfaces for sticky unfreezing. Aggregate clocks sample a single
+summed unsticking time over all inactive stickable beta coordinates and then
+sample the coordinate label conditionally.
+"""
+abstract type AbstractUnstickClock end
+
+"""
+    AbstractAggregateUnstickClock
+
+Subtype of `AbstractUnstickClock` for clocks that sample a single aggregate
+unstick process over all inactive stickable beta coordinates.
+"""
+abstract type AbstractAggregateUnstickClock <: AbstractUnstickClock end
+
+"""
+    AbstractSlabCacheStyle
+    NoSlabCache
+    FixedCovarianceCache
+
+Traits describing whether a slab boundary provider can be cached by active set.
+`FixedCovarianceCache` means the Gaussian slab mean/covariance are fixed over a
+linear-flow segment; state-dependent callback providers should use `NoSlabCache`.
+"""
+abstract type AbstractSlabCacheStyle end
+
+"""
+    NoSlabCache
+
+Cache trait for slab boundary providers whose active-face quantities cannot be
+cached by active set alone, for example state-dependent callbacks.
+"""
+struct NoSlabCache <: AbstractSlabCacheStyle end
+
+"""
+    FixedCovarianceCache
+
+Cache trait for slab boundary providers whose Gaussian covariance is fixed over
+the relevant trajectory segment.
+"""
+struct FixedCovarianceCache <: AbstractSlabCacheStyle end
+
+"""
+    BernoulliModelPriorOdds(prob)
+
+Independent Bernoulli model prior for beta inclusion indicators. `prob[j]` is
+the prior inclusion probability for beta coordinate `j`; `log_model_add_odds`
+returns `log(prob[j] / (1 - prob[j]))`.
+"""
 struct BernoulliModelPriorOdds{P<:AbstractVector{<:Real}} <: AbstractModelPriorOdds
     prob::P
     function BernoulliModelPriorOdds(prob::P) where {P<:AbstractVector{<:Real}}
@@ -12,6 +80,13 @@ end
 Base.length(prior::BernoulliModelPriorOdds) = length(prior.prob)
 Base.copy(prior::BernoulliModelPriorOdds) = BernoulliModelPriorOdds(copy(prior.prob))
 
+"""
+    log_model_add_odds(prior, active, j)
+
+Return the log prior odds for adding inactive beta coordinate `j` to the active
+model `active`. The index `j` is in beta-block coordinates, not full-state
+coordinates.
+"""
 function log_model_add_odds(prior::BernoulliModelPriorOdds, active::BitVector, j::Integer)
     1 <= j <= length(prior.prob) || throw(BoundsError(prior.prob, j))
     length(active) == length(prior.prob) || throw(DimensionMismatch("active set length $(length(active)) does not match prior length $(length(prior.prob))"))
@@ -21,6 +96,12 @@ function log_model_add_odds(prior::BernoulliModelPriorOdds, active::BitVector, j
     return log(p) - log1p(-p)
 end
 
+"""
+    BetaBernoulliModelPriorOdds(n, a, b)
+
+Exchangeable beta-Bernoulli model prior for `n` beta coordinates with
+inclusion-probability hyperprior `Beta(a, b)`.
+"""
 struct BetaBernoulliModelPriorOdds <: AbstractModelPriorOdds
     n::Int
     a::Float64
@@ -45,14 +126,81 @@ function log_model_add_odds(prior::BetaBernoulliModelPriorOdds, active::BitVecto
     return log(prior.a + k) - log(denom)
 end
 
-abstract type AbstractGaussianSlabProvider end
+"""
+    ExchangeableModelSizePrior(log_omega; normalize=false)
+
+Exchangeable model-size prior over sizes `0:p`. `log_omega[k + 1]` stores the
+log prior mass for model size `k`. If `normalize=true`, the entries are shifted
+by `logsumexp(log_omega)`.
+"""
+struct ExchangeableModelSizePrior <: AbstractModelPriorOdds
+    log_omega::Vector{Float64}
+    function ExchangeableModelSizePrior(log_omega::AbstractVector{<:Real}; normalize::Bool=false)
+        length(log_omega) >= 2 || throw(ArgumentError("log_omega must contain model-size probabilities for k=0:p"))
+        vals = Vector{Float64}(log_omega)
+        all(isfinite, vals) || throw(ArgumentError("log_omega entries must be finite"))
+        if normalize
+            lse = LogExpFunctions.logsumexp(vals)
+            vals .-= lse
+        end
+        new(vals)
+    end
+end
+
+Base.length(prior::ExchangeableModelSizePrior) = length(prior.log_omega) - 1
+Base.copy(prior::ExchangeableModelSizePrior) = ExchangeableModelSizePrior(copy(prior.log_omega))
+
+function log_model_add_odds(prior::ExchangeableModelSizePrior, active::BitVector, j::Integer)
+    p = length(prior)
+    1 <= j <= p || throw(BoundsError(active, j))
+    length(active) == p || throw(DimensionMismatch("active set length $(length(active)) does not match prior length $p"))
+    active[j] && throw(ArgumentError("log_model_add_odds is defined for adding an inactive coordinate; coordinate $j is already active"))
+    k = count(active)
+    k < p || return -Inf
+    return prior.log_omega[k + 2] - prior.log_omega[k + 1] + log(k + 1) - log(p - k)
+end
+
+"""
+    AbstractGaussianSlabProvider
+    AbstractExchangeableGaussianSlab
+
+Gaussian slab providers define a beta-block Gaussian slab through
+`gaussian_slab!`. Exchangeable subtypes use the covariance form
+`u * I + v * ones(p, p)`.
+"""
+abstract type AbstractGaussianSlabProvider <: AbstractSlabBoundary end
+
+"""
+    AbstractExchangeableGaussianSlab
+
+Gaussian slab provider with exchangeable covariance structure
+`u * I + v * ones(p, p)`.
+"""
+abstract type AbstractExchangeableGaussianSlab <: AbstractGaussianSlabProvider end
 
 const _LOG2PI = log(2π)
 
+mutable struct DenseGaussianSlabCache
+    active_positions::Vector{Int}
+    work_cov::Matrix{Float64}
+    work_rhs::Vector{Float64}
+end
+
+DenseGaussianSlabCache(m::Integer) = DenseGaussianSlabCache(Vector{Int}(undef, m), Matrix{Float64}(undef, m, m), Vector{Float64}(undef, m))
+
+"""
+    DenseGaussianSlab(mean, cov, beta_indices=eachindex(mean))
+
+Fixed multivariate Gaussian slab for the beta coordinates listed in
+`beta_indices`. `mean` and `cov` are in beta-block order. This provider uses a
+fixed-covariance cache and supports allocation-free active prior gradients for
+dense slabs.
+"""
 struct DenseGaussianSlab <: AbstractGaussianSlabProvider
     mean::Vector{Float64}
     cov::Matrix{Float64}
     beta_indices::Vector{Int}
+    cache::DenseGaussianSlabCache
     function DenseGaussianSlab(mean::AbstractVector{<:Real}, cov::AbstractMatrix{<:Real}, beta_indices::AbstractVector{<:Integer}=eachindex(mean))
         m = length(mean)
         size(cov) == (m, m) || throw(DimensionMismatch("covariance has size $(size(cov)), expected ($m, $m)"))
@@ -67,13 +215,97 @@ struct DenseGaussianSlab <: AbstractGaussianSlabProvider
             err isa PosDefException || rethrow()
             throw(ArgumentError("covariance must be positive definite"))
         end
-        new(Vector{Float64}(mean), cov_f, Vector{Int}(beta_indices))
+        new(Vector{Float64}(mean), cov_f, Vector{Int}(beta_indices), DenseGaussianSlabCache(m))
+    end
+end
+
+"""
+    ExchangeableGaussianSlab(beta_indices, mean, u, v)
+
+Gaussian slab with common mean and covariance `u * I + v * ones(p, p)` over the
+listed beta coordinates.
+"""
+struct ExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
+    beta_indices::Vector{Int}
+    mean::Float64
+    u::Float64
+    v::Float64
+    function ExchangeableGaussianSlab(beta_indices::AbstractVector{<:Integer}, mean::Real, u::Real, v::Real)
+        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
+        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+        p = length(beta_indices)
+        u_f = Float64(u)
+        v_f = Float64(v)
+        u_f > 0 || throw(ArgumentError("u must be positive"))
+        u_f + p * v_f > 0 || throw(ArgumentError("u + p*v must be positive"))
+        new(Vector{Int}(beta_indices), Float64(mean), u_f, v_f)
+    end
+end
+
+"""
+    ZeroMeanExchangeableGaussianSlab(beta_indices, u, v)
+
+Zero-mean exchangeable Gaussian slab with covariance `u * I + v * ones(p, p)`.
+This has optimized boundary-density formulas for exchangeable active faces.
+"""
+struct ZeroMeanExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
+    beta_indices::Vector{Int}
+    u::Float64
+    v::Float64
+    function ZeroMeanExchangeableGaussianSlab(beta_indices::AbstractVector{<:Integer}, u::Real, v::Real)
+        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
+        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+        p = length(beta_indices)
+        u_f = Float64(u)
+        v_f = Float64(v)
+        u_f > 0 || throw(ArgumentError("u must be positive"))
+        u_f + p * v_f > 0 || throw(ArgumentError("u + p*v must be positive"))
+        new(Vector{Int}(beta_indices), u_f, v_f)
     end
 end
 
 Base.copy(provider::DenseGaussianSlab) = DenseGaussianSlab(copy(provider.mean), copy(provider.cov), copy(provider.beta_indices))
+Base.copy(provider::ExchangeableGaussianSlab) = ExchangeableGaussianSlab(copy(provider.beta_indices), provider.mean, provider.u, provider.v)
+Base.copy(provider::ZeroMeanExchangeableGaussianSlab) = ZeroMeanExchangeableGaussianSlab(copy(provider.beta_indices), provider.u, provider.v)
+
+"""
+    beta_indices(provider)
+
+Return the full-state coordinate indices controlled by a slab boundary provider.
+These indices define the beta-block order used by active sets and model priors.
+"""
 beta_indices(provider::AbstractGaussianSlabProvider) = provider.beta_indices
 
+"""
+    slab_cache_style(provider)
+
+Return a cache trait for `provider`. Fixed Gaussian providers return
+`FixedCovarianceCache`; state-dependent and arbitrary callback boundaries return
+`NoSlabCache` by default.
+"""
+slab_cache_style(::AbstractSlabBoundary) = NoSlabCache()
+
+"""
+    slab_cache_key(provider, x, active_beta)
+
+Return a cache key for active-face quantities, or `nothing` when the provider
+does not support active-set-only caching.
+"""
+slab_cache_key(::AbstractSlabBoundary, ::AbstractVector, ::BitVector) = nothing
+slab_cache_style(::DenseGaussianSlab) = FixedCovarianceCache()
+slab_cache_style(::AbstractExchangeableGaussianSlab) = FixedCovarianceCache()
+slab_cache_key(::DenseGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
+slab_cache_key(::AbstractExchangeableGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
+
+"""
+    gaussian_slab!(provider, mean_out, cov_out, x)
+
+Write the Gaussian slab mean and covariance, in beta-block order, into
+`mean_out` and `cov_out` at state `x`. Fixed providers ignore `x`; callback
+providers may compute state-dependent hyperparameters.
+"""
 function gaussian_slab!(provider::DenseGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     length(mean_out) == length(provider.mean) || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $(length(provider.mean))"))
     size(cov_out) == size(provider.cov) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected $(size(provider.cov))"))
@@ -82,11 +314,68 @@ function gaussian_slab!(provider::DenseGaussianSlab, mean_out::AbstractVector, c
     return nothing
 end
 
+function gaussian_slab!(provider::ExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
+    m = length(provider.beta_indices)
+    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
+    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
+    fill!(mean_out, provider.mean)
+    fill!(cov_out, provider.v)
+    @inbounds for i in 1:m
+        cov_out[i, i] = provider.u + provider.v
+    end
+    return nothing
+end
+
+function gaussian_slab!(provider::ZeroMeanExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
+    m = length(provider.beta_indices)
+    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
+    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
+    fill!(mean_out, 0.0)
+    fill!(cov_out, provider.v)
+    @inbounds for i in 1:m
+        cov_out[i, i] = provider.u + provider.v
+    end
+    return nothing
+end
+
+"""
+    CallbackGaussianSlab(beta_indices; mean_cov!, active_prior_grad!=nothing)
+
+Gaussian slab whose mean/covariance are supplied by `mean_cov!(mean, cov, x)`.
+If the provider is used inside `DependentSlabTarget`, `active_prior_grad!` must
+write the negative-gradient contribution for the active slab prior.
+"""
 struct CallbackGaussianSlab{I<:AbstractVector{Int},F,G} <: AbstractGaussianSlabProvider
     beta_indices::I
     mean_cov!::F
     active_prior_grad!::G
 end
+
+"""
+    ArbitrarySlabBoundary(beta_indices; active_prior_neggrad!, log_q_zero!)
+
+General active-face boundary provider. `active_prior_neggrad!(out, x,
+active_beta)` writes the negative-gradient contribution for the active slab
+prior. `log_q_zero!(x, active_beta, j)` returns the log boundary density for
+adding inactive beta coordinate `j`.
+"""
+struct ArbitrarySlabBoundary{I<:AbstractVector{Int},G,Q} <: AbstractSlabBoundary
+    beta_indices::I
+    active_prior_neggrad!::G
+    log_q_zero!::Q
+end
+
+function ArbitrarySlabBoundary(beta_indices::AbstractVector{<:Integer}; active_prior_neggrad!, log_q_zero!)
+    isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
+    all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+    length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+    return ArbitrarySlabBoundary(Vector{Int}(beta_indices), active_prior_neggrad!, log_q_zero!)
+end
+
+Base.copy(provider::ArbitrarySlabBoundary) =
+    ArbitrarySlabBoundary(copy(provider.beta_indices); active_prior_neggrad! = provider.active_prior_neggrad!, log_q_zero! = provider.log_q_zero!)
+
+beta_indices(provider::ArbitrarySlabBoundary) = provider.beta_indices
 
 function CallbackGaussianSlab(beta_indices::AbstractVector{<:Integer}; mean_cov!, active_prior_grad! = nothing)
     isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
@@ -103,8 +392,21 @@ function gaussian_slab!(provider::CallbackGaussianSlab, mean_out::AbstractVector
     return nothing
 end
 
+"""
+    gaussian_slab(provider, x) -> mean, cov
+
+Allocate and return the Gaussian slab mean and covariance for `provider` at
+state `x`. Use `gaussian_slab!` when the caller owns output buffers.
+"""
+function gaussian_slab(provider::AbstractGaussianSlabProvider, x::AbstractVector)
+    m = length(beta_indices(provider))
+    mean = Vector{Float64}(undef, m)
+    cov = Matrix{Float64}(undef, m, m)
+    gaussian_slab!(provider, mean, cov, x)
+    return mean, cov
+end
+
 function _active_positions(active_beta::BitVector, m::Integer)
-    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
     return findall(active_beta)
 end
 
@@ -121,13 +423,15 @@ function _gaussian_logdensity(values::AbstractVector, mean::AbstractVector, cov:
 end
 
 function _current_mean_cov(provider::AbstractGaussianSlabProvider, x::AbstractVector)
-    m = length(beta_indices(provider))
-    mean = Vector{Float64}(undef, m)
-    cov = Matrix{Float64}(undef, m, m)
-    gaussian_slab!(provider, mean, cov, x)
-    return mean, cov
+    return gaussian_slab(provider, x)
 end
 
+"""
+    active_logdensity(provider, x, active_beta)
+
+Return the log density of the active beta coordinates under the Gaussian slab
+induced by `provider` at state `x`.
+"""
 function active_logdensity(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     mean, cov = _current_mean_cov(provider, x)
@@ -162,23 +466,56 @@ function _conditional_logdensity_zero(mean::AbstractVector, cov::AbstractMatrix,
     return -0.5 * (_LOG2PI + log(cond_var) + cond_mean^2 / cond_var)
 end
 
+"""
+    conditional_logdensity_zero(provider, x, active_beta, j_beta)
+
+Return the Gaussian conditional log density of inactive beta coordinate
+`j_beta` at zero, conditioning on the currently active beta coordinates.
+"""
 function conditional_logdensity_zero(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
     indices = beta_indices(provider)
     mean, cov = _current_mean_cov(provider, x)
     return _conditional_logdensity_zero(mean, cov, x[indices], active_beta, j_beta)
 end
 
+"""
+    conditional_density_zero(provider, x, active_beta, j_beta)
+
+Density version of `conditional_logdensity_zero`.
+"""
 conditional_density_zero(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector, j_beta::Integer) =
     exp(conditional_logdensity_zero(provider, x, active_beta, j_beta))
 
-function _write_active_gradient!(out::AbstractVector, full_indices::AbstractVector{Int}, active_positions::AbstractVector{Int}, grad_active::AbstractVector)
+"""
+    log_boundary_density_zero(provider, x, active_beta, j_beta)
+
+Return the log boundary density at zero for adding inactive beta coordinate
+`j_beta`. Gaussian providers use the conditional Gaussian density; arbitrary
+providers dispatch to their `log_q_zero!` callback.
+"""
+log_boundary_density_zero(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector, j_beta::Integer) =
+    conditional_logdensity_zero(provider, x, active_beta, j_beta)
+
+function log_boundary_density_zero(provider::ArbitrarySlabBoundary, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
+    indices = beta_indices(provider)
+    1 <= j_beta <= length(indices) || throw(BoundsError(indices, j_beta))
+    length(active_beta) == length(indices) || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    active_beta[j_beta] && throw(ArgumentError("boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
+    return Float64(provider.log_q_zero!(x, active_beta, j_beta))
+end
+
+function _write_active_gradient!(out::AbstractVector, full_indices::AbstractVector{Int}, active_positions::AbstractVector{Int}, grad_active::AbstractVector, k::Integer=length(active_positions))
     fill!(out, 0.0)
     if length(out) == length(full_indices)
-        @inbounds for (pos, value) in zip(active_positions, grad_active)
+        @inbounds for a in 1:k
+            pos = active_positions[a]
+            value = grad_active[a]
             out[pos] = value
         end
     elseif maximum(full_indices) <= length(out)
-        @inbounds for (pos, value) in zip(active_positions, grad_active)
+        @inbounds for a in 1:k
+            pos = active_positions[a]
+            value = grad_active[a]
             out[full_indices[pos]] = value
         end
     else
@@ -187,15 +524,104 @@ function _write_active_gradient!(out::AbstractVector, full_indices::AbstractVect
     return out
 end
 
+function _collect_active_positions!(positions::Vector{Int}, active_beta::BitVector)
+    k = 0
+    @inbounds for j in eachindex(active_beta)
+        if active_beta[j]
+            k += 1
+            positions[k] = j
+        end
+    end
+    return k
+end
+
+function _cholesky_factor_prefix!(A::AbstractMatrix{Float64}, k::Integer)
+    @inbounds for j in 1:k
+        s = A[j, j]
+        for r in 1:j-1
+            s -= abs2(A[j, r])
+        end
+        @assert s > 0
+        Ajj = sqrt(s)
+        A[j, j] = Ajj
+        for i in j+1:k
+            t = A[i, j]
+            for r in 1:j-1
+                t -= A[i, r] * A[j, r]
+            end
+            A[i, j] = t / Ajj
+        end
+    end
+    return A
+end
+
+function _cholesky_solve_with_factor_prefix!(A::AbstractMatrix{Float64}, b::AbstractVector{Float64}, k::Integer)
+    @inbounds for i in 1:k
+        s = b[i]
+        for j in 1:i-1
+            s -= A[i, j] * b[j]
+        end
+        b[i] = s / A[i, i]
+    end
+    @inbounds for i in k:-1:1
+        s = b[i]
+        for j in i+1:k
+            s -= A[j, i] * b[j]
+        end
+        b[i] = s / A[i, i]
+    end
+    return b
+end
+
+function _cholesky_solve_spd_prefix!(A::AbstractMatrix{Float64}, b::AbstractVector{Float64}, k::Integer)
+    _cholesky_factor_prefix!(A, k)
+    return _cholesky_solve_with_factor_prefix!(A, b, k)
+end
+
+"""
+    active_prior_grad!(provider, out, x, active_beta)
+    active_prior_neggrad!(provider, out, x, active_beta)
+
+Write the active slab prior contribution into `out`. Despite the historical
+`active_prior_grad!` name, the contract is the negative-gradient contribution
+used by `DependentSlabTarget`: `posterior_grad - base_prior_grad + slab_buf`.
+For dense fixed Gaussian slabs this method is allocation-free after warmup.
+"""
 function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    length(active_beta) == length(indices) ||
+        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    cache = provider.cache
+    active_positions = cache.active_positions
+    k = _collect_active_positions!(active_positions, active_beta)
+    if iszero(k)
+        fill!(out, 0.0)
+        return out
+    end
+    work_cov = cache.work_cov
+    work_rhs = cache.work_rhs
+    @inbounds for a in 1:k
+        ia = active_positions[a]
+        work_rhs[a] = x[indices[ia]] - provider.mean[ia]
+        for b in 1:k
+            ib = active_positions[b]
+            work_cov[a, b] = provider.cov[ia, ib]
+        end
+    end
+    _cholesky_solve_spd_prefix!(work_cov, work_rhs, k)
+    return _write_active_gradient!(out, indices, active_positions, work_rhs, k)
+end
+
+function active_prior_grad!(provider::AbstractGaussianSlabProvider, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     A = _active_positions(active_beta, length(indices))
     if isempty(A)
         fill!(out, 0.0)
         return out
     end
-    F = cholesky(Symmetric(Matrix{Float64}(provider.cov[A, A])); check=true)
-    delta = Vector{Float64}(x[indices[A]] .- provider.mean[A])
+    mean, cov = _current_mean_cov(provider, x)
+    F = cholesky(Symmetric(Matrix{Float64}(cov[A, A])); check=true)
+    delta = Vector{Float64}(x[indices[A]] .- mean[A])
     grad_active = F \ delta
     return _write_active_gradient!(out, indices, A, grad_active)
 end
@@ -207,7 +633,383 @@ function active_prior_grad!(provider::CallbackGaussianSlab, out::AbstractVector,
     return out
 end
 
-mutable struct DependentSlabTarget{PG,RG,S<:AbstractGaussianSlabProvider,O<:AbstractModelPriorOdds} <: Function
+"""
+    active_prior_neggrad!(provider, out, x, active_beta)
+
+Compatibility name for the active slab negative-gradient contract. New
+providers should think of this as the canonical sign convention; historical
+Gaussian providers also dispatch through `active_prior_grad!`.
+"""
+active_prior_neggrad!(provider::AbstractGaussianSlabProvider, out::AbstractVector, x::AbstractVector, active_beta::BitVector) =
+    active_prior_grad!(provider, out, x, active_beta)
+
+function active_prior_neggrad!(provider::ArbitrarySlabBoundary, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    provider.active_prior_neggrad!(out, x, active_beta)
+    return out
+end
+
+active_prior_grad!(provider::ArbitrarySlabBoundary, out::AbstractVector, x::AbstractVector, active_beta::BitVector) =
+    active_prior_neggrad!(provider, out, x, active_beta)
+
+"""
+    SummedRateClock(slab_provider, model_prior_odds; rtol=1e-8, atol=1e-10,
+                    initial_bracket=1.0, bracket_multiplier=2.0)
+
+Generic aggregate unstick clock. It evaluates the summed rate over all inactive
+stickable beta coordinates by calling the provider's boundary densities and the
+model-prior odds. This is the flexible arbitrary-prior baseline; it may allocate
+and uses numerical quadrature/root finding for inhomogeneous clocks.
+"""
+struct SummedRateClock{P<:AbstractSlabBoundary,O<:AbstractModelPriorOdds,T<:Real} <: AbstractAggregateUnstickClock
+    slab_provider::P
+    model_prior_odds::O
+    rtol::T
+    atol::T
+    initial_bracket::T
+    bracket_multiplier::T
+end
+
+mutable struct LinearGaussianAggregateCache
+    active_beta::BitVector
+    stickable_beta::BitVector
+    active_positions::Vector{Int}
+    mean::Vector{Float64}
+    cov::Matrix{Float64}
+    beta_values::Vector{Float64}
+    beta_velocity::Vector{Float64}
+    cov_AA::Matrix{Float64}
+    delta_A::Vector{Float64}
+    velocity_A::Vector{Float64}
+    cov_jA::Vector{Float64}
+    solved_cross::Vector{Float64}
+    log_weights::Vector{Float64}
+end
+
+function LinearGaussianAggregateCache(m::Integer)
+    return LinearGaussianAggregateCache(
+        BitVector(undef, m),
+        BitVector(undef, m),
+        Vector{Int}(undef, m),
+        Vector{Float64}(undef, m),
+        Matrix{Float64}(undef, m, m),
+        Vector{Float64}(undef, m),
+        Vector{Float64}(undef, m),
+        Matrix{Float64}(undef, m, m),
+        Vector{Float64}(undef, m),
+        Vector{Float64}(undef, m),
+        Vector{Float64}(undef, m),
+        Vector{Float64}(undef, m),
+        Vector{Float64}(undef, m),
+    )
+end
+
+"""
+    LinearGaussianAggregateClock(slab_provider, model_prior_odds; rtol=1e-8, atol=1e-10)
+
+Optimized aggregate unstick clock for fixed-covariance Gaussian slabs under
+linear flows. The provider must have `FixedCovarianceCache`; state-dependent
+Gaussian callbacks should use `SummedRateClock`.
+"""
+struct LinearGaussianAggregateClock{P<:AbstractGaussianSlabProvider,O<:AbstractModelPriorOdds,T<:Real} <: AbstractAggregateUnstickClock
+    slab_provider::P
+    model_prior_odds::O
+    rtol::T
+    atol::T
+    cache::LinearGaussianAggregateCache
+end
+
+function _check_model_prior_length(model_prior_odds::AbstractModelPriorOdds, slab_provider::AbstractSlabBoundary)
+    m = length(beta_indices(slab_provider))
+    length(model_prior_odds) == m ||
+        throw(DimensionMismatch("model-prior odds length $(length(model_prior_odds)) does not match beta dimension $m"))
+    return nothing
+end
+
+function LinearGaussianAggregateClock(
+    slab_provider::AbstractGaussianSlabProvider,
+    model_prior_odds::AbstractModelPriorOdds;
+    rtol::Real=1e-8,
+    atol::Real=1e-10,
+)
+    rtol > 0 || throw(ArgumentError("rtol must be positive"))
+    atol >= 0 || throw(ArgumentError("atol must be non-negative"))
+    slab_cache_style(slab_provider) isa FixedCovarianceCache ||
+        throw(ArgumentError("LinearGaussianAggregateClock requires a fixed-covariance slab provider; use SummedRateClock for state-dependent Gaussian callbacks"))
+    _check_model_prior_length(model_prior_odds, slab_provider)
+    return LinearGaussianAggregateClock(slab_provider, model_prior_odds, Float64(rtol), Float64(atol), LinearGaussianAggregateCache(length(beta_indices(slab_provider))))
+end
+
+Base.copy(clock::LinearGaussianAggregateClock) = LinearGaussianAggregateClock(
+    _copy_callable(clock.slab_provider),
+    _copy_callable(clock.model_prior_odds);
+    rtol=clock.rtol,
+    atol=clock.atol,
+)
+
+function SummedRateClock(
+    slab_provider::AbstractSlabBoundary,
+    model_prior_odds::AbstractModelPriorOdds;
+    rtol::Real=1e-8,
+    atol::Real=1e-10,
+    initial_bracket::Real=1.0,
+    bracket_multiplier::Real=2.0,
+)
+    rtol > 0 || throw(ArgumentError("rtol must be positive"))
+    atol >= 0 || throw(ArgumentError("atol must be non-negative"))
+    initial_bracket > 0 || throw(ArgumentError("initial_bracket must be positive"))
+    bracket_multiplier > 1 || throw(ArgumentError("bracket_multiplier must be greater than 1"))
+    _check_model_prior_length(model_prior_odds, slab_provider)
+    return SummedRateClock(slab_provider, model_prior_odds, Float64(rtol), Float64(atol), Float64(initial_bracket), Float64(bracket_multiplier))
+end
+
+Base.copy(clock::SummedRateClock) = SummedRateClock(
+    _copy_callable(clock.slab_provider),
+    _copy_callable(clock.model_prior_odds);
+    rtol=clock.rtol,
+    atol=clock.atol,
+    initial_bracket=clock.initial_bracket,
+    bracket_multiplier=clock.bracket_multiplier,
+)
+
+function _active_beta_from_free(provider::AbstractSlabBoundary, free::BitVector)
+    indices = beta_indices(provider)
+    active_beta = BitVector(undef, length(indices))
+    @inbounds for k in eachindex(indices)
+        active_beta[k] = free[indices[k]]
+    end
+    return active_beta
+end
+
+function _stickable_beta_from_can_stick(provider::AbstractSlabBoundary, can_stick::BitVector)
+    indices = beta_indices(provider)
+    stickable_beta = BitVector(undef, length(indices))
+    @inbounds for k in eachindex(indices)
+        stickable_beta[k] = can_stick[indices[k]]
+    end
+    return stickable_beta
+end
+
+"""
+    boundary_logweights!(out, provider, model_prior, x, active_beta, stickable_beta)
+
+Write log unnormalized boundary weights for inactive stickable beta coordinates.
+Entries that are active or not stickable are set to `-Inf`.
+"""
+function boundary_logweights!(
+    out::AbstractVector,
+    provider::AbstractSlabBoundary,
+    model_prior::AbstractModelPriorOdds,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    m = length(beta_indices(provider))
+    length(out) == m || throw(DimensionMismatch("out length $(length(out)) does not match beta dimension $m"))
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    length(stickable_beta) == m || throw(DimensionMismatch("stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
+    fill!(out, -Inf)
+    @inbounds for j in 1:m
+        if stickable_beta[j] && !active_beta[j]
+            out[j] = log_model_add_odds(model_prior, active_beta, j) +
+                     log_boundary_density_zero(provider, x, active_beta, j)
+        end
+    end
+    return out
+end
+
+_exchangeable_mean(provider::ExchangeableGaussianSlab) = provider.mean
+_exchangeable_mean(::ZeroMeanExchangeableGaussianSlab) = 0.0
+
+function _exchangeable_conditional_params(provider::AbstractExchangeableGaussianSlab, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    m = length(indices)
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    k = count(active_beta)
+    μ = _exchangeable_mean(provider)
+    u = provider.u
+    v = provider.v
+    denom = u + k * v
+    denom > 0 || throw(ArgumentError("u + k*v must be positive, got $denom"))
+    sum_centered = 0.0
+    @inbounds for j in 1:m
+        active_beta[j] && (sum_centered += x[indices[j]] - μ)
+    end
+    c = v / denom
+    cond_mean = μ + c * sum_centered
+    cond_var = u * (u + (k + 1) * v) / denom
+    cond_var > 0 || throw(ArgumentError("conditional variance must be positive, got $cond_var"))
+    return cond_mean, cond_var
+end
+
+function _exchangeable_log_q_zero(provider::AbstractExchangeableGaussianSlab, x::AbstractVector, active_beta::BitVector)
+    cond_mean, cond_var = _exchangeable_conditional_params(provider, x, active_beta)
+    return -0.5 * (_LOG2PI + log(cond_var) + cond_mean^2 / cond_var)
+end
+
+function boundary_logweights!(
+    out::AbstractVector,
+    provider::AbstractExchangeableGaussianSlab,
+    model_prior::AbstractModelPriorOdds,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    m = length(beta_indices(provider))
+    length(out) == m || throw(DimensionMismatch("out length $(length(out)) does not match beta dimension $m"))
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    length(stickable_beta) == m || throw(DimensionMismatch("stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
+    fill!(out, -Inf)
+    log_q = _exchangeable_log_q_zero(provider, x, active_beta)
+    @inbounds for j in 1:m
+        if stickable_beta[j] && !active_beta[j]
+            out[j] = log_model_add_odds(model_prior, active_beta, j) + log_q
+        end
+    end
+    return out
+end
+
+"""
+    aggregate_lograte(provider, model_prior, log_Cv, x, active_beta, stickable_beta)
+
+Return the log aggregate unstick rate, equal to `log_Cv` plus the log-sum of
+inactive stickable boundary weights.
+"""
+function aggregate_lograte(
+    provider::AbstractExchangeableGaussianSlab,
+    model_prior::ExchangeableModelSizePrior,
+    log_Cv::Real,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    m = length(beta_indices(provider))
+    length(model_prior) == m ||
+        throw(DimensionMismatch("model-prior length $(length(model_prior)) does not match beta dimension $m"))
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    length(stickable_beta) == m || throw(DimensionMismatch("stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
+    n_inactive_stickable = count(j -> stickable_beta[j] && !active_beta[j], 1:m)
+    iszero(n_inactive_stickable) && return -Inf
+    k = count(active_beta)
+    k < length(model_prior) || return -Inf
+    log_q = _exchangeable_log_q_zero(provider, x, active_beta)
+    log_rho = model_prior.log_omega[k + 2] - model_prior.log_omega[k + 1] + log(k + 1) - log(m - k)
+    return Float64(log_Cv) + log_q + log(n_inactive_stickable) + log_rho
+end
+
+function boundary_logweights!(
+    out::AbstractVector,
+    provider::AbstractGaussianSlabProvider,
+    model_prior::AbstractModelPriorOdds,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    indices = beta_indices(provider)
+    m = length(indices)
+    length(out) == m || throw(DimensionMismatch("out length $(length(out)) does not match beta dimension $m"))
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    length(stickable_beta) == m || throw(DimensionMismatch("stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
+
+    fill!(out, -Inf)
+    mean, cov = _current_mean_cov(provider, x)
+    beta_values = x[indices]
+    A = _active_positions(active_beta, m)
+
+    if isempty(A)
+        @inbounds for j in 1:m
+            if stickable_beta[j] && !active_beta[j]
+                var = cov[j, j]
+                var > 0 || throw(ArgumentError("conditional variance must be positive, got $var"))
+                log_q = -0.5 * (_LOG2PI + log(var) + mean[j]^2 / var)
+                out[j] = log_model_add_odds(model_prior, active_beta, j) + log_q
+            end
+        end
+        return out
+    end
+
+    cov_AA = Matrix{Float64}(cov[A, A])
+    F = cholesky(Symmetric(cov_AA); check=true)
+    delta_A = Vector{Float64}(beta_values[A] .- mean[A])
+    solved_delta = F \ delta_A
+
+    @inbounds for j in 1:m
+        if stickable_beta[j] && !active_beta[j]
+            cov_jA = Vector{Float64}(cov[j, A])
+            solved_cross = F \ cov_jA
+            cond_mean = mean[j] + dot(cov_jA, solved_delta)
+            cond_var = cov[j, j] - dot(cov_jA, solved_cross)
+            cond_var > 0 || throw(ArgumentError("conditional variance must be positive, got $cond_var"))
+            log_q = -0.5 * (_LOG2PI + log(cond_var) + cond_mean^2 / cond_var)
+            out[j] = log_model_add_odds(model_prior, active_beta, j) + log_q
+        end
+    end
+    return out
+end
+
+function aggregate_lograte(
+    provider::AbstractSlabBoundary,
+    model_prior::AbstractModelPriorOdds,
+    log_Cv::Real,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    weights = Vector{Float64}(undef, length(beta_indices(provider)))
+    boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
+    lse = LogExpFunctions.logsumexp(weights)
+    isfinite(lse) || return -Inf
+    return Float64(log_Cv) + lse
+end
+
+"""
+    sample_unstick_label(rng, provider, model_prior, x, active_beta, stickable_beta)
+
+Sample a full-state coordinate label from the inactive stickable beta
+coordinates, with probabilities proportional to the boundary weights.
+"""
+function sample_unstick_label(
+    rng::Random.AbstractRNG,
+    provider::AbstractSlabBoundary,
+    model_prior::AbstractModelPriorOdds,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    weights = Vector{Float64}(undef, length(beta_indices(provider)))
+    boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
+    maxv = maximum(weights)
+    isfinite(maxv) || throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
+    probs = exp.(weights .- maxv)
+    j_beta = sample(rng, eachindex(probs), Weights(probs))
+    return beta_indices(provider)[j_beta]
+end
+
+function sample_unstick_label(
+    rng::Random.AbstractRNG,
+    provider::AbstractExchangeableGaussianSlab,
+    model_prior::ExchangeableModelSizePrior,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    indices = beta_indices(provider)
+    candidates = Int[]
+    for j in eachindex(indices)
+        stickable_beta[j] && !active_beta[j] && push!(candidates, indices[j])
+    end
+    isempty(candidates) && throw(ArgumentError("cannot sample an unstick label because there are no inactive stickable coordinates"))
+    return rand(rng, candidates)
+end
+
+"""
+    DependentSlabTarget(d, posterior_grad!, prior_grad!, slab_provider, model_prior_odds;
+                        initial_free=trues(d))
+
+Gradient target for dependent-slab sticky samplers. The returned callable writes
+`posterior_grad - prior_grad + active_slab_neggrad` into `out` and synchronizes
+its active beta set through `set_active_set!`.
+"""
+mutable struct DependentSlabTarget{PG,RG,S<:AbstractSlabBoundary,O<:AbstractModelPriorOdds} <: Function
     d::Int
     posterior_grad!::PG
     prior_grad!::RG
@@ -224,7 +1026,7 @@ function DependentSlabTarget(
     d::Integer,
     posterior_grad!,
     prior_grad!,
-    slab_provider::AbstractGaussianSlabProvider,
+    slab_provider::AbstractSlabBoundary,
     model_prior_odds::AbstractModelPriorOdds;
     initial_free::BitVector=trues(Int(d)),
 )
