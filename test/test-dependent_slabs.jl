@@ -48,8 +48,24 @@ end
 
         bb = BetaBernoulliModelPriorOdds(4, 2.0, 3.0)
         active_bb = BitVector([true, false, true, false])
+        @test length(bb) == 4
         @test log_model_add_odds(bb, active_bb, 2) ≈ log(2.0 + 2) - log(3.0 + 4 - 2 - 1)
         @test_throws ArgumentError log_model_add_odds(bb, active_bb, 1)
+
+        log_omega = log.([0.1, 0.2, 0.3, 0.4])
+        size_prior = ExchangeableModelSizePrior(log_omega; normalize=true)
+        @test exp(LogExpFunctions.logsumexp(size_prior.log_omega)) ≈ 1.0
+        @test length(size_prior) == 3
+        size_prior_copy = copy(size_prior)
+        size_prior.log_omega[1] = -99.0
+        @test size_prior_copy.log_omega[1] != size_prior.log_omega[1]
+
+        active_size = BitVector([true, false, false])
+        @test log_model_add_odds(size_prior_copy, active_size, 2) ≈
+              size_prior_copy.log_omega[3] - size_prior_copy.log_omega[2] + log(2) - log(2)
+        @test_throws BoundsError log_model_add_odds(size_prior_copy, active_size, 0)
+        @test_throws DimensionMismatch log_model_add_odds(size_prior_copy, BitVector([false, true]), 1)
+        @test_throws ArgumentError log_model_add_odds(size_prior_copy, active_size, 1)
     end
 
     @testset "Dense Gaussian slab conditioning" begin
@@ -63,6 +79,9 @@ end
         slab_mean, slab_cov = gaussian_slab(provider, x)
         @test slab_mean == mean
         @test slab_cov == cov
+        @test log_boundary_density_zero(provider, x, falses(3), 2) ≈
+              conditional_logdensity_zero(provider, x, falses(3), 2)
+        @test_throws ArgumentError DenseGaussianSlab(zeros(2), [1.0 2.0; 2.0 1.0], 1:2)
 
         active = BitVector([true, false, true])
         @test active_logdensity(provider, x, active) ≈
@@ -113,6 +132,32 @@ end
         _active_prior_grad_alloc(provider, out, x, active)
         @test _active_prior_grad_alloc(provider, out, x, active) == 0
         @test_throws DimensionMismatch active_prior_grad!(provider, out, x, BitVector([true, false]))
+
+        out_block = fill(NaN, length(indices))
+        active_prior_grad!(provider, out_block, x, active)
+        expected_block = zeros(length(indices))
+        expected_block[A] .= expected_active
+        @test out_block ≈ expected_block
+
+        @test_throws DimensionMismatch active_prior_grad!(provider, fill(NaN, 4), x, active)
+
+        all_active = trues(3)
+        active_prior_grad!(provider, out_block, x, all_active)
+        @test out_block ≈ cov \ (x[indices] - mean)
+
+        empty_out = fill(NaN, length(x))
+        active_prior_grad!(provider, empty_out, x, falses(3))
+        @test empty_out == zeros(length(x))
+
+        exch = ExchangeableGaussianSlab(indices, 0.2, 1.3, 0.1)
+        generic_empty_out = fill(NaN, length(x))
+        active_prior_grad!(exch, generic_empty_out, x, falses(3))
+        @test generic_empty_out == zeros(length(x))
+        active_prior_grad!(exch, generic_empty_out, x, BitVector([true, false, true]))
+        exch_mean, exch_cov = gaussian_slab(exch, x)
+        expected_exch = zeros(length(x))
+        expected_exch[indices[[1, 3]]] .= exch_cov[[1, 3], [1, 3]] \ (x[indices[[1, 3]]] - exch_mean[[1, 3]])
+        @test generic_empty_out ≈ expected_exch
     end
 
     @testset "DependentSlabTarget and active-set synchronization" begin
@@ -137,6 +182,14 @@ end
         grad2 = PDMPSamplers.compute_gradient_for_reflection!(state, model.grad, flow, cache)
         @test grad2 ≈ [0.0, -2.0, 0.0]
         @test target.free == state.free
+
+        target_copy = copy(target)
+        @test target_copy !== target
+        @test target_copy.free == target.free
+        @test target_copy.free !== target.free
+        @test target_copy.slab_provider !== target.slab_provider
+        target.free[1] = !target.free[1]
+        @test target_copy.free != target.free
     end
 
     @testset "Arbitrary slab target baseline" begin
@@ -229,9 +282,38 @@ end
             active_prior_grad! = (out, x, active) -> (fill!(out, 0.0); out),
         )
         @test slab_cache_style(cb) isa NoSlabCache
+        @test slab_cache_key(cb, x, active) === nothing
+        cb_copy = copy(cb)
+        @test beta_indices(cb_copy) == indices
+        @test beta_indices(cb_copy) !== beta_indices(cb)
+
+        cb_grad = CallbackGaussianSlab(indices;
+            mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
+            active_prior_grad! = (out, x, active) -> (out .= active .* x[indices]; out),
+        )
+        cb_out = fill(NaN, 4)
+        @test active_prior_grad!(cb_grad, cb_out, x, active) === cb_out
+        @test cb_out ≈ active .* x[indices]
+        cb_no_grad = CallbackGaussianSlab(indices;
+            mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
+        )
+        @test_throws ArgumentError active_prior_grad!(cb_no_grad, cb_out, x, active)
+
         cb_weights = fill(NaN, 4)
         boundary_logweights!(cb_weights, cb, odds, x, active, stickable)
         @test cb_weights ≈ expected
+
+        empty_active = falses(4)
+        empty_weights = fill(NaN, 4)
+        boundary_logweights!(empty_weights, cb, odds, x, empty_active, stickable)
+        expected_empty = fill(-Inf, 4)
+        for j in eachindex(expected_empty)
+            if stickable[j]
+                expected_empty[j] = log_model_add_odds(odds, empty_active, j) +
+                                    logpdf(Normal(mean[j], sqrt(cov[j, j])), 0.0)
+            end
+        end
+        @test empty_weights ≈ expected_empty
     end
 
     @testset "Exchangeable slabs and model-size prior" begin
@@ -255,6 +337,30 @@ end
         @test exch_weights ≈ dense_weights
         @test slab_cache_style(exch) isa FixedCovarianceCache
         @test slab_cache_style(zero_exch) isa FixedCovarianceCache
+        @test slab_cache_key(exch, x, active) == active
+        @test slab_cache_key(exch, x, active) !== active
+        @test slab_cache_key(zero_exch, x, active) == active
+
+        exch_mean = fill(NaN, 4)
+        exch_cov = fill(NaN, 4, 4)
+        @test gaussian_slab!(exch, exch_mean, exch_cov, x) === nothing
+        @test exch_mean == fill(μ, 4)
+        @test exch_cov ≈ dense_cov
+        @test_throws DimensionMismatch gaussian_slab!(exch, fill(NaN, 3), exch_cov, x)
+        @test_throws DimensionMismatch gaussian_slab!(exch, exch_mean, fill(NaN, 3, 3), x)
+
+        zero_mean = fill(NaN, 4)
+        zero_cov = fill(NaN, 4, 4)
+        @test gaussian_slab!(zero_exch, zero_mean, zero_cov, x) === nothing
+        @test zero_mean == zeros(4)
+        @test zero_cov ≈ dense_cov
+
+        exch_copy = copy(exch)
+        zero_copy = copy(zero_exch)
+        @test beta_indices(exch_copy) == indices
+        @test beta_indices(exch_copy) !== beta_indices(exch)
+        @test beta_indices(zero_copy) == indices
+        @test beta_indices(zero_copy) !== beta_indices(zero_exch)
 
         x_same_sum = [0.5, 0.0, 0.1, 0.0]
         x_other_same_sum = [0.2, 0.0, 0.4, 0.0]
