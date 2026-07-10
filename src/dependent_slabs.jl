@@ -669,6 +669,81 @@ struct SummedRateClock{P<:AbstractSlabBoundary,O<:AbstractModelPriorOdds,T<:Real
     bracket_multiplier::T
 end
 
+"""
+    AggregateClockDiagnostics
+
+Mutable counters for residual-envelope aggregate clocks. `residual_area` is
+reserved for certified proposal-envelope implementations; exact fallback
+sampling leaves residual and envelope counters at zero and increments
+`fallbacks`.
+"""
+mutable struct AggregateClockDiagnostics
+    proposals::Int
+    accepted::Int
+    rejected::Int
+    fallbacks::Int
+    residual_area::Float64
+    true_hazard::Float64
+    envelope_hazard::Float64
+    max_envelope_ratio::Float64
+    max_residual::Float64
+    min_envelope::Float64
+    rate_evaluations::Int
+    last_cells::Int
+end
+
+AggregateClockDiagnostics() = AggregateClockDiagnostics(0, 0, 0, 0, 0.0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0)
+
+function reset_thinning_diagnostics!(diagnostics::AggregateClockDiagnostics)
+    diagnostics.proposals = 0
+    diagnostics.accepted = 0
+    diagnostics.rejected = 0
+    diagnostics.fallbacks = 0
+    diagnostics.residual_area = 0.0
+    diagnostics.true_hazard = 0.0
+    diagnostics.envelope_hazard = 0.0
+    diagnostics.max_envelope_ratio = 1.0
+    diagnostics.max_residual = 0.0
+    diagnostics.min_envelope = Inf
+    diagnostics.rate_evaluations = 0
+    diagnostics.last_cells = 0
+    return diagnostics
+end
+
+"""
+    ChebyshevResidualAggregateClock(slab_provider, model_prior_odds; ...)
+
+Phase-6 moving-scale aggregate clock entry point for linear-flow residual
+envelopes. Until a provider supplies a genuinely certified residual bound,
+sampling routes through the exact `SummedRateClock` fallback.
+"""
+struct ChebyshevResidualAggregateClock{P<:AbstractSlabBoundary,O<:AbstractModelPriorOdds,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
+    slab_provider::P
+    model_prior_odds::O
+    order::Int
+    max_cells::Int
+    residual_budget::T
+    diagnostics::AggregateClockDiagnostics
+    fallback::S
+end
+
+"""
+    FourierResidualAggregateClock(slab_provider, model_prior_odds; ...)
+
+Phase-6 moving-scale aggregate clock entry point for Boomerang/Fourier residual
+proposal envelopes. Until a provider supplies a genuinely certified residual
+bound, sampling routes through the exact `SummedRateClock` fallback.
+"""
+struct FourierResidualAggregateClock{P<:AbstractSlabBoundary,O<:AbstractModelPriorOdds,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
+    slab_provider::P
+    model_prior_odds::O
+    order::Int
+    cells::Int
+    residual_budget::T
+    diagnostics::AggregateClockDiagnostics
+    fallback::S
+end
+
 mutable struct LinearGaussianAggregateCache
     active_beta::BitVector
     stickable_beta::BitVector
@@ -770,6 +845,91 @@ Base.copy(clock::SummedRateClock) = SummedRateClock(
     initial_bracket=clock.initial_bracket,
     bracket_multiplier=clock.bracket_multiplier,
 )
+
+function ChebyshevResidualAggregateClock(
+    slab_provider::AbstractSlabBoundary,
+    model_prior_odds::AbstractModelPriorOdds;
+    order::Integer=16,
+    max_cells::Integer=64,
+    residual_budget::Real=1e-8,
+    rtol::Real=1e-8,
+    atol::Real=1e-10,
+    initial_bracket::Real=1.0,
+    bracket_multiplier::Real=2.0,
+)
+    order > 0 || throw(ArgumentError("order must be positive"))
+    max_cells > 0 || throw(ArgumentError("max_cells must be positive"))
+    residual_budget >= 0 || throw(ArgumentError("residual_budget must be non-negative"))
+    fallback = SummedRateClock(slab_provider, model_prior_odds; rtol, atol, initial_bracket, bracket_multiplier)
+    return ChebyshevResidualAggregateClock(slab_provider, model_prior_odds, Int(order), Int(max_cells), Float64(residual_budget), AggregateClockDiagnostics(), fallback)
+end
+
+Base.copy(clock::ChebyshevResidualAggregateClock) = ChebyshevResidualAggregateClock(
+    _copy_callable(clock.slab_provider),
+    _copy_callable(clock.model_prior_odds);
+    order=clock.order,
+    max_cells=clock.max_cells,
+    residual_budget=clock.residual_budget,
+    rtol=clock.fallback.rtol,
+    atol=clock.fallback.atol,
+    initial_bracket=clock.fallback.initial_bracket,
+    bracket_multiplier=clock.fallback.bracket_multiplier,
+)
+
+function FourierResidualAggregateClock(
+    slab_provider::AbstractSlabBoundary,
+    model_prior_odds::AbstractModelPriorOdds;
+    order::Integer=16,
+    cells::Integer=32,
+    residual_budget::Real=1e-8,
+    rtol::Real=1e-8,
+    atol::Real=1e-10,
+    initial_bracket::Real=1.0,
+    bracket_multiplier::Real=2.0,
+)
+    order > 0 || throw(ArgumentError("order must be positive"))
+    cells > 0 || throw(ArgumentError("cells must be positive"))
+    residual_budget >= 0 || throw(ArgumentError("residual_budget must be non-negative"))
+    fallback = SummedRateClock(slab_provider, model_prior_odds; rtol, atol, initial_bracket, bracket_multiplier)
+    return FourierResidualAggregateClock(slab_provider, model_prior_odds, Int(order), Int(cells), Float64(residual_budget), AggregateClockDiagnostics(), fallback)
+end
+
+Base.copy(clock::FourierResidualAggregateClock) = FourierResidualAggregateClock(
+    _copy_callable(clock.slab_provider),
+    _copy_callable(clock.model_prior_odds);
+    order=clock.order,
+    cells=clock.cells,
+    residual_budget=clock.residual_budget,
+    rtol=clock.fallback.rtol,
+    atol=clock.fallback.atol,
+    initial_bracket=clock.fallback.initial_bracket,
+    bracket_multiplier=clock.fallback.bracket_multiplier,
+)
+
+reset_thinning_diagnostics!(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}) =
+    reset_thinning_diagnostics!(clock.diagnostics)
+
+function thinning_diagnostics(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock})
+    d = clock.diagnostics
+    proposal_count = max(d.proposals, 1)
+    envelope_hazard = max(d.envelope_hazard, eps(Float64))
+    return (
+        proposals=d.proposals,
+        accepted=d.accepted,
+        rejected=d.rejected,
+        fallbacks=d.fallbacks,
+        residual_area=d.residual_area,
+        true_hazard=d.true_hazard,
+        envelope_hazard=d.envelope_hazard,
+        empirical_acceptance=d.accepted / proposal_count,
+        hazard_acceptance=d.true_hazard / envelope_hazard,
+        max_envelope_ratio=d.max_envelope_ratio,
+        max_residual=d.max_residual,
+        min_envelope=d.min_envelope,
+        rate_evaluations=d.rate_evaluations,
+        last_cells=d.last_cells,
+    )
+end
 
 function _active_beta_from_free(provider::AbstractSlabBoundary, free::BitVector)
     indices = beta_indices(provider)

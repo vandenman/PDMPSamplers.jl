@@ -288,6 +288,26 @@ function sample_label(rng::Random.AbstractRNG, clock::SummedRateClock, ::Continu
     return sample_unstick_label(rng, clock.slab_provider, clock.model_prior_odds, state.ξ.x, active_beta, stickable_beta)
 end
 
+_fallback_clock(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}) = clock.fallback
+
+rate(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
+    rate(_fallback_clock(clock), flow, state, τ, can_stick)
+
+cumulative_hazard(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
+    cumulative_hazard(_fallback_clock(clock), flow, state, t0, t1, can_stick)
+
+sample_time(rng::Random.AbstractRNG, clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
+    _sample_time_exact_fallback(rng, clock, flow, state, horizon, can_stick)
+
+sample_label(rng::Random.AbstractRNG, clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, can_stick::BitVector) =
+    sample_label(rng, _fallback_clock(clock), flow, state, can_stick)
+
+function _sample_time_exact_fallback(rng::Random.AbstractRNG, clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock},
+                                     flow::ContinuousDynamics, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+    clock.diagnostics.fallbacks += 1
+    return sample_time(rng, clock.fallback, flow, state, horizon, can_stick)
+end
+
 function sample_label(rng::Random.AbstractRNG, clock::AbstractAggregateUnstickClock, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     state_at = _clock_state_at(state, flow, τ)
     return sample_label(rng, clock, flow, state_at, can_stick)

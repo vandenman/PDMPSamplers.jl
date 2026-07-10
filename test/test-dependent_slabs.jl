@@ -448,6 +448,74 @@ end
         @test τ ≈ rand(rng_ref, Exponential()) / λ0 rtol=1e-7 atol=1e-8
     end
 
+    @testset "Residual aggregate clocks delegate to exact fallback" begin
+        provider = ArbitrarySlabBoundary(1:2;
+            active_prior_neggrad! = (out, x, active) -> (fill!(out, 0.0); out),
+            log_q_zero! = (x, active, j) -> logpdf(Normal(0.0, 1.0 + 0.25 * abs(x[j])), 0.0),
+        )
+        odds = BernoulliModelPriorOdds(fill(0.5, 2))
+        summed = SummedRateClock(provider, odds; rtol=1e-8, atol=1e-10)
+        cheb = ChebyshevResidualAggregateClock(provider, odds; order=8, max_cells=4, residual_budget=0.0)
+        fourier = FourierResidualAggregateClock(provider, odds; order=8, cells=4, residual_budget=0.0)
+        flow = ZigZag(2)
+        state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.5, -0.25], [1.0, -1.0]),
+            falses(2),
+            zeros(2),
+        )
+        can_stick = trues(2)
+
+        for residual_clock in (cheb, fourier)
+            @test PDMPSamplers.rate(residual_clock, flow, state, 0.3, can_stick) ≈
+                  PDMPSamplers.rate(summed, flow, state, 0.3, can_stick)
+            @test PDMPSamplers.cumulative_hazard(residual_clock, flow, state, 0.0, 0.7, can_stick) ≈
+                  PDMPSamplers.cumulative_hazard(summed, flow, state, 0.0, 0.7, can_stick)
+            @test PDMPSamplers.sample_label(MersenneTwister(11), residual_clock, flow, state, can_stick) ==
+                  PDMPSamplers.sample_label(MersenneTwister(11), summed, flow, state, can_stick)
+            @test PDMPSamplers.sample_time(MersenneTwister(12), residual_clock, flow, state, 0.5, can_stick) ==
+                  PDMPSamplers.sample_time(MersenneTwister(12), summed, flow, state, 0.5, can_stick)
+        end
+
+        @test_throws ArgumentError ChebyshevResidualAggregateClock(provider, odds; order=0)
+        @test_throws ArgumentError ChebyshevResidualAggregateClock(provider, odds; max_cells=0)
+        @test_throws ArgumentError FourierResidualAggregateClock(provider, odds; order=0)
+        @test_throws ArgumentError FourierResidualAggregateClock(provider, odds; cells=0)
+        @test_throws ArgumentError FourierResidualAggregateClock(provider, odds; residual_budget=-1.0)
+
+        copied = copy(cheb)
+        @test copied.order == cheb.order
+        @test copied.max_cells == cheb.max_cells
+        @test copied.residual_budget == cheb.residual_budget
+        @test copied.slab_provider !== cheb.slab_provider
+
+        residual_clock = ChebyshevResidualAggregateClock(provider, odds; order=8, max_cells=4, residual_budget=0.5)
+        PDMPSamplers.reset_thinning_diagnostics!(residual_clock)
+        τ = PDMPSamplers.sample_time(MersenneTwister(13), residual_clock, flow, state, 3.0, can_stick)
+        @test τ == PDMPSamplers.sample_time(MersenneTwister(13), summed, flow, state, 3.0, can_stick)
+        diagnostics = PDMPSamplers.thinning_diagnostics(residual_clock)
+        @test diagnostics.fallbacks == 1
+        @test diagnostics.proposals == 0
+        @test diagnostics.residual_area == 0.0
+        @test diagnostics.envelope_hazard == 0.0
+        @test diagnostics.rate_evaluations == 0
+
+        PDMPSamplers.reset_thinning_diagnostics!(residual_clock)
+        @test PDMPSamplers.thinning_diagnostics(residual_clock).proposals == 0
+        @test PDMPSamplers.thinning_diagnostics(residual_clock).fallbacks == 0
+
+        infinite_clock = FourierResidualAggregateClock(provider, odds; order=8, cells=4, residual_budget=0.5)
+        PDMPSamplers.sample_time(MersenneTwister(14), infinite_clock, flow, state, Inf, can_stick)
+        @test PDMPSamplers.thinning_diagnostics(infinite_clock).fallbacks == 1
+
+        fourier_residual = FourierResidualAggregateClock(provider, odds; order=4, cells=6, residual_budget=0.25)
+        @test PDMPSamplers.sample_time(MersenneTwister(15), fourier_residual, flow, state, 2.0, can_stick) ==
+              PDMPSamplers.sample_time(MersenneTwister(15), summed, flow, state, 2.0, can_stick)
+        fourier_diagnostics = PDMPSamplers.thinning_diagnostics(fourier_residual)
+        @test fourier_diagnostics.fallbacks == 1
+        @test fourier_diagnostics.rate_evaluations == 0
+    end
+
     @testset "AggregateSticky requests sticky state" begin
         d = 2
         provider = ArbitrarySlabBoundary(1:d;
