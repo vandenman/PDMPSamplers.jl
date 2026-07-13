@@ -336,6 +336,8 @@ struct IndependentZeroMeanLogscaleGaussianSlab <: AbstractGaussianSlabProvider
         all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
         all(>(0), logscale_indices) || throw(ArgumentError("logscale_indices must be positive"))
         length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+        isempty(intersect(Int.(beta_indices), Int.(logscale_indices))) ||
+            throw(ArgumentError("logscale_indices must be disjoint from beta_indices"))
         new(Vector{Int}(beta_indices), Vector{Int}(logscale_indices), Vector{Float64}(log_base_scales))
     end
 end
@@ -366,6 +368,8 @@ struct GlobalLogscaleExchangeableGaussianSlab <: AbstractExchangeableGaussianSla
         all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
         length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
         logscale_index > 0 || throw(ArgumentError("logscale_index must be positive"))
+        Int(logscale_index) in Int.(beta_indices) &&
+            throw(ArgumentError("logscale_index must be disjoint from beta_indices"))
         p = length(beta_indices)
         u_f = Float64(u0)
         v_f = Float64(v0)
@@ -775,7 +779,9 @@ end
 
 Write the active slab prior contribution into `out`. Despite the historical
 `active_prior_grad!` name, the contract is the negative-gradient contribution
-used by `DependentSlabTarget`: `posterior_grad - base_prior_grad + slab_buf`.
+used by `DependentSlabTarget`: `posterior_grad - slab_prior_grad + active_slab_buf`.
+The subtracted prior callback must contain only the slab component; nuisance
+prior terms should remain in the posterior gradient.
 For dense fixed Gaussian slabs this method is allocation-free after warmup.
 """
 function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
@@ -956,7 +962,6 @@ mutable struct AggregateClockDiagnostics
     rejected::Int
     fallbacks::Int
     residual_area::Float64
-    true_hazard::Float64
     envelope_hazard::Float64
     max_envelope_ratio::Float64
     max_residual::Float64
@@ -965,7 +970,7 @@ mutable struct AggregateClockDiagnostics
     last_cells::Int
 end
 
-AggregateClockDiagnostics() = AggregateClockDiagnostics(0, 0, 0, 0, 0.0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0)
+AggregateClockDiagnostics() = AggregateClockDiagnostics(0, 0, 0, 0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0)
 
 function reset_thinning_diagnostics!(diagnostics::AggregateClockDiagnostics)
     diagnostics.proposals = 0
@@ -973,7 +978,6 @@ function reset_thinning_diagnostics!(diagnostics::AggregateClockDiagnostics)
     diagnostics.rejected = 0
     diagnostics.fallbacks = 0
     diagnostics.residual_area = 0.0
-    diagnostics.true_hazard = 0.0
     diagnostics.envelope_hazard = 0.0
     diagnostics.max_envelope_ratio = 1.0
     diagnostics.max_residual = 0.0
@@ -1154,6 +1158,8 @@ Base.copy(clock::ExponentialSumAggregateClock) = ExponentialSumAggregateClock(
 
 default_aggregate_unstick_clock(provider::IndependentZeroMeanLogscaleGaussianSlab, odds::AbstractModelPriorOdds) =
     ExponentialSumAggregateClock(provider, odds)
+default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab, odds::AbstractModelPriorOdds) =
+    ChebyshevResidualAggregateClock(provider, odds; allow_slow_fallback=false)
 default_aggregate_unstick_clock(provider::AbstractGaussianSlabProvider, odds::AbstractModelPriorOdds) =
     slab_cache_style(provider) isa FixedCovarianceCache ? LinearGaussianAggregateClock(provider, odds) : SummedRateClock(provider, odds)
 default_aggregate_unstick_clock(provider::AbstractSlabBoundary, odds::AbstractModelPriorOdds) =
@@ -1254,17 +1260,15 @@ reset_thinning_diagnostics!(clock::Union{ChebyshevResidualAggregateClock,Fourier
 function thinning_diagnostics(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock})
     d = clock.diagnostics
     proposal_count = max(d.proposals, 1)
-    envelope_hazard = max(d.envelope_hazard, eps(Float64))
     return (
         proposals=d.proposals,
         accepted=d.accepted,
         rejected=d.rejected,
         fallbacks=d.fallbacks,
         residual_area=d.residual_area,
-        true_hazard=d.true_hazard,
         envelope_hazard=d.envelope_hazard,
         empirical_acceptance=d.accepted / proposal_count,
-        hazard_acceptance=d.true_hazard / envelope_hazard,
+        hazard_acceptance=missing,
         max_envelope_ratio=d.max_envelope_ratio,
         max_residual=d.max_residual,
         min_envelope=d.min_envelope,
@@ -1480,7 +1484,7 @@ function aggregate_lograte(
     weights = Vector{Float64}(undef, length(beta_indices(provider)))
     boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
     lse = LogExpFunctions.logsumexp(weights)
-    isfinite(lse) || return -Inf
+    lse == -Inf && return -Inf
     return Float64(log_Cv) + lse
 end
 
@@ -1501,7 +1505,15 @@ function sample_unstick_label(
     weights = Vector{Float64}(undef, length(beta_indices(provider)))
     boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
     maxv = maximum(weights)
-    isfinite(maxv) || throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
+    maxv == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
+    if maxv == Inf
+        candidates = Int[]
+        indices = beta_indices(provider)
+        @inbounds for j in eachindex(weights)
+            weights[j] == Inf && push!(candidates, indices[j])
+        end
+        return rand(rng, candidates)
+    end
     probs = exp.(weights .- maxv)
     j_beta = sample(rng, eachindex(probs), Weights(probs))
     return beta_indices(provider)[j_beta]
@@ -1529,8 +1541,10 @@ end
                         initial_free=trues(d))
 
 Gradient target for dependent-slab sticky samplers. The returned callable writes
-`posterior_grad - prior_grad + active_slab_neggrad` into `out` and synchronizes
-its active beta set through `set_active_set!`.
+`posterior_grad - slab_prior_grad + active_slab_neggrad` into `out` and
+synchronizes its active beta set through `set_active_set!`. The prior callback
+must be the slab-prior negative gradient only, before active-set conditioning;
+nuisance-prior terms must remain in `posterior_grad!`.
 """
 mutable struct DependentSlabTarget{PG,RG,S<:AbstractSlabBoundary,O<:AbstractModelPriorOdds} <: Function
     d::Int

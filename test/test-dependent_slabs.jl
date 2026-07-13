@@ -66,6 +66,18 @@ end
         @test_throws BoundsError log_model_add_odds(size_prior_copy, active_size, 0)
         @test_throws DimensionMismatch log_model_add_odds(size_prior_copy, BitVector([false, true]), 1)
         @test_throws ArgumentError log_model_add_odds(size_prior_copy, active_size, 1)
+
+        endpoint_provider = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
+        endpoint_prior_one = BernoulliModelPriorOdds([1.0])
+        endpoint_prior_zero = BernoulliModelPriorOdds([0.0])
+        endpoint_active = falses(1)
+        endpoint_stickable = trues(1)
+        endpoint_weights = fill(NaN, 1)
+        boundary_logweights!(endpoint_weights, endpoint_provider, endpoint_prior_one, zeros(1), endpoint_active, endpoint_stickable)
+        @test endpoint_weights == [Inf]
+        @test aggregate_lograte(endpoint_provider, endpoint_prior_one, 0.0, zeros(1), endpoint_active, endpoint_stickable) == Inf
+        @test aggregate_lograte(endpoint_provider, endpoint_prior_zero, 0.0, zeros(1), endpoint_active, endpoint_stickable) == -Inf
+        @test sample_unstick_label(MersenneTwister(101), endpoint_provider, endpoint_prior_one, zeros(1), endpoint_active, endpoint_stickable) == 1
     end
 
     @testset "Dense Gaussian slab conditioning" begin
@@ -184,6 +196,8 @@ end
         @test logscale_out ≈ expected_logscale
         @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
               -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
+        @test_throws ArgumentError IndependentZeroMeanLogscaleGaussianSlab([1, 2], [2, 3], zeros(2))
+        @test_throws ArgumentError GlobalLogscaleExchangeableGaussianSlab([1, 2], 2, 1.0, 0.1)
     end
 
     @testset "DependentSlabTarget and active-set synchronization" begin
@@ -216,6 +230,15 @@ end
         @test target_copy.slab_provider !== target.slab_provider
         target.free[1] = !target.free[1]
         @test target_copy.free != target.free
+
+        nuisance_posterior_grad!(out, x) = (out .= [x[1], 2x[2]]; out)
+        slab_only_prior_grad!(out, x) = (out .= [x[1], 0.0]; out)
+        one_beta_slab = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
+        nuisance_target = DependentSlabTarget(2, nuisance_posterior_grad!, slab_only_prior_grad!, one_beta_slab, BernoulliModelPriorOdds([0.5]);
+            initial_free=BitVector([false, true]))
+        nuisance_out = fill(NaN, 2)
+        nuisance_target(nuisance_out, [3.0, 4.0])
+        @test nuisance_out ≈ [0.0, 8.0]
     end
 
     @testset "Arbitrary slab target baseline" begin
@@ -494,6 +517,17 @@ end
         @test PDMPSamplers.sample_time(MersenneTwister(200), indep_clock, flow, indep_state, Inf, indep_can_stick) ≈
               rand(MersenneTwister(200), Exponential()) / λ_indep rtol=1e-7 atol=1e-8
 
+        endpoint_linear = LinearGaussianAggregateClock(DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1]), BernoulliModelPriorOdds([1.0]))
+        endpoint_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0], [0.0]), falses(1), zeros(1))
+        @test PDMPSamplers.rate(endpoint_linear, flow, endpoint_state, 0.0, trues(1)) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(203), endpoint_linear, flow, endpoint_state, 1.0, trues(1)) == 0.0
+        @test PDMPSamplers.sample_label(MersenneTwister(204), endpoint_linear, flow, endpoint_state, trues(1)) == 1
+        endpoint_underflow = LinearGaussianAggregateClock(DenseGaussianSlab([1000.0], reshape([1.0], 1, 1), [1]), BernoulliModelPriorOdds([1.0]))
+        @test PDMPSamplers.rate(endpoint_underflow, flow, endpoint_state, 0.0, trues(1)) == Inf
+        @test PDMPSamplers.cumulative_hazard(endpoint_underflow, flow, endpoint_state, 0.0, 1.0, trues(1)) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(209), endpoint_underflow, flow, endpoint_state, 1.0, trues(1)) == 0.0
+        @test PDMPSamplers.sample_label(MersenneTwister(210), endpoint_underflow, flow, endpoint_state, trues(1)) == 1
+
         μ = 0.3
         u = 1.4
         v = 0.25
@@ -551,6 +585,16 @@ end
         full_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, trues(4))
         subset_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, subset_all_inactive)
         @test subset_rate ≈ full_rate * count(subset_all_inactive) / 4
+
+        endpoint_exch = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:2, 1.0, 0.1), BernoulliModelPriorOdds([1.0, 0.0]))
+        endpoint_exch_state = StickyPDMPState(Ref(0.0), SkeletonPoint(zeros(2), zeros(2)), falses(2), zeros(2))
+        @test PDMPSamplers.rate(endpoint_exch, flow, endpoint_exch_state, 0.0, trues(2)) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(205), endpoint_exch, flow, endpoint_exch_state, 1.0, trues(2)) == 0.0
+        @test PDMPSamplers.sample_label(MersenneTwister(206), endpoint_exch, flow, endpoint_exch_state, trues(2)) == 1
+        endpoint_exch_second = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:2, 1.0, 0.1), BernoulliModelPriorOdds([0.0, 1.0]))
+        @test PDMPSamplers.rate(endpoint_exch_second, flow, endpoint_exch_state, 0.0, trues(2)) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(207), endpoint_exch_second, flow, endpoint_exch_state, 1.0, trues(2)) == 0.0
+        @test PDMPSamplers.sample_label(MersenneTwister(208), endpoint_exch_second, flow, endpoint_exch_state, trues(2)) == 2
 
         independent_exch = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, 0.0), BernoulliModelPriorOdds(fill(0.5, 4)))
         independent_dense = LinearGaussianAggregateClock(DenseGaussianSlab(zeros(4), Matrix{Float64}(I, 4, 4) .* u, 1:4), BernoulliModelPriorOdds(fill(0.5, 4)))
@@ -699,6 +743,8 @@ end
 
         scalar_provider = GlobalLogscaleExchangeableGaussianSlab(1:3, 4, 1.1, 0.25; logscale_offset=0.1)
         scalar_odds = BernoulliModelPriorOdds(fill(0.5, 3))
+        @test default_aggregate_unstick_clock(scalar_provider, scalar_odds) isa ChebyshevResidualAggregateClock
+        @test !default_aggregate_unstick_clock(scalar_provider, scalar_odds).allow_slow_fallback
         scalar_clock = ChebyshevResidualAggregateClock(scalar_provider, scalar_odds;
             order=10, max_cells=64, residual_budget=1e-3, allow_slow_fallback=false)
         scalar_flow = ZigZag(4)
@@ -720,6 +766,73 @@ end
         scalar_diag = thinning_diagnostics(scalar_clock)
         @test scalar_diag.fallbacks == 0
         @test scalar_diag.last_cells <= scalar_clock.max_cells
+        @test ismissing(scalar_diag.hazard_acceptance)
+
+        endpoint_scalar_odds = BernoulliModelPriorOdds([1.0, 0.0, 0.0])
+        endpoint_scalar_clock = ChebyshevResidualAggregateClock(scalar_provider, endpoint_scalar_odds;
+            order=10, max_cells=64, residual_budget=1e-3, allow_slow_fallback=false)
+        endpoint_scalar_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0, 0.0, 0.0], zeros(4)),
+            falses(4),
+            zeros(4),
+        )
+        @test PDMPSamplers.rate(endpoint_scalar_clock, scalar_flow, endpoint_scalar_state, 0.1, scalar_can_stick) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(19), endpoint_scalar_clock, scalar_flow, endpoint_scalar_state, 1.0, scalar_can_stick) == 0.0
+        @test PDMPSamplers.sample_label(MersenneTwister(20), endpoint_scalar_clock, scalar_flow, endpoint_scalar_state, scalar_can_stick) == 1
+
+        default_scalar_clock = default_aggregate_unstick_clock(scalar_provider, endpoint_scalar_odds)
+        all_frozen_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0, 0.0, 0.2], [0.0, 0.0, 0.0, 0.15]),
+            BitVector([false, false, false, true]),
+            zeros(4),
+        )
+        @test PDMPSamplers.sample_time(MersenneTwister(21), default_scalar_clock, scalar_flow, all_frozen_state, Inf, scalar_can_stick) == 0.0
+
+        tiny_provider = GlobalLogscaleExchangeableGaussianSlab(1:1, 2, 1.0, 0.0; logscale_offset=100.0)
+        tiny_odds = BernoulliModelPriorOdds([0.5])
+        tiny_clock = default_aggregate_unstick_clock(tiny_provider, tiny_odds)
+        tiny_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0], [0.0, 0.0]),
+            falses(2),
+            zeros(2),
+        )
+        tiny_can_stick = BitVector([true, false])
+        tiny_rate = PDMPSamplers.rate(tiny_clock, ZigZag(2), tiny_state, 0.0, tiny_can_stick)
+        tiny_threshold = rand(MersenneTwister(22), Exponential())
+        @test tiny_rate > 0
+        @test PDMPSamplers.sample_time(MersenneTwister(22), tiny_clock, ZigZag(2), tiny_state, Inf, tiny_can_stick) ≈
+              tiny_threshold / tiny_rate rtol=1e-12
+
+        defective_provider = GlobalLogscaleExchangeableGaussianSlab(1:1, 2, 1.0, 0.0; logscale_offset=10.0)
+        defective_clock = default_aggregate_unstick_clock(defective_provider, tiny_odds)
+        defective_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0], [0.0, 1.0]),
+            falses(2),
+            zeros(2),
+        )
+        @test PDMPSamplers.sample_time(MersenneTwister(23), defective_clock, ZigZag(2), defective_state, Inf, tiny_can_stick) == Inf
+
+        peak_provider = GlobalLogscaleExchangeableGaussianSlab(1:2, 3, 1.0, 1.0)
+        peak_clock = default_aggregate_unstick_clock(peak_provider, BernoulliModelPriorOdds(fill(0.5, 2)))
+        peak_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([-20.0, 0.0, 0.0], [2.0, 0.0, -1.0]),
+            BitVector([true, false, true]),
+            zeros(3),
+        )
+        peak_can_stick = BitVector([true, true, false])
+        peak_seg = scalar_logscale_gaussian_line_segment(peak_provider, BernoulliModelPriorOdds(fill(0.5, 2)), ZigZag(3), peak_state, peak_can_stick, Inf)
+        @test peak_seg.a ≈ -10.0
+        @test peak_seg.b ≈ 1.0
+        @test peak_seg.r ≈ -1.0
+        @test PDMPSamplers._scalar_logscale_gaussian_line_available_hazard(peak_seg) ≈ 1.0 rtol=1e-6
+        peak_time = PDMPSamplers.sample_time(MersenneTwister(1), peak_clock, ZigZag(3), peak_state, Inf, peak_can_stick)
+        @test isfinite(peak_time)
+        @test abs(peak_time - 10.0) < 1e-2
 
         residual_clock = ChebyshevResidualAggregateClock(provider, odds; order=8, max_cells=4, residual_budget=0.5)
         PDMPSamplers.reset_thinning_diagnostics!(residual_clock)
@@ -770,6 +883,27 @@ end
         _, _, linear_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(124), ZigZag(d), model, linear_alg, 0.0, ξ)
         @test linear_internal.clock !== linear_clock
         @test linear_internal.clock.cache !== linear_clock.cache
+
+        scalar_provider = GlobalLogscaleExchangeableGaussianSlab(1:2, 3, 1.0, 0.1)
+        scalar_clock = default_aggregate_unstick_clock(scalar_provider, BernoulliModelPriorOdds([0.0, 1.0]))
+        scalar_alg = AggregateSticky(GridThinningStrategy(), scalar_clock, BitVector([true, true, false]))
+        scalar_model = PDMPModel(3, FullGradient((out, x) -> (fill!(out, 0.0); out)), nothing)
+        all_frozen_ξ = SkeletonPoint([0.0, 0.0, 0.2], [0.0, 0.0, 0.15])
+        _, _, all_frozen_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(130), ZigZag(3), scalar_model, scalar_alg, 0.0, all_frozen_ξ)
+        @test all_frozen_internal.aggregate_unstick_time == 0.0
+        moving_away_ξ = SkeletonPoint([1.0, 0.0, 0.2], [1.0, 0.0, 0.15])
+        _, _, moving_away_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(131), ZigZag(3), scalar_model, scalar_alg, 0.0, moving_away_ξ)
+        @test moving_away_internal.aggregate_unstick_time == 0.0
+
+        defective_provider2 = GlobalLogscaleExchangeableGaussianSlab(1:1, 2, 1.0, 0.0; logscale_offset=10.0)
+        defective_clock2 = default_aggregate_unstick_clock(defective_provider2, BernoulliModelPriorOdds([0.5]))
+        defective_alg = AggregateSticky(GridThinningStrategy(), defective_clock2, BitVector([true, false]))
+        defective_model = PDMPModel(2, FullGradient((out, x) -> (fill!(out, 0.0); out)), nothing)
+        defective_ξ = SkeletonPoint([0.0, 0.0], [0.0, 1.0])
+        defective_state2, _, defective_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(132), ZigZag(2), defective_model, defective_alg, 0.0, defective_ξ)
+        @test defective_internal.aggregate_unstick_time == Inf
+        PDMPSamplers.update_all_unfreeze_times!(MersenneTwister(133), defective_internal, defective_state2, ZigZag(2))
+        @test defective_internal.aggregate_unstick_time == Inf
 
         non_grid_alg = AggregateSticky(ThinningStrategy(GlobalBounds(1.0, d)), clock, trues(d))
         @test_throws ArgumentError PDMPSamplers.initialize_state(MersenneTwister(125), ZigZag(d), model, non_grid_alg, 0.0, ξ)
