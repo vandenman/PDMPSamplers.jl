@@ -46,6 +46,29 @@ linear-flow segment; state-dependent callback providers should use `NoSlabCache`
 abstract type AbstractSlabCacheStyle end
 
 """
+    AbstractCertifiedResidualCapability
+    NoCertifiedResidualCapability
+
+Trait objects for providers that can support certified residual proposal
+envelopes. `NoCertifiedResidualCapability` means the provider has not supplied
+enough structure or validated bounds for a Chebyshev/Fourier residual clock.
+"""
+abstract type AbstractCertifiedResidualCapability end
+
+struct NoCertifiedResidualCapability <: AbstractCertifiedResidualCapability end
+struct FloatingPointScalarResidualCapability <: AbstractCertifiedResidualCapability end
+
+struct ScalarLogscaleGaussianLineSegment <: AbstractCertifiedResidualCapability
+    a::Float64
+    b::Float64
+    s0::Float64
+    ell0::Float64
+    r::Float64
+    log_total_weight::Float64
+    horizon::Float64
+end
+
+"""
     NoSlabCache
 
 Cache trait for slab boundary providers whose active-face quantities cannot be
@@ -266,9 +289,100 @@ struct ZeroMeanExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
     end
 end
 
+"""
+    IndependentZeroMeanGaussianSlab(kappa, beta_indices=eachindex(kappa))
+
+Independent zero-mean fixed Gaussian slab parameterized by its boundary
+density at zero, `kappa[j] = q_j(0)`. This is the aggregate-clock equivalent of
+the R `independent_slab_density()` specification.
+"""
+struct IndependentZeroMeanGaussianSlab <: AbstractGaussianSlabProvider
+    beta_indices::Vector{Int}
+    kappa::Vector{Float64}
+    log_q_zero::Vector{Float64}
+    precision::Vector{Float64}
+    function IndependentZeroMeanGaussianSlab(kappa::AbstractVector{<:Real}, beta_indices::AbstractVector{<:Integer}=eachindex(kappa))
+        isempty(kappa) && throw(ArgumentError("kappa must be non-empty"))
+        length(beta_indices) == length(kappa) || throw(DimensionMismatch("beta_indices length $(length(beta_indices)) does not match kappa length $(length(kappa))"))
+        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+        κ = Vector{Float64}(kappa)
+        all(>(0), κ) || throw(ArgumentError("kappa entries must be positive"))
+        new(Vector{Int}(beta_indices), κ, log.(κ), @. 2π * κ^2)
+    end
+end
+
+"""
+    IndependentZeroMeanLogscaleGaussianSlab(beta_indices, logscale_indices, log_base_scales)
+
+Independent zero-mean Gaussian slab with
+`log(s_j(x)) = log_base_scales[j] + x[logscale_indices[j]]`. Repeated
+`logscale_indices` represent shared scale coordinates.
+"""
+struct IndependentZeroMeanLogscaleGaussianSlab <: AbstractGaussianSlabProvider
+    beta_indices::Vector{Int}
+    logscale_indices::Vector{Int}
+    log_base_scales::Vector{Float64}
+    function IndependentZeroMeanLogscaleGaussianSlab(
+        beta_indices::AbstractVector{<:Integer},
+        logscale_indices::AbstractVector{<:Integer},
+        log_base_scales::AbstractVector{<:Real},
+    )
+        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
+        length(logscale_indices) == length(beta_indices) ||
+            throw(DimensionMismatch("logscale_indices length $(length(logscale_indices)) does not match beta dimension $(length(beta_indices))"))
+        length(log_base_scales) == length(beta_indices) ||
+            throw(DimensionMismatch("log_base_scales length $(length(log_base_scales)) does not match beta dimension $(length(beta_indices))"))
+        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+        all(>(0), logscale_indices) || throw(ArgumentError("logscale_indices must be positive"))
+        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+        new(Vector{Int}(beta_indices), Vector{Int}(logscale_indices), Vector{Float64}(log_base_scales))
+    end
+end
+
+"""
+    GlobalLogscaleExchangeableGaussianSlab(beta_indices, logscale_index, u0, v0; mean=0, logscale_offset=0)
+
+Exchangeable Gaussian slab with covariance
+`exp(2 * (logscale_offset + x[logscale_index])) * (u0 I + v0 11')`.
+This provider is structured for future scalar residual certificates.
+"""
+struct GlobalLogscaleExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
+    beta_indices::Vector{Int}
+    logscale_index::Int
+    mean::Float64
+    u::Float64
+    v::Float64
+    logscale_offset::Float64
+    function GlobalLogscaleExchangeableGaussianSlab(
+        beta_indices::AbstractVector{<:Integer},
+        logscale_index::Integer,
+        u0::Real,
+        v0::Real;
+        mean::Real=0.0,
+        logscale_offset::Real=0.0,
+    )
+        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
+        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+        logscale_index > 0 || throw(ArgumentError("logscale_index must be positive"))
+        p = length(beta_indices)
+        u_f = Float64(u0)
+        v_f = Float64(v0)
+        u_f > 0 || throw(ArgumentError("u0 must be positive"))
+        u_f + p * v_f > 0 || throw(ArgumentError("u0 + p*v0 must be positive"))
+        new(Vector{Int}(beta_indices), Int(logscale_index), Float64(mean), u_f, v_f, Float64(logscale_offset))
+    end
+end
+
 Base.copy(provider::DenseGaussianSlab) = DenseGaussianSlab(copy(provider.mean), copy(provider.cov), copy(provider.beta_indices))
 Base.copy(provider::ExchangeableGaussianSlab) = ExchangeableGaussianSlab(copy(provider.beta_indices), provider.mean, provider.u, provider.v)
 Base.copy(provider::ZeroMeanExchangeableGaussianSlab) = ZeroMeanExchangeableGaussianSlab(copy(provider.beta_indices), provider.u, provider.v)
+Base.copy(provider::IndependentZeroMeanGaussianSlab) = IndependentZeroMeanGaussianSlab(copy(provider.kappa), copy(provider.beta_indices))
+Base.copy(provider::IndependentZeroMeanLogscaleGaussianSlab) =
+    IndependentZeroMeanLogscaleGaussianSlab(copy(provider.beta_indices), copy(provider.logscale_indices), copy(provider.log_base_scales))
+Base.copy(provider::GlobalLogscaleExchangeableGaussianSlab) =
+    GlobalLogscaleExchangeableGaussianSlab(copy(provider.beta_indices), provider.logscale_index, provider.u, provider.v; mean=provider.mean, logscale_offset=provider.logscale_offset)
 
 """
     beta_indices(provider)
@@ -296,8 +410,34 @@ does not support active-set-only caching.
 slab_cache_key(::AbstractSlabBoundary, ::AbstractVector, ::BitVector) = nothing
 slab_cache_style(::DenseGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::AbstractExchangeableGaussianSlab) = FixedCovarianceCache()
+slab_cache_style(::IndependentZeroMeanGaussianSlab) = FixedCovarianceCache()
+slab_cache_style(::IndependentZeroMeanLogscaleGaussianSlab) = NoSlabCache()
+slab_cache_style(::GlobalLogscaleExchangeableGaussianSlab) = NoSlabCache()
 slab_cache_key(::DenseGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
 slab_cache_key(::AbstractExchangeableGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
+slab_cache_key(::IndependentZeroMeanGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
+slab_cache_key(::IndependentZeroMeanLogscaleGaussianSlab, ::AbstractVector, ::BitVector) = nothing
+slab_cache_key(::GlobalLogscaleExchangeableGaussianSlab, ::AbstractVector, ::BitVector) = nothing
+
+"""
+    certified_residual_capability(provider, flow)
+
+Return a provider/flow-specific capability object for certified residual
+proposal envelopes, or `NoCertifiedResidualCapability()` when the provider is
+opaque or unsupported. A real capability must include the validated structural
+information needed to prove envelope domination over a trajectory segment; point
+evaluations from callbacks are not sufficient.
+"""
+certified_residual_capability(::AbstractSlabBoundary, ::Any) = NoCertifiedResidualCapability()
+
+"""
+    scalar_logscale_gaussian_line_segment(provider, model_prior, flow, state, can_stick, horizon)
+
+Return scalar segment parameters for structured globally scaled exchangeable
+Gaussian slabs. Methods are flow-specific and currently implemented with the
+aggregate sticky linear-flow code.
+"""
+function scalar_logscale_gaussian_line_segment end
 
 """
     gaussian_slab!(provider, mean_out, cov_out, x)
@@ -334,6 +474,44 @@ function gaussian_slab!(provider::ZeroMeanExchangeableGaussianSlab, mean_out::Ab
     fill!(cov_out, provider.v)
     @inbounds for i in 1:m
         cov_out[i, i] = provider.u + provider.v
+    end
+    return nothing
+end
+
+function gaussian_slab!(provider::IndependentZeroMeanGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
+    m = length(provider.beta_indices)
+    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
+    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
+    fill!(mean_out, 0.0)
+    fill!(cov_out, 0.0)
+    @inbounds for j in 1:m
+        cov_out[j, j] = inv(provider.precision[j])
+    end
+    return nothing
+end
+
+function gaussian_slab!(provider::IndependentZeroMeanLogscaleGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
+    m = length(provider.beta_indices)
+    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
+    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
+    fill!(mean_out, 0.0)
+    fill!(cov_out, 0.0)
+    @inbounds for j in 1:m
+        log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
+        cov_out[j, j] = exp(2log_s)
+    end
+    return nothing
+end
+
+function gaussian_slab!(provider::GlobalLogscaleExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
+    m = length(provider.beta_indices)
+    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
+    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
+    scale2 = exp(2 * (provider.logscale_offset + x[provider.logscale_index]))
+    fill!(mean_out, provider.mean)
+    fill!(cov_out, scale2 * provider.v)
+    @inbounds for i in 1:m
+        cov_out[i, i] = scale2 * (provider.u + provider.v)
     end
     return nothing
 end
@@ -486,6 +664,19 @@ Density version of `conditional_logdensity_zero`.
 conditional_density_zero(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector, j_beta::Integer) =
     exp(conditional_logdensity_zero(provider, x, active_beta, j_beta))
 
+function conditional_logdensity_zero(provider::IndependentZeroMeanGaussianSlab, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
+    1 <= j_beta <= length(provider.beta_indices) || throw(BoundsError(provider.kappa, j_beta))
+    active_beta[j_beta] && throw(ArgumentError("conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
+    return provider.log_q_zero[j_beta]
+end
+
+function conditional_logdensity_zero(provider::IndependentZeroMeanLogscaleGaussianSlab, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
+    1 <= j_beta <= length(provider.beta_indices) || throw(BoundsError(provider.log_base_scales, j_beta))
+    active_beta[j_beta] && throw(ArgumentError("conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
+    log_s = provider.log_base_scales[j_beta] + x[provider.logscale_indices[j_beta]]
+    return -0.5 * _LOG2PI - log_s
+end
+
 """
     log_boundary_density_zero(provider, x, active_beta, j_beta)
 
@@ -612,6 +803,88 @@ function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x:
     return _write_active_gradient!(out, indices, active_positions, work_rhs, k)
 end
 
+function active_prior_grad!(provider::IndependentZeroMeanGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    length(active_beta) == length(indices) ||
+        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    fill!(out, 0.0)
+    if length(out) == length(indices)
+        @inbounds for j in eachindex(indices)
+            active_beta[j] && (out[j] = provider.precision[j] * x[indices[j]])
+        end
+    elseif maximum(indices) <= length(out)
+        @inbounds for j in eachindex(indices)
+            active_beta[j] && (out[indices[j]] = provider.precision[j] * x[indices[j]])
+        end
+    else
+        throw(DimensionMismatch("out must have length $(length(indices)) for beta-block gradients or at least $(maximum(indices)) for full-state gradients"))
+    end
+    return out
+end
+
+function active_prior_grad!(provider::IndependentZeroMeanLogscaleGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    length(active_beta) == length(indices) ||
+        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    fill!(out, 0.0)
+    full_required = max(maximum(indices), maximum(provider.logscale_indices))
+    if length(out) == length(indices)
+        @inbounds for j in eachindex(indices)
+            if active_beta[j]
+                log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
+                out[j] = x[indices[j]] / exp(2log_s)
+            end
+        end
+        return out
+    elseif full_required <= length(out)
+        @inbounds for j in eachindex(indices)
+            if active_beta[j]
+                β = x[indices[j]]
+                log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
+                inv_s2 = exp(-2log_s)
+                out[indices[j]] += β * inv_s2
+                out[provider.logscale_indices[j]] += 1 - β^2 * inv_s2
+            end
+        end
+        return out
+    else
+        throw(DimensionMismatch("out must have length $(length(indices)) for beta-block gradients or at least $full_required for full-state gradients"))
+    end
+end
+
+function active_prior_grad!(provider::GlobalLogscaleExchangeableGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    length(active_beta) == length(indices) ||
+        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    fill!(out, 0.0)
+    active_positions = _active_positions(active_beta, length(indices))
+    isempty(active_positions) && return out
+    full_required = max(maximum(indices), provider.logscale_index)
+    length(out) >= full_required ||
+        throw(DimensionMismatch("GlobalLogscaleExchangeableGaussianSlab active gradients require a full-state output of length at least $full_required"))
+    μ = provider.mean
+    k = length(active_positions)
+    scale_log = provider.logscale_offset + x[provider.logscale_index]
+    scale_inv2 = exp(-2scale_log)
+    denom = provider.u + k * provider.v
+    inv_base_diag = (provider.u + (k - 1) * provider.v) / (provider.u * denom)
+    inv_base_off = -provider.v / (provider.u * denom)
+    centered_sum = 0.0
+    @inbounds for j in active_positions
+        centered_sum += x[indices[j]] - μ
+    end
+    quad = 0.0
+    @inbounds for j in active_positions
+        centered = x[indices[j]] - μ
+        base_solved = inv_base_diag * centered + inv_base_off * (centered_sum - centered)
+        grad = scale_inv2 * base_solved
+        out[indices[j]] += grad
+        quad += centered * grad
+    end
+    out[provider.logscale_index] += k - quad
+    return out
+end
+
 function active_prior_grad!(provider::AbstractGaussianSlabProvider, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     A = _active_positions(active_beta, length(indices))
@@ -714,8 +987,15 @@ end
     ChebyshevResidualAggregateClock(slab_provider, model_prior_odds; ...)
 
 Phase-6 moving-scale aggregate clock entry point for linear-flow residual
-envelopes. Until a provider supplies a genuinely certified residual bound,
-sampling routes through the exact `SummedRateClock` fallback.
+envelopes. Structured scalar residual paths use the direct interval-residual
+construction with conservative floating-point safety inflation and assume
+standard elementary functions such as `exp`, `log`, and `sqrt` are exact for
+the certificate. This is a model-level certificate, not a theorem-level
+machine-arithmetic certificate; an `IntervalArithmetic.jl` implementation with
+outward rounding should be considered a future extension. Unsupported providers
+route through the exact `SummedRateClock` fallback when
+`allow_slow_fallback=true`. Set `allow_slow_fallback=false` to require a
+provider/flow capability and error if none is available.
 """
 struct ChebyshevResidualAggregateClock{P<:AbstractSlabBoundary,O<:AbstractModelPriorOdds,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
     slab_provider::P
@@ -723,6 +1003,7 @@ struct ChebyshevResidualAggregateClock{P<:AbstractSlabBoundary,O<:AbstractModelP
     order::Int
     max_cells::Int
     residual_budget::T
+    allow_slow_fallback::Bool
     diagnostics::AggregateClockDiagnostics
     fallback::S
 end
@@ -732,7 +1013,9 @@ end
 
 Phase-6 moving-scale aggregate clock entry point for Boomerang/Fourier residual
 proposal envelopes. Until a provider supplies a genuinely certified residual
-bound, sampling routes through the exact `SummedRateClock` fallback.
+bound, sampling routes through the exact `SummedRateClock` fallback when
+`allow_slow_fallback=true`. Set `allow_slow_fallback=false` to require a
+certified provider/flow capability and error if none is available.
 """
 struct FourierResidualAggregateClock{P<:AbstractSlabBoundary,O<:AbstractModelPriorOdds,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
     slab_provider::P
@@ -740,6 +1023,7 @@ struct FourierResidualAggregateClock{P<:AbstractSlabBoundary,O<:AbstractModelPri
     order::Int
     cells::Int
     residual_budget::T
+    allow_slow_fallback::Bool
     diagnostics::AggregateClockDiagnostics
     fallback::S
 end
@@ -793,6 +1077,34 @@ struct LinearGaussianAggregateClock{P<:AbstractGaussianSlabProvider,O<:AbstractM
     cache::LinearGaussianAggregateCache
 end
 
+mutable struct ExponentialSumAggregateCache
+    active_beta::BitVector
+    stickable_beta::BitVector
+    logc::Vector{Float64}
+    slopes::Vector{Float64}
+    log_weights::Vector{Float64}
+end
+
+function ExponentialSumAggregateCache(m::Integer)
+    return ExponentialSumAggregateCache(BitVector(undef, m), BitVector(undef, m),
+        Vector{Float64}(undef, m), Vector{Float64}(undef, m), Vector{Float64}(undef, m))
+end
+
+"""
+    ExponentialSumAggregateClock(provider, model_prior_odds; rtol=1e-8, atol=1e-10)
+
+Exact aggregate clock for independent zero-mean Gaussian slabs whose log
+standard deviations are affine along linear-flow trajectories. The aggregate
+rate has the form `sum_j c_j * exp(-r_j * t)`.
+"""
+struct ExponentialSumAggregateClock{P<:IndependentZeroMeanLogscaleGaussianSlab,O<:AbstractModelPriorOdds,T<:Real} <: AbstractAggregateUnstickClock
+    slab_provider::P
+    model_prior_odds::O
+    rtol::T
+    atol::T
+    cache::ExponentialSumAggregateCache
+end
+
 function _check_model_prior_length(model_prior_odds::AbstractModelPriorOdds, slab_provider::AbstractSlabBoundary)
     m = length(beta_indices(slab_provider))
     length(model_prior_odds) == m ||
@@ -814,12 +1126,38 @@ function LinearGaussianAggregateClock(
     return LinearGaussianAggregateClock(slab_provider, model_prior_odds, Float64(rtol), Float64(atol), LinearGaussianAggregateCache(length(beta_indices(slab_provider))))
 end
 
+function ExponentialSumAggregateClock(
+    slab_provider::IndependentZeroMeanLogscaleGaussianSlab,
+    model_prior_odds::AbstractModelPriorOdds;
+    rtol::Real=1e-8,
+    atol::Real=1e-10,
+)
+    rtol > 0 || throw(ArgumentError("rtol must be positive"))
+    atol >= 0 || throw(ArgumentError("atol must be non-negative"))
+    _check_model_prior_length(model_prior_odds, slab_provider)
+    return ExponentialSumAggregateClock(slab_provider, model_prior_odds, Float64(rtol), Float64(atol), ExponentialSumAggregateCache(length(beta_indices(slab_provider))))
+end
+
 Base.copy(clock::LinearGaussianAggregateClock) = LinearGaussianAggregateClock(
     _copy_callable(clock.slab_provider),
     _copy_callable(clock.model_prior_odds);
     rtol=clock.rtol,
     atol=clock.atol,
 )
+
+Base.copy(clock::ExponentialSumAggregateClock) = ExponentialSumAggregateClock(
+    _copy_callable(clock.slab_provider),
+    _copy_callable(clock.model_prior_odds);
+    rtol=clock.rtol,
+    atol=clock.atol,
+)
+
+default_aggregate_unstick_clock(provider::IndependentZeroMeanLogscaleGaussianSlab, odds::AbstractModelPriorOdds) =
+    ExponentialSumAggregateClock(provider, odds)
+default_aggregate_unstick_clock(provider::AbstractGaussianSlabProvider, odds::AbstractModelPriorOdds) =
+    slab_cache_style(provider) isa FixedCovarianceCache ? LinearGaussianAggregateClock(provider, odds) : SummedRateClock(provider, odds)
+default_aggregate_unstick_clock(provider::AbstractSlabBoundary, odds::AbstractModelPriorOdds) =
+    SummedRateClock(provider, odds)
 
 function SummedRateClock(
     slab_provider::AbstractSlabBoundary,
@@ -852,6 +1190,7 @@ function ChebyshevResidualAggregateClock(
     order::Integer=16,
     max_cells::Integer=64,
     residual_budget::Real=1e-8,
+    allow_slow_fallback::Bool=true,
     rtol::Real=1e-8,
     atol::Real=1e-10,
     initial_bracket::Real=1.0,
@@ -861,7 +1200,7 @@ function ChebyshevResidualAggregateClock(
     max_cells > 0 || throw(ArgumentError("max_cells must be positive"))
     residual_budget >= 0 || throw(ArgumentError("residual_budget must be non-negative"))
     fallback = SummedRateClock(slab_provider, model_prior_odds; rtol, atol, initial_bracket, bracket_multiplier)
-    return ChebyshevResidualAggregateClock(slab_provider, model_prior_odds, Int(order), Int(max_cells), Float64(residual_budget), AggregateClockDiagnostics(), fallback)
+    return ChebyshevResidualAggregateClock(slab_provider, model_prior_odds, Int(order), Int(max_cells), Float64(residual_budget), Bool(allow_slow_fallback), AggregateClockDiagnostics(), fallback)
 end
 
 Base.copy(clock::ChebyshevResidualAggregateClock) = ChebyshevResidualAggregateClock(
@@ -870,6 +1209,7 @@ Base.copy(clock::ChebyshevResidualAggregateClock) = ChebyshevResidualAggregateCl
     order=clock.order,
     max_cells=clock.max_cells,
     residual_budget=clock.residual_budget,
+    allow_slow_fallback=clock.allow_slow_fallback,
     rtol=clock.fallback.rtol,
     atol=clock.fallback.atol,
     initial_bracket=clock.fallback.initial_bracket,
@@ -882,6 +1222,7 @@ function FourierResidualAggregateClock(
     order::Integer=16,
     cells::Integer=32,
     residual_budget::Real=1e-8,
+    allow_slow_fallback::Bool=true,
     rtol::Real=1e-8,
     atol::Real=1e-10,
     initial_bracket::Real=1.0,
@@ -891,7 +1232,7 @@ function FourierResidualAggregateClock(
     cells > 0 || throw(ArgumentError("cells must be positive"))
     residual_budget >= 0 || throw(ArgumentError("residual_budget must be non-negative"))
     fallback = SummedRateClock(slab_provider, model_prior_odds; rtol, atol, initial_bracket, bracket_multiplier)
-    return FourierResidualAggregateClock(slab_provider, model_prior_odds, Int(order), Int(cells), Float64(residual_budget), AggregateClockDiagnostics(), fallback)
+    return FourierResidualAggregateClock(slab_provider, model_prior_odds, Int(order), Int(cells), Float64(residual_budget), Bool(allow_slow_fallback), AggregateClockDiagnostics(), fallback)
 end
 
 Base.copy(clock::FourierResidualAggregateClock) = FourierResidualAggregateClock(
@@ -900,6 +1241,7 @@ Base.copy(clock::FourierResidualAggregateClock) = FourierResidualAggregateClock(
     order=clock.order,
     cells=clock.cells,
     residual_budget=clock.residual_budget,
+    allow_slow_fallback=clock.allow_slow_fallback,
     rtol=clock.fallback.rtol,
     atol=clock.fallback.atol,
     initial_bracket=clock.fallback.initial_bracket,
@@ -997,6 +1339,27 @@ function _exchangeable_conditional_params(provider::AbstractExchangeableGaussian
     c = v / denom
     cond_mean = μ + c * sum_centered
     cond_var = u * (u + (k + 1) * v) / denom
+    cond_var > 0 || throw(ArgumentError("conditional variance must be positive, got $cond_var"))
+    return cond_mean, cond_var
+end
+
+function _exchangeable_conditional_params(provider::GlobalLogscaleExchangeableGaussianSlab, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    m = length(indices)
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    k = count(active_beta)
+    μ = provider.mean
+    denom = provider.u + k * provider.v
+    denom > 0 || throw(ArgumentError("u + k*v must be positive, got $denom"))
+    sum_centered = 0.0
+    @inbounds for j in 1:m
+        active_beta[j] && (sum_centered += x[indices[j]] - μ)
+    end
+    c = provider.v / denom
+    cond_mean = μ + c * sum_centered
+    base_var = provider.u * (provider.u + (k + 1) * provider.v) / denom
+    scale2 = exp(2 * (provider.logscale_offset + x[provider.logscale_index]))
+    cond_var = scale2 * base_var
     cond_var > 0 || throw(ArgumentError("conditional variance must be positive, got $cond_var"))
     return cond_mean, cond_var
 end

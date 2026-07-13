@@ -72,7 +72,7 @@ Base.copy(g::CoordinateWiseGradient) = CoordinateWiseGradient(_copy_callable(g.f
 
 with_stats(grad::FullGradient,       stats::AbstractStatisticCounter) = FullGradient(with_stats(grad.f, stats))
 function with_stats(grad::SubsampledGradient, stats::AbstractStatisticCounter)
-    SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.full, grad.nsub,
+    SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, with_stats(grad.full, stats), grad.nsub,
                        grad.no_anchor_updates, grad.use_full_gradient_for_reflections, grad.resample_dt)
 end
 with_stats(grad::CoordinateWiseGradient, stats::AbstractStatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))

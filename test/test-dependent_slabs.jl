@@ -158,6 +158,32 @@ end
         expected_exch = zeros(length(x))
         expected_exch[indices[[1, 3]]] .= exch_cov[[1, 3], [1, 3]] \ (x[indices[[1, 3]]] - exch_mean[[1, 3]])
         @test generic_empty_out ≈ expected_exch
+
+        κ = [0.2, 0.5, 0.8]
+        indep = IndependentZeroMeanGaussianSlab(κ, indices)
+        indep_out = fill(NaN, length(x))
+        active_prior_grad!(indep, indep_out, x, active)
+        expected_indep = zeros(length(x))
+        expected_indep[indices[[1, 3]]] .= @. 2π * κ[[1, 3]]^2 * x[indices[[1, 3]]]
+        @test indep_out ≈ expected_indep
+        @test conditional_logdensity_zero(indep, x, active, 2) ≈ log(κ[2])
+
+        logscale = IndependentZeroMeanLogscaleGaussianSlab(indices, [1, 1, 3], log.([2.0, 3.0, 4.0]))
+        logscale_x = [0.1, 1.3, -0.2, -0.1, 0.8]
+        logscale_active = BitVector([true, true, false])
+        logscale_out = zeros(length(logscale_x))
+        active_prior_grad!(logscale, logscale_out, logscale_x, logscale_active)
+        expected_logscale = zeros(length(logscale_x))
+        for j in (1, 2)
+            β = logscale_x[indices[j]]
+            log_s = logscale.log_base_scales[j] + logscale_x[logscale.logscale_indices[j]]
+            inv_s2 = exp(-2log_s)
+            expected_logscale[indices[j]] += β * inv_s2
+            expected_logscale[logscale.logscale_indices[j]] += 1 - β^2 * inv_s2
+        end
+        @test logscale_out ≈ expected_logscale
+        @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
+              -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
     end
 
     @testset "DependentSlabTarget and active-set synchronization" begin
@@ -446,6 +472,180 @@ end
         rng_ref = MersenneTwister(99)
         τ = PDMPSamplers.sample_time(rng_time, const_clock, const_flow, const_state, Inf, const_can_stick)
         @test τ ≈ rand(rng_ref, Exponential()) / λ0 rtol=1e-7 atol=1e-8
+
+        κ = [0.25, 0.5, 0.75]
+        indep_provider = IndependentZeroMeanGaussianSlab(κ, 1:3)
+        indep_dense = DenseGaussianSlab(zeros(3), Matrix(Diagonal(@. inv(2π * κ^2))), 1:3)
+        indep_odds = BernoulliModelPriorOdds([0.3, 0.5, 0.8])
+        indep_clock = LinearGaussianAggregateClock(indep_provider, indep_odds)
+        indep_dense_clock = LinearGaussianAggregateClock(indep_dense, indep_odds)
+        indep_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([1.0, 0.0, -0.5], [0.2, 0.0, -0.3]),
+            BitVector([true, false, false]),
+            zeros(3),
+        )
+        indep_can_stick = BitVector([true, true, false])
+        @test PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick) ≈
+              PDMPSamplers.rate(indep_dense_clock, flow, indep_state, 0.0, indep_can_stick)
+        @test PDMPSamplers.rate(indep_clock, flow, indep_state, 1.5, indep_can_stick) ≈
+              PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick)
+        λ_indep = PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick)
+        @test PDMPSamplers.sample_time(MersenneTwister(200), indep_clock, flow, indep_state, Inf, indep_can_stick) ≈
+              rand(MersenneTwister(200), Exponential()) / λ_indep rtol=1e-7 atol=1e-8
+
+        μ = 0.3
+        u = 1.4
+        v = 0.25
+        exch_provider = ExchangeableGaussianSlab(1:4, μ, u, v)
+        dense_exch_provider = DenseGaussianSlab(fill(μ, 4), Matrix{Float64}(I, 4, 4) .* u .+ fill(v, 4, 4), 1:4)
+        nonexchangeable_odds = BernoulliModelPriorOdds([0.2, 0.5, 0.7, 0.8])
+        exch_clock = LinearGaussianAggregateClock(exch_provider, nonexchangeable_odds)
+        dense_exch_clock = LinearGaussianAggregateClock(dense_exch_provider, nonexchangeable_odds)
+        exch_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.8, 0.0, -0.2, 0.0], [1.1, 0.0, -0.7, 0.0]),
+            BitVector([true, false, true, false]),
+            zeros(4),
+        )
+        exch_can_stick = BitVector([true, true, true, false])
+        for flow_i in (ZigZag(4), BouncyParticle(4))
+            for τi in (0.0, 0.2, 0.9)
+                @test PDMPSamplers.rate(exch_clock, flow_i, exch_state, τi, exch_can_stick) ≈
+                      PDMPSamplers.rate(dense_exch_clock, flow_i, exch_state, τi, exch_can_stick)
+            end
+            for T_i in (0.3, 1.5)
+                @test PDMPSamplers.cumulative_hazard(exch_clock, flow_i, exch_state, 0.0, T_i, exch_can_stick) ≈
+                      PDMPSamplers.cumulative_hazard(dense_exch_clock, flow_i, exch_state, 0.0, T_i, exch_can_stick) rtol=1e-9 atol=1e-10
+            end
+            @test PDMPSamplers.sample_time(MersenneTwister(201), exch_clock, flow_i, exch_state, 2.0, exch_can_stick) ≈
+                  PDMPSamplers.sample_time(MersenneTwister(201), dense_exch_clock, flow_i, exch_state, 2.0, exch_can_stick) rtol=1e-7 atol=1e-8
+            @test PDMPSamplers.sample_label(MersenneTwister(202), exch_clock, flow_i, exch_state, 0.7, exch_can_stick) ==
+                  PDMPSamplers.sample_label(MersenneTwister(202), exch_clock, flow_i, exch_state, exch_can_stick)
+        end
+
+        zero_slope_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.8, 0.0, -0.2, 0.0], [1.0, 0.0, -1.0, 0.0]),
+            BitVector([true, false, true, false]),
+            zeros(4),
+        )
+        zero_slope_clock = LinearGaussianAggregateClock(exch_provider, BernoulliModelPriorOdds(fill(0.5, 4)))
+        λ_const = PDMPSamplers.rate(zero_slope_clock, flow, zero_slope_state, 0.0, exch_can_stick)
+        @test PDMPSamplers.rate(zero_slope_clock, flow, zero_slope_state, 1.0, exch_can_stick) ≈ λ_const
+        @test PDMPSamplers.cumulative_hazard(zero_slope_clock, flow, zero_slope_state, 0.0, 1.3, exch_can_stick) ≈ 1.3 * λ_const
+
+        bb_clock = LinearGaussianAggregateClock(exch_provider, BetaBernoulliModelPriorOdds(4, 2.0, 3.0))
+        bb_labels = [PDMPSamplers.sample_label(MersenneTwister(seed), bb_clock, flow, exch_state, exch_can_stick) for seed in 1:200]
+        @test all(==(2), bb_labels)
+
+        subset_all_inactive = BitVector([false, true, false, true])
+        subset_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint(zeros(4), zeros(4)),
+            falses(4),
+            zeros(4),
+        )
+        size_prior_subset = ExchangeableModelSizePrior(log.([0.2, 0.3, 0.25, 0.15, 0.1]))
+        subset_clock = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, v), size_prior_subset)
+        full_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, trues(4))
+        subset_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, subset_all_inactive)
+        @test subset_rate ≈ full_rate * count(subset_all_inactive) / 4
+
+        independent_exch = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, 0.0), BernoulliModelPriorOdds(fill(0.5, 4)))
+        independent_dense = LinearGaussianAggregateClock(DenseGaussianSlab(zeros(4), Matrix{Float64}(I, 4, 4) .* u, 1:4), BernoulliModelPriorOdds(fill(0.5, 4)))
+        @test PDMPSamplers.rate(independent_exch, flow, exch_state, 0.4, trues(4)) ≈
+              PDMPSamplers.rate(independent_dense, flow, exch_state, 0.4, trues(4))
+    end
+
+    @testset "Independent logscale exponential-sum clock" begin
+        provider = IndependentZeroMeanLogscaleGaussianSlab([1, 2, 3], [4, 4, 5], log.([2.0, 3.0, 4.0]))
+        odds = BernoulliModelPriorOdds([0.25, 0.5, 0.75])
+        clock = ExponentialSumAggregateClock(provider, odds)
+        flow = ZigZag(5)
+        state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0, 0.0, 0.2, -0.1], [0.0, 0.0, 0.0, 0.3, -0.2]),
+            falses(5),
+            zeros(5),
+        )
+        can_stick = BitVector([true, false, true, false, false])
+
+        function direct_rate(t)
+            total = 0.0
+            active = falses(3)
+            for j in (1, 3)
+                logρ = log_model_add_odds(odds, active, j)
+                log_s0 = provider.log_base_scales[j] + state.ξ.x[provider.logscale_indices[j]]
+                r = state.ξ.θ[provider.logscale_indices[j]]
+                total += exp(logρ - 0.5 * log(2π) - log_s0 - r * t)
+            end
+            return total
+        end
+
+        for τ in (0.0, 0.4, 1.2)
+            @test PDMPSamplers.rate(clock, flow, state, τ, can_stick) ≈ direct_rate(τ)
+        end
+        T = 1.7
+        H = PDMPSamplers.cumulative_hazard(clock, flow, state, 0.0, T, can_stick)
+        H_quad, _ = PDMPSamplers.QuadGK.quadgk(direct_rate, 0.0, T; rtol=1e-10, atol=1e-12)
+        @test H ≈ H_quad rtol=1e-9 atol=1e-10
+
+        τ_sample = PDMPSamplers.sample_time(MersenneTwister(301), clock, flow, state, 2.0, can_stick)
+        if isfinite(τ_sample)
+            threshold = rand(MersenneTwister(301), Exponential())
+            @test PDMPSamplers.cumulative_hazard(clock, flow, state, 0.0, τ_sample, can_stick) ≈ threshold rtol=1e-7 atol=1e-8
+        end
+
+        state_at = copy(state)
+        move_forward_time!(state_at, 0.6, flow)
+        @test PDMPSamplers.sample_label(MersenneTwister(302), clock, flow, state, 0.6, can_stick) ==
+              PDMPSamplers.sample_label(MersenneTwister(302), clock, flow, state_at, can_stick)
+        @test default_aggregate_unstick_clock(provider, odds) isa ExponentialSumAggregateClock
+    end
+
+    @testset "Global logscale exchangeable segment capability" begin
+        provider = GlobalLogscaleExchangeableGaussianSlab(1:3, 4, 1.2, 0.3; mean=0.0, logscale_offset=0.1)
+        odds = BernoulliModelPriorOdds(fill(0.5, 3))
+        flow = ZigZag(4)
+        state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.7, 0.0, -0.2, 0.4], [1.0, 0.0, -0.5, 0.25]),
+            BitVector([true, false, true, true]),
+            zeros(4),
+        )
+        can_stick = BitVector([true, true, true, false])
+        seg = scalar_logscale_gaussian_line_segment(provider, odds, flow, state, can_stick, 2.0)
+        k = 2
+        c = provider.v / (provider.u + k * provider.v)
+        base_s2 = provider.u * (provider.u + (k + 1) * provider.v) / (provider.u + k * provider.v)
+        @test seg.a ≈ c * (state.ξ.x[1] + state.ξ.x[3])
+        @test seg.b ≈ c * (state.ξ.θ[1] + state.ξ.θ[3])
+        @test seg.s0 ≈ sqrt(base_s2)
+        @test seg.ell0 ≈ provider.logscale_offset + state.ξ.x[provider.logscale_index]
+        @test seg.r ≈ state.ξ.θ[provider.logscale_index]
+
+        scaled_mean = fill(NaN, 3)
+        scaled_cov = fill(NaN, 3, 3)
+        gaussian_slab!(provider, scaled_mean, scaled_cov, state.ξ.x)
+        dense_scaled = DenseGaussianSlab(scaled_mean, scaled_cov, 1:3)
+        active_beta = BitVector([true, false, true])
+        @test conditional_logdensity_zero(provider, state.ξ.x, active_beta, 2) ≈
+              conditional_logdensity_zero(dense_scaled, state.ξ.x, active_beta, 2)
+
+        grad_out = zeros(4)
+        active_prior_grad!(provider, grad_out, state.ξ.x, active_beta)
+        function active_energy(xv)
+            mean_tmp, cov_tmp = gaussian_slab(provider, xv)
+            A = [1, 3]
+            return -logpdf(MvNormal(mean_tmp[A], cov_tmp[A, A]), xv[A])
+        end
+        eps_fd = 1e-6
+        for i in (1, 3, 4)
+            xp = copy(state.ξ.x); xm = copy(state.ξ.x)
+            xp[i] += eps_fd; xm[i] -= eps_fd
+            @test grad_out[i] ≈ (active_energy(xp) - active_energy(xm)) / (2eps_fd) rtol=1e-5 atol=1e-6
+        end
     end
 
     @testset "Residual aggregate clocks delegate to exact fallback" begin
@@ -487,7 +687,39 @@ end
         @test copied.order == cheb.order
         @test copied.max_cells == cheb.max_cells
         @test copied.residual_budget == cheb.residual_budget
+        @test copied.allow_slow_fallback == cheb.allow_slow_fallback
         @test copied.slab_provider !== cheb.slab_provider
+
+        strict_cheb = ChebyshevResidualAggregateClock(provider, odds; order=8, max_cells=4, allow_slow_fallback=false)
+        strict_fourier = FourierResidualAggregateClock(provider, odds; order=8, cells=4, allow_slow_fallback=false)
+        @test PDMPSamplers.certified_residual_capability(provider, flow) isa PDMPSamplers.NoCertifiedResidualCapability
+        @test_throws ArgumentError PDMPSamplers.sample_time(MersenneTwister(16), strict_cheb, flow, state, 1.0, can_stick)
+        @test_throws ArgumentError PDMPSamplers.sample_time(MersenneTwister(17), strict_fourier, flow, state, 1.0, can_stick)
+        @test PDMPSamplers.thinning_diagnostics(strict_cheb).fallbacks == 0
+
+        scalar_provider = GlobalLogscaleExchangeableGaussianSlab(1:3, 4, 1.1, 0.25; logscale_offset=0.1)
+        scalar_odds = BernoulliModelPriorOdds(fill(0.5, 3))
+        scalar_clock = ChebyshevResidualAggregateClock(scalar_provider, scalar_odds;
+            order=10, max_cells=64, residual_budget=1e-3, allow_slow_fallback=false)
+        scalar_flow = ZigZag(4)
+        scalar_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.6, 0.0, -0.3, 0.2], [0.8, 0.0, -0.4, 0.15]),
+            BitVector([true, false, true, true]),
+            zeros(4),
+        )
+        scalar_can_stick = BitVector([true, true, true, false])
+        seg = scalar_logscale_gaussian_line_segment(scalar_provider, scalar_odds, scalar_flow, scalar_state, scalar_can_stick, 1.5)
+        env = PDMPSamplers._build_scalar_residual_envelope(scalar_clock, seg)
+        for t in range(0.0, 1.5; length=501)
+            @test PDMPSamplers._envelope_rate(env, t) + 1e-10 >=
+                  PDMPSamplers._scalar_logscale_gaussian_line_rate(seg, t)
+        end
+        τ_scalar = PDMPSamplers.sample_time(MersenneTwister(18), scalar_clock, scalar_flow, scalar_state, 1.5, scalar_can_stick)
+        @test τ_scalar == Inf || 0.0 <= τ_scalar <= 1.5
+        scalar_diag = thinning_diagnostics(scalar_clock)
+        @test scalar_diag.fallbacks == 0
+        @test scalar_diag.last_cells <= scalar_clock.max_cells
 
         residual_clock = ChebyshevResidualAggregateClock(provider, odds; order=8, max_cells=4, residual_budget=0.5)
         PDMPSamplers.reset_thinning_diagnostics!(residual_clock)
