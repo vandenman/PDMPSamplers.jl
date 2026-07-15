@@ -118,6 +118,9 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     linear_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
     max_componentwise_affine_segments_per_cell::Int
+    lazy_low_tightness_threshold::Float64
+    lazy_max_low_tightness_rejections::Int
+    lazy_max_rejections::Int
 end
 
 _normalize_grid_bound(::Nothing) = :constant
@@ -134,17 +137,26 @@ end
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
     safety_limit::Int=500, early_stop_threshold::Real=5.0, use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false,
     lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing, linear_area_threshold::Real=0.95,
-    linear_min_area_gain::Real=0.0, max_rejections_before_tail_restart::Int=100, max_componentwise_affine_segments_per_cell::Int=64)
+    linear_min_area_gain::Real=0.0, max_rejections_before_tail_restart::Int=100, max_componentwise_affine_segments_per_cell::Int=64,
+    lazy_low_tightness_threshold::Real=0.1, lazy_max_low_tightness_rejections::Int=3, lazy_max_rejections::Int=0)
     bound_symbol = _normalize_grid_bound(bound)
     bound_violation_symbol = bound_violation === nothing ?
         (bound_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
+    lazy_low_tightness_threshold >= 0 ||
+        throw(ArgumentError("lazy_low_tightness_threshold must be nonnegative"))
+    lazy_max_low_tightness_rejections > 0 ||
+        throw(ArgumentError("lazy_max_low_tightness_rejections must be positive"))
+    lazy_max_rejections >= 0 ||
+        throw(ArgumentError("lazy_max_rejections must be nonnegative; use 0 for the default derived cap"))
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
         Float64(early_stop_threshold), use_fd_hvp, post_warmup_simplify,
         lazy, bound_symbol, curvature_bound, bound_violation_symbol,
         Float64(linear_area_threshold),
         Float64(linear_min_area_gain),
-        max_rejections_before_tail_restart, max_componentwise_affine_segments_per_cell)
+        max_rejections_before_tail_restart, max_componentwise_affine_segments_per_cell,
+        Float64(lazy_low_tightness_threshold), lazy_max_low_tightness_rejections,
+        lazy_max_rejections)
 end
 
 function Base.show(io::IO, strat::GridThinningStrategy)
@@ -172,11 +184,12 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     est = _default_early_stop(flow, strat.early_stop_threshold)
     est = _adjust_early_stop(model.grad, est)
     N_max = max(N_base + 4, 2 * N_base)
-    _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, est)
+    _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, est, stats)
 end
 
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
-_adjust_early_stop(::SubsampledGradient, ::Float64) = Inf
+_adjust_early_stop(grad::SubsampledGradient, est::Float64) =
+    grad.fixed_batch_within_event ? est : Inf
 
 function _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64,
     max_horizon_event::Symbol=:horizon_hit)
@@ -188,15 +201,36 @@ function _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh:
     return t_max, :horizon_hit
 end
 
-function _return_grid_horizon!(alg, stats::AbstractStatisticCounter, t_max::Float64, effective_horizon::Float64, horizon_event::Symbol, max_t_max::Float64, default_return)
+_adapt_grid_on_horizon!(alg, ::ContinuousDynamics) = nothing
+
+function _adapt_grid_on_horizon!(alg, ::PreconditionedDynamics{<:AbstractPreconditioner,<:ZigZag})
+    N = alg.N[]
+    new_N = max(alg.N_min, cld(N, 2))
+    new_N == N && return nothing
+    alg.N[] = new_N
+    return nothing
+end
+
+_restore_lazy_after_grid!(alg, ::ContinuousDynamics) = nothing
+
+function _restore_lazy_after_grid!(alg, ::AnyBoomerang)
+    alg.lazy_enabled[] = alg.lazy
+    return nothing
+end
+
+function _return_grid_horizon!(alg, stats::AbstractStatisticCounter, flow::ContinuousDynamics, t_max::Float64, effective_horizon::Float64, horizon_event::Symbol, max_t_max::Float64, default_return)
     _inc_counter_grid_horizon_hits(stats)
     alg.has_cached_gradient[] = false
+    horizon_event === :horizon_hit || (alg.has_cached_rate_derivative[] = false)
     if horizon_event === :horizon_hit
+        _adapt_grid_on_horizon!(alg, flow)
         alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
         recompute_time_grid!(alg)
         _inc_counter_grid_grows(stats)
+        _restore_lazy_after_grid!(alg, flow)
         return t_max, :horizon_hit, default_return
     end
+    _restore_lazy_after_grid!(alg, flow)
     return effective_horizon, horizon_event, default_return
 end
 
@@ -211,11 +245,12 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     return _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_base, est)
 end
 
-function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, N_max::Int, est) where S<:AbstractPDMPState
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, N_max::Int, est, stats=nothing) where S<:AbstractPDMPState
     T = typeof(strat.t_max)
     state_cache = copy(state)
     state_cache2 = copy(state)
     grad_provider = GradientProvider(state_cache.ξ.θ, flow, model.grad, cache)
+    fd_grad_provider = stats === nothing ? grad_provider : WithFDCurvatureStats(grad_provider, stats)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         PiecewiseAffineBound(2N_base),
@@ -243,10 +278,13 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         Ref(strat.lazy),
         similar(state.ξ.x),
         Ref(false),
+        Ref(NaN),
+        Ref(NaN),
+        Ref(false),
         grad_provider,
         GradHVPProvider(grad_provider, model.hvp),
         VHVProvider(grad_provider, model.vhv, similar(state.ξ.x)),
-        FiniteDiffVHV(grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x)),
+        FiniteDiffVHV(fd_grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x)),
         strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
@@ -254,6 +292,9 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         strat.linear_min_area_gain,
         strat.max_rejections_before_tail_restart,
         strat.max_componentwise_affine_segments_per_cell,
+        strat.lazy_low_tightness_threshold,
+        strat.lazy_max_low_tightness_rejections,
+        strat.lazy_max_rejections,
     )
 end
 
@@ -284,6 +325,9 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: P
     lazy_enabled::Base.RefValue{Bool}
     cached_gradient::Vector{Float64}
     has_cached_gradient::Base.RefValue{Bool}
+    cached_rate::Base.RefValue{Float64}
+    cached_rate_derivative::Base.RefValue{Float64}
+    has_cached_rate_derivative::Base.RefValue{Bool}
     grad_provider::P
     grad_hvp_provider::GH
     vhv_provider::VP
@@ -295,6 +339,9 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: P
     linear_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
     max_componentwise_affine_segments_per_cell::Int
+    lazy_low_tightness_threshold::Float64
+    lazy_max_low_tightness_rejections::Int
+    lazy_max_rejections::Int
 end
 
 accept_reflection_event(::Random.AbstractRNG, ::GridAdaptiveState, args...) = true
@@ -307,6 +354,7 @@ function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     alg.N[] = alg.N_max
     alg.lazy_enabled[] = alg.lazy
     alg.has_cached_gradient[] = false
+    alg.has_cached_rate_derivative[] = false
     recompute_time_grid!(alg)
 end
 
@@ -319,6 +367,18 @@ end
 
 function _invalidate_cached_gradient!(alg::GridAdaptiveState)
     alg.has_cached_gradient[] = false
+    alg.has_cached_rate_derivative[] = false
+    return nothing
+end
+
+function _cache_endpoint_rate_derivative!(alg::GridAdaptiveState, y::Real, d::Real, horizon_event::Symbol)
+    if horizon_event === :horizon_hit && isfinite(y) && isfinite(d)
+        alg.cached_rate[] = Float64(y)
+        alg.cached_rate_derivative[] = Float64(d)
+        alg.has_cached_rate_derivative[] = true
+    else
+        alg.has_cached_rate_derivative[] = false
+    end
     return nothing
 end
 
@@ -330,6 +390,7 @@ function _constant_bound_event_time(
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
 )
     λ_bound = alg.constant_bound_rate[]
+    alg.has_cached_rate_derivative[] = false
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
     default_return = GradientMeta(alg.empty_∇ϕx)
@@ -346,11 +407,13 @@ function _constant_bound_event_time(
         if τ_proposal >= t_max
             _inc_counter_grid_horizon_hits(stats)
             alg.has_cached_gradient[] = false
+            alg.has_cached_rate_derivative[] = false
             return t_max, horizon_event, default_return
         end
 
         if τ_refresh < τ_proposal
             alg.has_cached_gradient[] = false
+            alg.has_cached_rate_derivative[] = false
             return τ_refresh, :refresh, default_return
         end
 
@@ -507,6 +570,11 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit,
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe()) where {P, FL<:ContinuousDynamics}
 
+    time_offset = 0.0
+    tail_restart_count = 0
+
+    @label restart_from_tail
+
     pcb = alg.pcb
     state_ = alg.state_cache
     copyto!(state_, state)
@@ -527,6 +595,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
     modes = _grid_bound_modes(alg, state, flow, grad_and_hvp)
     had_cached_gradient = alg.has_cached_gradient[]
+    alg.has_cached_rate_derivative[] = false
     if modes.use_single_pass_signed
         alg.has_cached_gradient[] = false
         cached_gradient = had_cached_gradient ? alg.cached_gradient : nothing
@@ -541,12 +610,16 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             (NaN, NaN)
         end
         alg.has_cached_gradient[] = false
+        alg.has_cached_rate_derivative[] = false
         cached_gradient = nothing
     else
         cached_y0, cached_d0 = NaN, NaN
         cached_g0, cached_dg0 = NaN, NaN
         cached_gradient = nothing
-        modes.use_constant_batched_signed && (alg.has_cached_gradient[] = false)
+        if modes.use_constant_batched_signed
+            alg.has_cached_gradient[] = false
+            alg.has_cached_rate_derivative[] = false
+        end
     end
     n_cells_bounded, built_area = _build_grid_bound_prefix!(pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
         cumulative_exp, probe_failure_handler, modes; cached_gradient, cached_y0, cached_d0, cached_g0, cached_dg0)
@@ -577,12 +650,16 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         if τ_reflection >= effective_horizon
 
-            return _return_grid_horizon!(alg, stats, alg.t_max[], effective_horizon, horizon_event, max_t_max, default_return)
+            τ, event_type, meta = _return_grid_horizon!(
+                alg, stats, flow, alg.t_max[], effective_horizon, horizon_event, max_t_max, default_return)
+            return time_offset + τ, event_type, meta
         end
 
         if τ_refresh < τ_reflection
             alg.has_cached_gradient[] = false
-            return τ_refresh, :refresh, default_return
+            alg.has_cached_rate_derivative[] = false
+            _restore_lazy_after_grid!(alg, flow)
+            return time_offset + τ_refresh, :refresh, default_return
         end
 
         # Move from original position to proposed time for acceptance test
@@ -621,7 +698,9 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             alg.max_observed_rate[] = max(alg.max_observed_rate[], l_reflection)
             copyto!(alg.cached_gradient, ∇ϕx)
             alg.has_cached_gradient[] = true
-            return τ_reflection, :reflect, GradientMeta(∇ϕx)
+            alg.has_cached_rate_derivative[] = false
+            _restore_lazy_after_grid!(alg, flow)
+            return time_offset + τ_reflection, :reflect, GradientMeta(∇ϕx)
         end
 
         # Rejection: cumulative_exp has advanced, next proposal will be at a later time
@@ -632,7 +711,10 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             start_cell = n_cells_bounded + 1
             effective_horizon, horizon_event = _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
             modes = _grid_bound_modes(alg, state, flow, grad_and_hvp)
-            modes.use_constant_batched_signed && (alg.has_cached_gradient[] = false)
+            if modes.use_constant_batched_signed
+                alg.has_cached_gradient[] = false
+                alg.has_cached_rate_derivative[] = false
+            end
             n_cells_bounded, built_area = _build_grid_bound_prefix!(pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
                 cumulative_exp, probe_failure_handler, modes; start_cell, initial_integral=built_area, append=true)
         end
@@ -651,26 +733,37 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             _inc_counter_grid_shrinks(stats)
             _inc_counter_grid_budget_tail_restarts(stats)
             alg.has_cached_gradient[] = false
+            alg.has_cached_rate_derivative[] = false
 
             remaining_horizon = effective_horizon - last_rejected_time
             if remaining_horizon <= 0
-                return last_rejected_time, horizon_event, default_return
+                return time_offset + last_rejected_time, horizon_event, default_return
             end
 
             tail_state = alg.state_cache2
             copyto!(tail_state, state)
             move_forward_time!(tail_state, last_rejected_time, flow)
-            τ_tail, event_type, meta = _next_event_time_with_probe(
-                rng, model, flow, alg, tail_state, cache, stats,
-                remaining_horizon, false, horizon_event, probe_failure_handler)
-            return last_rejected_time + τ_tail, event_type, meta
+            time_offset += last_rejected_time
+            state = copy(tail_state)
+            max_horizon = remaining_horizon
+            include_refresh = false
+            max_horizon_event = horizon_event
+            tail_restart_count += 1
+            if tail_restart_count > alg.safety_limit
+                _throw_grid_safety_limit_error(state, flow, model;
+                    t_invalid=remaining_horizon,
+                    message="Tail restart limit reached in Grid algorithm")
+            end
+            @goto restart_from_tail
         end
         safety_limit -= 1
     end
 
     if isfinite(τ_refresh) && τ_refresh <= min(alg.t_max[], max_horizon)
         alg.has_cached_gradient[] = false
-        return τ_refresh, :refresh, default_return
+        alg.has_cached_rate_derivative[] = false
+        _restore_lazy_after_grid!(alg, flow)
+        return time_offset + τ_refresh, :refresh, default_return
     end
 
     _throw_grid_safety_limit_error(state, flow, model;
@@ -770,6 +863,12 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
             t_valid=0.0, t_invalid=0.0)
         alg.has_cached_gradient[] = false
+        alg.has_cached_rate_derivative[] = false
+    elseif alg.has_cached_rate_derivative[]
+        _inc_counter_grid_cached_endpoint_reuses(stats)
+        y_left = alg.cached_rate[]
+        d_left = alg.cached_rate_derivative[]
+        alg.has_cached_rate_derivative[] = false
     else
         _inc_counter_grid_endpoint_evaluations(stats)
         _inc_counter_grid_endpoint_gradient_calls(stats)
@@ -783,10 +882,11 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     cumulative_area = 0.0
     exp_target = rand(rng, Exponential())
     safety_limit = alg.safety_limit
-    max_rejections = min(25, max(10, alg.safety_limit ÷ 2))
+    default_max_rejections = min(25, max(10, alg.safety_limit ÷ 2))
+    max_rejections = alg.lazy_max_rejections > 0 ? alg.lazy_max_rejections : default_max_rejections
     low_tightness_rejections = 0
-    low_tightness_threshold = 0.1
-    max_low_tightness_rejections = 3
+    low_tightness_threshold = alg.lazy_low_tightness_threshold
+    max_low_tightness_rejections = alg.lazy_max_low_tightness_rejections
     no_event_cells = 0
     proposal_attempts = 0
     proposal_rejections = 0
@@ -821,7 +921,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         if Δt_cell <= 0.0
             # Reached the horizon
-            return _return_grid_horizon!(alg, stats, t_max, effective_horizon, horizon_event, max_t_max, default_return)
+            return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event, max_t_max, default_return)
         end
 
         # Move state_cache forward by Δt_cell to evaluate the right endpoint
@@ -857,113 +957,124 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
             # Check if we've exhausted the horizon
             if t_right >= effective_horizon
-                return _return_grid_horizon!(alg, stats, t_max, effective_horizon, horizon_event, max_t_max, default_return)
+                _cache_endpoint_rate_derivative!(alg, y_right, d_right, horizon_event)
+                return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event, max_t_max, default_return)
             end
             continue
         end
 
-        # Event is in this interval — propose time via inverse CDF
-        u_remaining = exp_target - cumulative_area
-        time_in_cell = u_remaining / pos(Λ_cell)
-        τ_proposal = t_left + time_in_cell
+        # Event is in this interval.  If a proposal is rejected, keep using the
+        # same constant cell bound for the remainder of the cell instead of
+        # rebuilding a new tangent bound at the rejected time.
+        while true
+            lb_proposal = pos(Λ_cell)
+            τ_proposal = t_left + (exp_target - cumulative_area) / lb_proposal
+            if τ_proposal >= t_right || !isfinite(τ_proposal)
+                no_event_cells += 1
+                t_left = t_right
+                y_left = y_right
+                d_left = d_right
+                cumulative_area = 0.0
+                exp_target = rand(rng, Exponential())
+                if t_right >= effective_horizon
+                    _cache_endpoint_rate_derivative!(alg, y_right, d_right, horizon_event)
+                    return _return_grid_horizon!(
+                        alg, stats, flow, t_max, effective_horizon, horizon_event,
+                        max_t_max, default_return)
+                end
+                break
+            end
 
-        # Check refresh
-        if τ_refresh < τ_proposal
-            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-            return τ_refresh, :refresh, default_return
-        end
+            if τ_refresh < τ_proposal
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                return τ_refresh, :refresh, default_return
+            end
 
-        # Acceptance test: move from original state to proposed time
-        state2_.t[] = state.t[]
-        copyto!(state2_.ξ, state.ξ)
-        move_forward_time!(state2_, τ_proposal, flow)
-        _inc_counter_grid_acceptance_gradient_calls(stats)
-        ∇ϕx = _compute_grid_gradient_or_throw!(
-            state2_, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
+            state2_.t[] = state.t[]
+            copyto!(state2_.ξ, state.ξ)
+            move_forward_time!(state2_, τ_proposal, flow)
+            _inc_counter_grid_acceptance_gradient_calls(stats)
+            ∇ϕx = _compute_grid_gradient_or_throw!(
+                state2_, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
 
-        l_actual = λ(state2_.ξ, ∇ϕx, flow)
-        _inc_counter_grid_acceptance_tests(stats)
-        proposal_attempts += 1
-        last_τ_proposal = τ_proposal
-        last_l_actual = l_actual
+            l_actual = λ(state2_.ξ, ∇ϕx, flow)
+            _inc_counter_grid_acceptance_tests(stats)
+            proposal_attempts += 1
+            last_τ_proposal = τ_proposal
+            last_l_actual = l_actual
 
-        tightness = _safe_tightness(l_actual, Λ_cell)
-        tightness_sum += tightness
-        min_tightness = min(min_tightness, tightness)
-        max_tightness = max(max_tightness, tightness)
+            tightness = _safe_tightness(l_actual, lb_proposal)
+            tightness_sum += tightness
+            min_tightness = min(min_tightness, tightness)
+            max_tightness = max(max_tightness, tightness)
 
-        if l_actual > pos(Λ_cell)
-            # Safety violation — fall back to eager grid with finer N
-            _inc_counter_lazy_fallback_bound_violation(stats)
-            _inc_counter_grid_bound_violations(stats)
-            if alg.bound_violation === :throw
-                throw(ErrorException("lazy constant GridThinning bound violated at proposal time"))
-            elseif alg.bound_violation === :shrink
+            if l_actual > lb_proposal
+                _inc_counter_lazy_fallback_bound_violation(stats)
+                _inc_counter_grid_bound_violations(stats)
+                if alg.bound_violation === :throw
+                    throw(ErrorException("lazy constant GridThinning bound violated at proposal time"))
+                elseif alg.bound_violation === :shrink
+                    _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                    alg.lazy_enabled[] = false
+                    alg.has_cached_gradient[] = false
+                    alg.has_cached_rate_derivative[] = false
+                    _shrink_grid_after_bound_violation!(alg, stats)
+                    return _next_event_time_grid!(
+                        rng, grad_and_hvp, model, flow, alg, state, cache, stats,
+                        max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+                end
                 _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 alg.lazy_enabled[] = false
                 alg.has_cached_gradient[] = false
-                _shrink_grid_after_bound_violation!(alg, stats)
-                return _next_event_time_grid!(
-                    rng, grad_and_hvp, model, flow, alg, state, cache, stats,
-                    max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+                alg.has_cached_rate_derivative[] = false
+                _increase_grid_N!(alg)
+                recompute_time_grid!(alg)
+                return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
             end
-            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-            alg.lazy_enabled[] = false
-            alg.has_cached_gradient[] = false
-            _increase_grid_N!(alg)
-            recompute_time_grid!(alg)
-            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-        end
 
-        if rand(rng) * pos(Λ_cell) <= l_actual
-            # Accepted — cache gradient for next call (2C)
-            copyto!(alg.cached_gradient, ∇ϕx)
-            alg.has_cached_gradient[] = true
+            if rand(rng) * lb_proposal <= l_actual
+                copyto!(alg.cached_gradient, ∇ϕx)
+                alg.has_cached_gradient[] = true
+                alg.has_cached_rate_derivative[] = false
 
-            _adapt_grid_N!(alg, tightness)
-            _adapt_grid_t_max!(alg, τ_proposal, model.grad)
-            _set_counter_grid_N_current(stats, alg.N[])
-            alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
-            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-            return τ_proposal, :reflect, GradientMeta(∇ϕx)
-        end
+                _adapt_grid_N!(alg, tightness)
+                _adapt_grid_t_max!(alg, τ_proposal, model.grad)
+                _set_counter_grid_N_current(stats, alg.N[])
+                alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                return τ_proposal, :reflect, GradientMeta(∇ϕx)
+            end
 
-        # Rejected — recycle gradient (2B).
-        # The gradient ∇ϕx from compute_gradient! is still valid at τ_proposal.
-        # Use it as cached gradient to save one gradient call in get_rate_and_deriv.
-        proposal_rejections += 1
-        if tightness < low_tightness_threshold
-            low_tightness_rejections += 1
-        else
-            low_tightness_rejections = 0
-        end
+            proposal_rejections += 1
+            if tightness < low_tightness_threshold
+                low_tightness_rejections += 1
+            else
+                low_tightness_rejections = 0
+            end
 
-        if low_tightness_rejections >= max_low_tightness_rejections
-            _inc_counter_lazy_fallback_low_tightness(stats)
-            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-            alg.lazy_enabled[] = false
-            alg.has_cached_gradient[] = false
-            _increase_grid_N!(alg)
-            recompute_time_grid!(alg)
-            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-        end
+            if low_tightness_rejections >= max_low_tightness_rejections
+                _inc_counter_lazy_fallback_low_tightness(stats)
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                alg.lazy_enabled[] = false
+                alg.has_cached_gradient[] = false
+                alg.has_cached_rate_derivative[] = false
+                _increase_grid_N!(alg)
+                recompute_time_grid!(alg)
+                return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+            end
 
-        if proposal_rejections >= max_rejections
-            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
-            alg.lazy_enabled[] = false
-            alg.has_cached_gradient[] = false
-            _increase_grid_N!(alg)
-            recompute_time_grid!(alg)
-            return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+            if proposal_rejections >= max_rejections
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                alg.lazy_enabled[] = false
+                alg.has_cached_gradient[] = false
+                alg.has_cached_rate_derivative[] = false
+                _increase_grid_N!(alg)
+                recompute_time_grid!(alg)
+                return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+            end
+
+            exp_target += rand(rng, Exponential())
         end
-        copyto!(state_, state2_)
-        _inc_counter_grid_cached_endpoint_reuses(stats)
-        y_left, d_left = _get_rate_and_deriv_or_throw(
-            probe_failure_handler, state_, flow, grad_and_hvp, false, ∇ϕx;
-            t_valid=τ_proposal, t_invalid=τ_proposal + eps(Float64))
-        t_left = τ_proposal
-        cumulative_area = 0.0
-        exp_target = rand(rng, Exponential())
     end
 
     if isfinite(τ_refresh) && τ_refresh <= min(t_max, max_horizon)

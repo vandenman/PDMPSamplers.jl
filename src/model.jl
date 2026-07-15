@@ -180,6 +180,8 @@ function set_active_set!(model::PDMPModel, free::BitVector)
     return nothing
 end
 
+_last_gradient_potential(::PDMPModel) = nothing
+
 struct InplaceHVP{F, O<:AbstractVector} <: Function
     f::F
     out::O

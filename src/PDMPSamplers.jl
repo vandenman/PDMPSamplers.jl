@@ -64,6 +64,8 @@ include("poisson_time_strategies/grid_boundary.jl")
 include("poisson_time_strategies/grid_bounds.jl")
 include("poisson_time_strategies/grid_affine_bounds.jl")
 include("poisson_time_strategies/gridthinning.jl")
+include("poisson_time_strategies/positive_variation_gridthinning.jl")
+include("poisson_time_strategies/vector_variation_thinning.jl")
 include("poisson_time_strategies/thinning.jl")
 include("poisson_time_strategies/sticky.jl")
 # these need to be implemented/ fixed
@@ -225,6 +227,8 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
+    PositiveVariationGridThinningStrategy,
+    VectorVariationThinningStrategy,
     # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
     RootsPoissonTimeStrategy,
     Sticky,

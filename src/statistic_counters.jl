@@ -367,19 +367,47 @@ end
 @counter_struct mutable struct GradientCallCounter <: AbstractStatisticCounter
     ∇f_calls::Int
     ∇²f_calls::Int
+    stochastic_gradient_calls::Int
+    full_gradient_calls::Int
+    full_reflection_gradient_calls::Int
+    prior_gradient_calls::Int
+    fd_curvature_gradient_calls::Int
 end
 
 @counter_ops GradientCallCounter begin
     inc(
         ∇f_calls,
         ∇²f_calls,
+        stochastic_gradient_calls,
+        full_gradient_calls,
+        full_reflection_gradient_calls,
+        prior_gradient_calls,
+        fd_curvature_gradient_calls,
     )
 
     get_sum(
         ∇f_calls,
         ∇²f_calls,
+        stochastic_gradient_calls,
+        full_gradient_calls,
+        full_reflection_gradient_calls,
+        prior_gradient_calls,
+        fd_curvature_gradient_calls,
     )
 end
+
+# Purpose counters intentionally overlap with the total ∇f_calls counter. For
+# example, a stochastic gradient used as a finite-difference curvature probe
+# increments ∇f_calls, stochastic_gradient_calls, and fd_curvature_gradient_calls.
+@inline _inc_gradient_purpose!(::AbstractStatisticCounter, ::Val{:full_gradient}) = nothing
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:stochastic_gradient}) =
+    _inc_counter_stochastic_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:full_reflection_gradient}) =
+    _inc_counter_full_reflection_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:prior_gradient}) =
+    _inc_counter_prior_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:ordinary_full_gradient}) =
+    _inc_counter_full_gradient_calls(stats)
 
 @counter_struct mutable struct GridThinningCounter <: AbstractStatisticCounter
     grid_builds::Int
@@ -411,6 +439,11 @@ end
     grid_bound_violations::Int
     grid_endpoint_derivative_points_loaded::Int
     grid_resets_from_dynamics_adaptation::Int
+    positive_variation_cells::Int
+    positive_variation_refinements::Int
+    positive_variation_fallbacks::Int
+    positive_variation_accepts::Int
+    positive_variation_skipped_cells::Int
 end
 
 @counter_ops GridThinningCounter begin
@@ -433,6 +466,10 @@ end
         grid_acceptance_gradient_calls,
         grid_bound_violations,
         grid_resets_from_dynamics_adaptation,
+        positive_variation_cells,
+        positive_variation_refinements,
+        positive_variation_fallbacks,
+        positive_variation_accepts,
     )
 
     incval(
@@ -446,12 +483,21 @@ end
         grid_budget_area_built,
         grid_budget_exponential_sum,
         grid_endpoint_derivative_points_loaded,
+        positive_variation_skipped_cells,
     )
 
     set(grid_N_current)
 
     get_sum(
         grid_acceptance_tests,
+        grid_endpoint_evaluations,
+        grid_endpoint_gradient_calls,
+        grid_endpoint_hessian_calls,
+        grid_endpoint_derivative_calls,
+        grid_acceptance_gradient_calls,
+        grid_cached_endpoint_reuses,
+        grid_points_evaluated,
+        grid_endpoint_derivative_points_loaded,
     )
 end
 
@@ -655,6 +701,36 @@ end
     main_gradient_calls::Int
     warmup_hessian_calls::Int
     main_hessian_calls::Int
+    warmup_stochastic_gradient_calls::Int
+    main_stochastic_gradient_calls::Int
+    warmup_full_gradient_calls::Int
+    main_full_gradient_calls::Int
+    warmup_full_reflection_gradient_calls::Int
+    main_full_reflection_gradient_calls::Int
+    warmup_prior_gradient_calls::Int
+    main_prior_gradient_calls::Int
+    warmup_fd_curvature_gradient_calls::Int
+    main_fd_curvature_gradient_calls::Int
+    warmup_exact_curvature_calls::Int
+    main_exact_curvature_calls::Int
+    warmup_grid_endpoint_evaluations::Int
+    main_grid_endpoint_evaluations::Int
+    warmup_grid_endpoint_gradient_calls::Int
+    main_grid_endpoint_gradient_calls::Int
+    warmup_grid_endpoint_hessian_calls::Int
+    main_grid_endpoint_hessian_calls::Int
+    warmup_grid_endpoint_derivative_calls::Int
+    main_grid_endpoint_derivative_calls::Int
+    warmup_grid_acceptance_gradient_calls::Int
+    main_grid_acceptance_gradient_calls::Int
+    warmup_grid_acceptance_tests::Int
+    main_grid_acceptance_tests::Int
+    warmup_grid_cached_endpoint_reuses::Int
+    main_grid_cached_endpoint_reuses::Int
+    warmup_grid_points_evaluated::Int
+    main_grid_points_evaluated::Int
+    warmup_grid_endpoint_derivative_points_loaded::Int
+    main_grid_endpoint_derivative_points_loaded::Int
     warmup_elapsed_time::Float64
     main_elapsed_time::Float64
     elapsed_time::Float64
@@ -669,6 +745,36 @@ end
         main_gradient_calls,
         warmup_hessian_calls,
         main_hessian_calls,
+        warmup_stochastic_gradient_calls,
+        main_stochastic_gradient_calls,
+        warmup_full_gradient_calls,
+        main_full_gradient_calls,
+        warmup_full_reflection_gradient_calls,
+        main_full_reflection_gradient_calls,
+        warmup_prior_gradient_calls,
+        main_prior_gradient_calls,
+        warmup_fd_curvature_gradient_calls,
+        main_fd_curvature_gradient_calls,
+        warmup_exact_curvature_calls,
+        main_exact_curvature_calls,
+        warmup_grid_endpoint_evaluations,
+        main_grid_endpoint_evaluations,
+        warmup_grid_endpoint_gradient_calls,
+        main_grid_endpoint_gradient_calls,
+        warmup_grid_endpoint_hessian_calls,
+        main_grid_endpoint_hessian_calls,
+        warmup_grid_endpoint_derivative_calls,
+        main_grid_endpoint_derivative_calls,
+        warmup_grid_acceptance_gradient_calls,
+        main_grid_acceptance_gradient_calls,
+        warmup_grid_acceptance_tests,
+        main_grid_acceptance_tests,
+        warmup_grid_cached_endpoint_reuses,
+        main_grid_cached_endpoint_reuses,
+        warmup_grid_points_evaluated,
+        main_grid_points_evaluated,
+        warmup_grid_endpoint_derivative_points_loaded,
+        main_grid_endpoint_derivative_points_loaded,
         warmup_elapsed_time,
         main_elapsed_time,
     )

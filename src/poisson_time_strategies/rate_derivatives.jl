@@ -11,7 +11,13 @@ function _scalar_rate_derivatives_for_grid!(values::AbstractMatrix, derivatives:
         throw(ArgumentError("values matrix is too small"))
     size(derivatives, 1) >= 1 && size(derivatives, 2) >= n_points ||
         throw(ArgumentError("derivatives matrix is too small"))
-    state_t = copy(state)
+    return _scalar_rate_derivatives_for_grid_unchecked!(
+        values, derivatives, provider, state, flow, t_grid, n_points, copy(state))
+end
+
+function _scalar_rate_derivatives_for_grid_unchecked!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer, state_t::AbstractPDMPState)
+
     for k in 1:n_points
         copyto!(state_t, state)
         move_forward_time!(state_t, t_grid[k], flow)
@@ -29,6 +35,13 @@ end
 
 function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix, provider::Union{Tuple,GradHVPProvider},
     state::AbstractPDMPState, flow::AnyBoomerang, t_grid::AbstractVector, n_points::Integer)
+    return _scalar_rate_derivatives_for_grid!(
+        values, derivatives, provider, state, flow, t_grid, n_points)
+end
+
+function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix,
+    provider::Union{VHVProvider,FiniteDiffVHV,WithStatsJoint}, state::AbstractPDMPState,
+    flow::AnyBoomerang, t_grid::AbstractVector, n_points::Integer)
     return _scalar_rate_derivatives_for_grid!(
         values, derivatives, provider, state, flow, t_grid, n_points)
 end
@@ -65,10 +78,13 @@ _supports_rate_derivatives(provider, ::PreconditionedDynamics{<:AbstractPrecondi
 _supports_rate_derivatives((grad, hvp)::Tuple{G,H}, ::ZigZag) where {G,H} =
     !(H <: Nothing)
 _supports_rate_derivatives(provider::GradHVPProvider{G,H}, ::ZigZag) where {G,H} = !(H <: Nothing)
+_supports_rate_derivatives(::FiniteDiffVHV, ::ZigZag) = true
 _supports_rate_derivatives((grad, hvp)::Tuple{G,H},
     ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
 _supports_rate_derivatives(provider::GradHVPProvider{G,H},
     ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
+_supports_rate_derivatives(::FiniteDiffVHV,
+    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) = true
 _supports_rate_derivatives((grad, hvp)::Tuple{G,H},
     ::PreconditionedDynamics{DensePreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
 _supports_rate_derivatives(provider::GradHVPProvider{G,H},
@@ -88,6 +104,20 @@ _uses_builtin_grid_provider(::WithStatsJoint) = true
 
 function _fill_rate_derivatives!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state, flow, t_grid, n_points)
     return rate_derivatives_for_grid!(values, derivatives, provider, state, flow, t_grid, n_points)
+end
+
+function _fill_rate_derivatives!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state, flow, t_grid, n_points,
+    ::AbstractPDMPState)
+    return _fill_rate_derivatives!(values, derivatives, provider, state, flow, t_grid, n_points)
+end
+
+function _fill_rate_derivatives!(values::AbstractMatrix, derivatives::AbstractMatrix,
+    provider::Union{Tuple,GradHVPProvider,VHVProvider,FiniteDiffVHV,WithStatsJoint}, state::AbstractPDMPState,
+    flow::Union{BouncyParticle,AnyBoomerang,PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}},
+    t_grid, n_points, state_cache::AbstractPDMPState)
+
+    return _scalar_rate_derivatives_for_grid_unchecked!(
+        values, derivatives, provider, state, flow, t_grid, n_points, state_cache)
 end
 
 function rate_derivatives_for_grid(provider, state, flow, t_grid, n_points::Integer)
@@ -254,6 +284,10 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
+
     h = _fd_step_size(xt, vt)
     if iszero(h)
         fill!(fd.hvp_buf, 0.0)
@@ -263,17 +297,18 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
         fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
     end
 
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
 
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    return rate, f_prime_t
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP,
     add_rate::Bool, cached_gradient::AbstractVector)
     copyto!(fd.grad_buf, cached_gradient)
+
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
 
     xt, vt = state.ξ.x, state.ξ.θ
     h = _fd_step_size(xt, vt)
@@ -285,12 +320,9 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
         fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
     end
 
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
 
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    return rate, f_prime_t
 end
 
 function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)
@@ -317,13 +349,14 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
-    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
+
+    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
 
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    return rate, f_prime_t
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffVHV,
@@ -331,13 +364,36 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     copyto!(fd.grad_buf, cached_gradient)
 
     xt, vt = state.ξ.x, state.ξ.θ
-    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
+
+    vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     f_prime_t = ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
 
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    return rate, f_prime_t
+end
+
+function rate_and_derivative(state::AbstractPDMPState, flow::AnyBoomerang, fd::FiniteDiffVHV)
+    xt = state.ξ.x
+    vt = state.ξ.θ
+    ∇U = fd.grad(xt)
+    copyto!(fd.grad_buf, ∇U)
+    vhv = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
+    return dot(fd.grad_buf, vt), ∂λ∂t(state, fd.grad_buf, vhv, flow)
+end
+
+function rate_and_derivative(
+    state::AbstractPDMPState,
+    flow::AnyBoomerang,
+    fd::FiniteDiffVHV,
+    cached_gradient::AbstractVector,
+)
+    copyto!(fd.grad_buf, cached_gradient)
+    xt = state.ξ.x
+    vt = state.ξ.θ
+    vhv = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
+    return dot(fd.grad_buf, vt), ∂λ∂t(state, fd.grad_buf, vhv, flow)
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV, add_rate::Bool=true)
@@ -345,23 +401,26 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDi
     ∇U_xt = fd.grad(xt)
     copyto!(fd.grad_buf, ∇U_xt)
 
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
+
     w = fd.w_buf
     for i in eachindex(vt)
         w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
     end
     whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
 
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = whv_scalar
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    return rate, whv_scalar
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDiffVHV,
     add_rate::Bool, cached_gradient::AbstractVector)
     copyto!(fd.grad_buf, cached_gradient)
+
+    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
 
     vt = state.ξ.θ
     w = fd.w_buf
@@ -371,10 +430,67 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ZigZag, fd::FiniteDi
     xt = state.ξ.x
     whv_scalar = _fd_vhv_scalar(fd, xt, vt, w)
 
-    f_t = λ(state.ξ, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = whv_scalar
+    return rate, whv_scalar
+end
 
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+function rate_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    fd::FiniteDiffVHV,
+    state::AbstractPDMPState,
+    flow::ZigZag,
+    t_grid::AbstractVector,
+    n_points::Integer,
+)
+    x0 = state.ξ.x
+    θ = state.ξ.θ
+    n_channels = length(θ)
+    size(values, 1) >= n_channels && size(values, 2) >= n_points ||
+        throw(ArgumentError("values matrix is too small"))
+    size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
+        throw(ArgumentError("derivatives matrix is too small"))
+    for k in 1:n_points
+        @inbounds for j in 1:n_channels
+            fd.buf[j] = x0[j] + t_grid[k] * θ[j]
+        end
+        h = _fd_step_size(fd.buf, θ)
+        ∇U = fd.grad(fd.buf)
+        copyto!(fd.grad_buf, ∇U)
+        any_active = false
+        @inbounds for j in 1:n_channels
+            values[j, k] = θ[j] * fd.grad_buf[j]
+            any_active |= ispositive(values[j, k])
+        end
+        if iszero(h)
+            @inbounds for j in 1:n_channels
+                derivatives[j, k] = 0.0
+            end
+        elseif !any_active
+            @inbounds for j in 1:n_channels
+                derivatives[j, k] = 0.0
+            end
+        else
+            @inbounds for j in 1:n_channels
+                fd.buf[j] += h * θ[j]
+            end
+            ∇U_shifted = fd.grad(fd.buf)
+            @inbounds for j in 1:n_channels
+                derivatives[j, k] = θ[j] * (∇U_shifted[j] - fd.grad_buf[j]) / h
+            end
+        end
+    end
+    return values, derivatives
+end
+
+function rate_derivatives_for_grid!(
+    values::AbstractMatrix,
+    derivatives::AbstractMatrix,
+    fd::FiniteDiffVHV,
+    state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag},
+    t_grid::AbstractVector,
+    n_points::Integer,
+)
+    return rate_derivatives_for_grid!(
+        values, derivatives, fd, state, flow.dynamics, t_grid, n_points)
 end

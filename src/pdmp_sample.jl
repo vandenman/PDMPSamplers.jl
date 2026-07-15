@@ -203,6 +203,12 @@ function _record_phase_stats!(
     events_start::Int,
     grad_start::Int,
     hess_start::Int,
+    stochastic_grad_start::Int,
+    full_grad_start::Int,
+    full_reflection_grad_start::Int,
+    prior_grad_start::Int,
+    fd_curvature_grad_start::Int,
+    grid_start::NamedTuple,
     time_start::UInt64,
 )
     elapsed = (time_ns() - time_start) / 1e9
@@ -210,11 +216,41 @@ function _record_phase_stats!(
         _inc_counter_warmup_events(stats, _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats) - events_start)
         _inc_counter_warmup_gradient_calls(stats, _get_counter_∇f_calls(stats) - grad_start)
         _inc_counter_warmup_hessian_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
+        _inc_counter_warmup_stochastic_gradient_calls(stats, _get_counter_stochastic_gradient_calls(stats) - stochastic_grad_start)
+        _inc_counter_warmup_full_gradient_calls(stats, _get_counter_full_gradient_calls(stats) - full_grad_start)
+        _inc_counter_warmup_full_reflection_gradient_calls(stats, _get_counter_full_reflection_gradient_calls(stats) - full_reflection_grad_start)
+        _inc_counter_warmup_prior_gradient_calls(stats, _get_counter_prior_gradient_calls(stats) - prior_grad_start)
+        _inc_counter_warmup_fd_curvature_gradient_calls(stats, _get_counter_fd_curvature_gradient_calls(stats) - fd_curvature_grad_start)
+        _inc_counter_warmup_exact_curvature_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
+        _inc_counter_warmup_grid_endpoint_evaluations(stats, _get_counter_grid_endpoint_evaluations(stats) - grid_start.endpoint_evaluations)
+        _inc_counter_warmup_grid_endpoint_gradient_calls(stats, _get_counter_grid_endpoint_gradient_calls(stats) - grid_start.endpoint_gradient_calls)
+        _inc_counter_warmup_grid_endpoint_hessian_calls(stats, _get_counter_grid_endpoint_hessian_calls(stats) - grid_start.endpoint_hessian_calls)
+        _inc_counter_warmup_grid_endpoint_derivative_calls(stats, _get_counter_grid_endpoint_derivative_calls(stats) - grid_start.endpoint_derivative_calls)
+        _inc_counter_warmup_grid_acceptance_gradient_calls(stats, _get_counter_grid_acceptance_gradient_calls(stats) - grid_start.acceptance_gradient_calls)
+        _inc_counter_warmup_grid_acceptance_tests(stats, _get_counter_grid_acceptance_tests(stats) - grid_start.acceptance_tests)
+        _inc_counter_warmup_grid_cached_endpoint_reuses(stats, _get_counter_grid_cached_endpoint_reuses(stats) - grid_start.cached_endpoint_reuses)
+        _inc_counter_warmup_grid_points_evaluated(stats, _get_counter_grid_points_evaluated(stats) - grid_start.points_evaluated)
+        _inc_counter_warmup_grid_endpoint_derivative_points_loaded(stats, _get_counter_grid_endpoint_derivative_points_loaded(stats) - grid_start.endpoint_derivative_points_loaded)
         _inc_counter_warmup_elapsed_time(stats, elapsed)
     elseif phase === :main
         _inc_counter_main_events(stats, _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats) - events_start)
         _inc_counter_main_gradient_calls(stats, _get_counter_∇f_calls(stats) - grad_start)
         _inc_counter_main_hessian_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
+        _inc_counter_main_stochastic_gradient_calls(stats, _get_counter_stochastic_gradient_calls(stats) - stochastic_grad_start)
+        _inc_counter_main_full_gradient_calls(stats, _get_counter_full_gradient_calls(stats) - full_grad_start)
+        _inc_counter_main_full_reflection_gradient_calls(stats, _get_counter_full_reflection_gradient_calls(stats) - full_reflection_grad_start)
+        _inc_counter_main_prior_gradient_calls(stats, _get_counter_prior_gradient_calls(stats) - prior_grad_start)
+        _inc_counter_main_fd_curvature_gradient_calls(stats, _get_counter_fd_curvature_gradient_calls(stats) - fd_curvature_grad_start)
+        _inc_counter_main_exact_curvature_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
+        _inc_counter_main_grid_endpoint_evaluations(stats, _get_counter_grid_endpoint_evaluations(stats) - grid_start.endpoint_evaluations)
+        _inc_counter_main_grid_endpoint_gradient_calls(stats, _get_counter_grid_endpoint_gradient_calls(stats) - grid_start.endpoint_gradient_calls)
+        _inc_counter_main_grid_endpoint_hessian_calls(stats, _get_counter_grid_endpoint_hessian_calls(stats) - grid_start.endpoint_hessian_calls)
+        _inc_counter_main_grid_endpoint_derivative_calls(stats, _get_counter_grid_endpoint_derivative_calls(stats) - grid_start.endpoint_derivative_calls)
+        _inc_counter_main_grid_acceptance_gradient_calls(stats, _get_counter_grid_acceptance_gradient_calls(stats) - grid_start.acceptance_gradient_calls)
+        _inc_counter_main_grid_acceptance_tests(stats, _get_counter_grid_acceptance_tests(stats) - grid_start.acceptance_tests)
+        _inc_counter_main_grid_cached_endpoint_reuses(stats, _get_counter_grid_cached_endpoint_reuses(stats) - grid_start.cached_endpoint_reuses)
+        _inc_counter_main_grid_points_evaluated(stats, _get_counter_grid_points_evaluated(stats) - grid_start.points_evaluated)
+        _inc_counter_main_grid_endpoint_derivative_points_loaded(stats, _get_counter_grid_endpoint_derivative_points_loaded(stats) - grid_start.endpoint_derivative_points_loaded)
         _inc_counter_main_elapsed_time(stats, elapsed)
     end
     return nothing
@@ -247,13 +283,31 @@ function _run_phase!(
     phase_events_start = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
     phase_grad_start = _get_counter_∇f_calls(stats)
     phase_hess_start = _get_counter_∇²f_calls(stats)
+    phase_stochastic_grad_start = _get_counter_stochastic_gradient_calls(stats)
+    phase_full_grad_start = _get_counter_full_gradient_calls(stats)
+    phase_full_reflection_grad_start = _get_counter_full_reflection_gradient_calls(stats)
+    phase_prior_grad_start = _get_counter_prior_gradient_calls(stats)
+    phase_fd_curvature_grad_start = _get_counter_fd_curvature_gradient_calls(stats)
+    phase_grid_start = (;
+        endpoint_evaluations=_get_counter_grid_endpoint_evaluations(stats),
+        endpoint_gradient_calls=_get_counter_grid_endpoint_gradient_calls(stats),
+        endpoint_hessian_calls=_get_counter_grid_endpoint_hessian_calls(stats),
+        endpoint_derivative_calls=_get_counter_grid_endpoint_derivative_calls(stats),
+        acceptance_gradient_calls=_get_counter_grid_acceptance_gradient_calls(stats),
+        acceptance_tests=_get_counter_grid_acceptance_tests(stats),
+        cached_endpoint_reuses=_get_counter_grid_cached_endpoint_reuses(stats),
+        points_evaluated=_get_counter_grid_points_evaluated(stats),
+        endpoint_derivative_points_loaded=_get_counter_grid_endpoint_derivative_points_loaded(stats),
+    )
     phase_time_start = time_ns()
 
     while true
         if is_satisfied(criterion, state, trace_manager, stats)
             _set_counter_stop_reason(stats, stop_reason(criterion, state, trace_manager, stats))
             _record_phase_stats!(
-                stats, phase, phase_events_start, phase_grad_start, phase_hess_start, phase_time_start)
+                stats, phase, phase_events_start, phase_grad_start, phase_hess_start,
+                phase_stochastic_grad_start, phase_full_grad_start, phase_full_reflection_grad_start,
+                phase_prior_grad_start, phase_fd_curvature_grad_start, phase_grid_start, phase_time_start)
             return nothing
         end
 

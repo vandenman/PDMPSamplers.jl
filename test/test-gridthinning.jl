@@ -1952,6 +1952,37 @@ end
         @test alg.t_max[] == old_tmax
     end
 
+    @testset "Subsampled early stopping is fixed-batch capability gated" begin
+        grad_default = SubsampledGradient(
+            (out, x) -> (out .= x),
+            n -> nothing,
+            tr -> nothing,
+            (out, x) -> (out .= x),
+            5,
+            0,
+            false;
+            resample_dt=0.1,
+        )
+        grad_fixed = SubsampledGradient(
+            (out, x) -> (out .= x),
+            n -> nothing,
+            tr -> nothing,
+            (out, x) -> (out .= x),
+            5,
+            0,
+            false;
+            resample_dt=0.1,
+            fixed_batch_within_event=true,
+        )
+
+        @test grad_default.fixed_batch_within_event === false
+        @test grad_fixed.fixed_batch_within_event === true
+        @test isinf(PDMPSamplers._adjust_early_stop(grad_default, 2.5))
+        @test PDMPSamplers._adjust_early_stop(grad_fixed, 2.5) == 2.5
+        @test copy(grad_fixed).fixed_batch_within_event === true
+        @test PDMPSamplers.with_stats(grad_fixed, PDMPSamplers.StatisticCounter()).fixed_batch_within_event === true
+    end
+
     @testset "End-to-end with joint directional curvature" begin
         d = 2
         f_logdensity(x) = -0.5 * sum(abs2, x)
@@ -2038,6 +2069,31 @@ end
         @test stats.affine_area_hybrid > 0.0
         @test stats.affine_area_constant_equiv > 0.0
         @test stats.grid_bound_violations == 0
+    end
+
+    @testset "Boomerang finite-diff provider supports signed grid derivatives" begin
+        function boomerang_grad_only!(out, x)
+            out[1] = x[1]^2 + 1.0
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(boomerang_grad_only!))
+        flow = Boomerang(Diagonal([1.0]), [0.0], 0.0)
+        alg = GridThinningStrategy(; N=4, N_min=1, t_max=1.0, lazy=false,
+            bound=:auto)
+        ξ0 = SkeletonPoint([0.25], [1.0])
+        rng = Xoshiro(20260713)
+
+        state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        values = Matrix{Float64}(undef, 1, 3)
+        derivatives = similar(values)
+        t_grid = [0.0, 0.25, 0.5]
+
+        PDMPSamplers.rate_derivatives_for_grid!(
+            values, derivatives, alg_.fd_vhv_provider, state, flow, t_grid, length(t_grid))
+
+        @test all(isfinite, values)
+        @test all(isfinite, derivatives)
     end
 
     @testset "inflated affine bound works without mandatory curvature certificates" begin

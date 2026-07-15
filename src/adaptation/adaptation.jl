@@ -28,7 +28,9 @@ end
 function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     ad.did_update = false
     if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
-        update_preconditioner!(rng, flow, get_warmup_trace(trace_mgr), state, iszero(ad.no_updates_done))
+        trace = get_warmup_trace(trace_mgr)
+        _has_integrable_segment(trace) || return
+        update_preconditioner!(rng, flow, trace, state, iszero(ad.no_updates_done))
         ad.last_update = state.t[]
         ad.no_updates_done += 1
         ad.did_update = true

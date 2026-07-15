@@ -3,7 +3,7 @@ module PDMPSamplersBridgeStanExt
 using PDMPSamplers
 using BridgeStan
 using Base.Libc.Libdl: dlsym, dlpath
-import PDMPSamplers: PDMPModel, FullGradient
+import PDMPSamplers: PDMPModel, FullGradient, _last_gradient_potential
 
 # ── FastBridgeStanModel ──────────────────────────────────────────────────────
 # Eliminates per-call overhead from BridgeStan: caches dlsym function pointers
@@ -80,6 +80,8 @@ end
 
 Base.copy(g::BridgeStanGradient) = BridgeStanGradient(copy(g.model))
 PDMPSamplers._copy_callable(g::BridgeStanGradient) = copy(g)
+_last_gradient_potential(model::PDMPModel{<:FullGradient{<:BridgeStanGradient}}) =
+    -model.grad.f.model.lp[]
 
 struct BridgeStanHVP{M<:FastBridgeStanModel,V<:Vector{Float64}} <: Function
     model::M
