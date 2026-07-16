@@ -3,12 +3,12 @@
 
 Automatic positive-variation event search for Boomerang dynamics.
 
-This is an experimental GridThinning variant.  It treats the signed
-Boomerang bounce rate as the derivative of the residual path potential and
-searches lazily in the cumulative positive variation of a local linear model.
-It avoids routine HVP/finite-difference curvature calls.  The implementation
-is intentionally not a certified envelope; validation failures fall back to a
-regular `GridThinningStrategy`.
+This is an experimental GridThinning variant.  The default mode uses the
+positive-variation grid schedule to build local tangent envelopes, then runs
+ordinary thinning accept/reject against the exact rate.  It is therefore exact
+under the same envelope assumptions as `GridThinningStrategy`.  The old
+rejection-free positive-variation clock is available only with
+`approximate=true`.
 """
 struct PositiveVariationGridThinningStrategy <: PoissonTimeStrategy
     N::Int
@@ -27,6 +27,7 @@ struct PositiveVariationGridThinningStrategy <: PoissonTimeStrategy
     use_derivative_hermite::Bool
     derivative_hermite_on_demand::Bool
     derivative_hermite_trigger_scale::Float64
+    approximate::Bool
     fallback::GridThinningStrategy
 end
 
@@ -35,7 +36,7 @@ function PositiveVariationGridThinningStrategy(; N::Int=20, N_min::Int=5, t_max:
     validation_rtol::Real=0.05, validation_atol::Real=1e-8, min_cell_width::Real=1e-8,
     max_skip_width::Real=0.25, dense_cell_width::Real=0.0, skip_slope_safety::Real=0.0,
     use_derivative_hermite::Bool=false, derivative_hermite_on_demand::Bool=false,
-    derivative_hermite_trigger_scale::Real=10.0,
+    derivative_hermite_trigger_scale::Real=10.0, approximate::Bool=false,
     fallback::GridThinningStrategy=GridThinningStrategy(; N, N_min, t_max, α⁺, α⁻, safety_limit,
         use_fd_hvp=true, bound=:constant))
 
@@ -56,7 +57,7 @@ function PositiveVariationGridThinningStrategy(; N::Int=20, N_min::Int=5, t_max:
         max_refinement_depth, Float64(validation_rtol), Float64(validation_atol),
         Float64(min_cell_width), Float64(max_skip_width), Float64(dense_cell_width),
         Float64(skip_slope_safety), use_derivative_hermite, derivative_hermite_on_demand,
-        Float64(derivative_hermite_trigger_scale), fallback)
+        Float64(derivative_hermite_trigger_scale), approximate, fallback)
 end
 
 function Base.show(io::IO, strat::PositiveVariationGridThinningStrategy)
@@ -83,11 +84,15 @@ struct PositiveVariationGridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector
     use_derivative_hermite::Bool
     derivative_hermite_on_demand::Bool
     derivative_hermite_trigger_scale::Float64
+    approximate::Bool
     state_cache::S
     state_cache2::S
     empty_∇ϕx::V
     cached_gradient::V
     has_cached_gradient::Base.RefValue{Bool}
+    cached_f::Base.RefValue{Float64}
+    cached_ψ::Base.RefValue{Float64}
+    cached_df::Base.RefValue{Float64}
     grad_provider::P
     derivative_provider::D
     fallback::F
@@ -110,8 +115,9 @@ function _to_internal(strat::PositiveVariationGridThinningStrategy, rng::Random.
         strat.validation_rtol, strat.validation_atol, strat.min_cell_width, strat.max_skip_width,
         strat.dense_cell_width, strat.skip_slope_safety, strat.use_derivative_hermite,
         strat.derivative_hermite_on_demand, strat.derivative_hermite_trigger_scale,
+        strat.approximate,
         state_cache, state_cache2, similar(state.ξ.x, 0), similar(state.ξ.x),
-        Ref(false), grad_provider, derivative_provider, fallback)
+        Ref(false), Ref(NaN), Ref(NaN), Ref(NaN), grad_provider, derivative_provider, fallback)
 end
 
 accept_reflection_event(::Random.AbstractRNG, ::PositiveVariationGridAdaptiveState, args...) = true
@@ -121,7 +127,21 @@ function reset_grid_scale!(alg::PositiveVariationGridAdaptiveState, t_max::Float
     alg.t_max[] = t_max
     alg.N[] = max(alg.N[], alg.N_min)
     alg.has_cached_gradient[] = false
+    alg.cached_f[] = NaN
+    alg.cached_ψ[] = NaN
+    alg.cached_df[] = NaN
     reset_grid_scale!(alg.fallback, t_max)
+    return nothing
+end
+
+function _pv_cache_accept_node!(alg::PositiveVariationGridAdaptiveState,
+    grad::AbstractVector, f::Float64, ψ::Float64, df::Float64)
+
+    copyto!(alg.cached_gradient, grad)
+    alg.cached_f[] = f
+    alg.cached_ψ[] = ψ
+    alg.cached_df[] = df
+    alg.has_cached_gradient[] = true
     return nothing
 end
 
@@ -173,6 +193,10 @@ end
 
 @inline function _pv_tol(alg::PositiveVariationGridAdaptiveState, scale::Float64)
     return alg.validation_atol + alg.validation_rtol * max(scale, 1.0)
+end
+
+@inline function _pv_accept_rate_tol(alg::PositiveVariationGridAdaptiveState, scale::Float64=1.0)
+    return max(alg.validation_atol * max(scale, 1.0), 64eps(Float64))
 end
 
 function _pv_reference_potential_from_delta(Γ, Δ::AbstractVector, cache)
@@ -327,6 +351,92 @@ function _pv_hermite_positive_area(ψa::Float64, fa::Float64, ψb::Float64, fb::
     return _pv_quadratic_positive_area(A, B, C, h)
 end
 
+@inline function _pv_quadratic_positive_area_prefix(A::Float64, B::Float64, C::Float64,
+    h::Float64, u::Float64)
+
+    u <= 0.0 && return 0.0
+    u >= 1.0 && return _pv_quadratic_positive_area(A, B, C, h)
+    b1 = 0.0
+    b2 = u
+    b3 = u
+    b4 = u
+    n = 2
+    if abs(A) <= eps(Float64) * max(abs(B), abs(C), 1.0)
+        if abs(B) > eps(Float64) * max(abs(C), 1.0)
+            r = -C / B
+            if 0.0 < r < u
+                b2 = r
+                b3 = u
+                n = 3
+            end
+        end
+    else
+        disc = B * B - 4.0 * A * C
+        if disc > 0.0
+            sdisc = sqrt(disc)
+            r1 = (-B - sdisc) / (2.0 * A)
+            r2 = (-B + sdisc) / (2.0 * A)
+            if r1 > r2
+                r1, r2 = r2, r1
+            end
+            r1_inside = 0.0 < r1 < u
+            r2_inside = 0.0 < r2 < u
+            if r1_inside && r2_inside
+                b1, b2, b3, b4 = _pv_sort4(0.0, r1, r2, u)
+                n = 4
+            elseif r1_inside
+                b1, b2, b3 = _pv_sort3(0.0, r1, u)
+                b4 = b3
+                n = 3
+            elseif r2_inside
+                b1, b2, b3 = _pv_sort3(0.0, r2, u)
+                b4 = b3
+                n = 3
+            end
+        end
+    end
+    total = 0.0
+    prev = b1
+    @inbounds for j in 1:(n - 1)
+        hi = ifelse(j == 1, b2, ifelse(j == 2, b3, b4))
+        lo = prev
+        mid = 0.5 * (lo + hi)
+        if _pv_quadratic_value(A, B, C, mid) > 0.0
+            total += _pv_quadratic_integral(A, B, C, hi) -
+                _pv_quadratic_integral(A, B, C, lo)
+        end
+        prev = hi
+    end
+    return h * max(total, 0.0)
+end
+
+function _pv_hermite_positive_area_time(ψa::Float64, fa::Float64, ψb::Float64,
+    fb::Float64, h::Float64, area::Float64)
+
+    area <= 0.0 && return 0.0
+    if !(isfinite(ψa) && isfinite(ψb)) || h <= 0.0
+        return _linear_positive_area_time(fa, fb, h, area)
+    end
+    invh = inv(h)
+    A = 6.0 * (ψa - ψb) * invh + 3.0 * (fa + fb)
+    B = 6.0 * (ψb - ψa) * invh - 4.0 * fa - 2.0 * fb
+    C = fa
+    total = _pv_quadratic_positive_area(A, B, C, h)
+    area >= total && return h
+    lo = 0.0
+    hi = 1.0
+    for _ in 1:40
+        mid = 0.5 * (lo + hi)
+        amid = _pv_quadratic_positive_area_prefix(A, B, C, h, mid)
+        if amid < area
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return h * 0.5 * (lo + hi)
+end
+
 @inline function _pv_cubic_hermite_coeffs(fa::Float64, da::Float64, fb::Float64, db::Float64,
     h::Float64)
 
@@ -351,6 +461,13 @@ end
 
     c0, c1, c2, c3 = _pv_cubic_hermite_coeffs(fa, da, fb, db, h)
     return h * u * evalpoly(u, (c0, 0.5 * c1, c2 / 3.0, 0.25 * c3))
+end
+
+@inline function _pv_cubic_hermite_derivative(fa::Float64, da::Float64, fb::Float64,
+    db::Float64, h::Float64, u::Float64)
+
+    _, c1, c2, c3 = _pv_cubic_hermite_coeffs(fa, da, fb, db, h)
+    return evalpoly(u, (c1, 2.0 * c2, 3.0 * c3)) / h
 end
 
 function _pv_bisect_cubic_hermite_root(fa::Float64, da::Float64, fb::Float64, db::Float64,
@@ -493,15 +610,72 @@ function _pv_cubic_hermite_positive_area(fa::Float64, da::Float64, fb::Float64, 
     return max(total, 0.0)
 end
 
-function _pv_positive_area_estimate(fa::Float64, fb::Float64, h::Float64,
+function _pv_cubic_hermite_positive_area_time(fa::Float64, da::Float64, fb::Float64,
+    db::Float64, h::Float64, area::Float64)
+
+    area <= 0.0 && return 0.0
+    total = _pv_cubic_hermite_positive_area(fa, da, fb, db, h)
+    if !isfinite(total)
+        return _linear_positive_area_time(fa, fb, h, area)
+    end
+    area >= total && return h
+    lo = 0.0
+    hi = h
+    for _ in 1:40
+        mid = 0.5 * (lo + hi)
+        u = mid / h
+        fmid = _pv_cubic_hermite_value(fa, da, fb, db, h, u)
+        dfmid = _pv_cubic_hermite_derivative(fa, da, fb, db, h, u)
+        # Reuse the exact cubic-area routine on the restricted interval by
+        # constructing the Hermite cell [0, mid] from the parent polynomial.
+        amid = _pv_cubic_hermite_positive_area(fa, da, fmid, dfmid, mid)
+        if amid < area
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return 0.5 * (lo + hi)
+end
+
+struct _PVAreaModel
+    kind::Symbol
+    area::Float64
+end
+
+function _pv_area_model(fa::Float64, fb::Float64, h::Float64,
     ψa::Float64, ψb::Float64, da::Float64=NaN, db::Float64=NaN)
 
     area = _pv_positive_area_floor(_linear_positive_area(fa, fb, h), ψa, ψb)
+    kind = :linear
     hermite_area = _pv_hermite_positive_area(ψa, fa, ψb, fb, h)
-    isfinite(hermite_area) && (area = max(area, hermite_area))
+    if isfinite(hermite_area) && hermite_area > area
+        area = hermite_area
+        kind = :potential_hermite
+    end
     derivative_hermite_area = _pv_cubic_hermite_positive_area(fa, da, fb, db, h)
-    isfinite(derivative_hermite_area) && (area = max(area, derivative_hermite_area))
-    return area
+    if isfinite(derivative_hermite_area) && derivative_hermite_area > area
+        area = derivative_hermite_area
+        kind = :derivative_hermite
+    end
+    return _PVAreaModel(kind, area)
+end
+
+function _pv_positive_area_estimate(fa::Float64, fb::Float64, h::Float64,
+    ψa::Float64, ψb::Float64, da::Float64=NaN, db::Float64=NaN)
+
+    return _pv_area_model(fa, fb, h, ψa, ψb, da, db).area
+end
+
+function _pv_positive_area_time(model::_PVAreaModel, fa::Float64, fb::Float64, h::Float64,
+    threshold::Float64, ψa::Float64, ψb::Float64, da::Float64, db::Float64)
+
+    if model.kind === :potential_hermite
+        return _pv_hermite_positive_area_time(ψa, fa, ψb, fb, h, threshold)
+    elseif model.kind === :derivative_hermite
+        return _pv_cubic_hermite_positive_area_time(fa, da, fb, db, h, threshold)
+    end
+    return _linear_positive_area_time(fa, fb, h, threshold)
 end
 
 function _pv_lipschitz_positive_area_upper(fa::Float64, fb::Float64, h::Float64, L::Float64)
@@ -651,14 +825,18 @@ function _pv_dense_resolve_cell!(alg::PositiveVariationGridAdaptiveState,
     for i in 1:n_sub
         t = a + (b - a) * i / n_sub
         _, f, ψ, df = _pv_observe_probe!(alg, model, flow, state, cache, stats, t, probe_failure_handler)
-        area = _pv_positive_area_estimate(prev_f, f, t - prev_t, prev_ψ, ψ, prev_df, df)
+        cell_model = _pv_area_model(prev_f, f, t - prev_t, prev_ψ, ψ, prev_df, df)
+        area = cell_model.area
         if total + area >= threshold
-            u = area <= 0.0 ? 1.0 : clamp((threshold - total) / area, 0.0, 1.0)
-            τ = prev_t + u * (t - prev_t)
-            _, _, _, _, gradτ = _pv_observe_candidate!(
+            τ = prev_t + _pv_positive_area_time(
+                cell_model, prev_f, f, t - prev_t, threshold - total, prev_ψ, ψ, prev_df, df)
+            _, fτ, ψτ, dfτ, gradτ = _pv_observe_candidate!(
                 alg, model, flow, state, cache, stats, τ, probe_failure_handler)
-            copyto!(alg.cached_gradient, gradτ)
-            alg.has_cached_gradient[] = true
+            if fτ <= _pv_accept_rate_tol(alg, max(abs(prev_f), abs(f), abs(fτ), 1.0))
+                _inc_counter_positive_variation_fallbacks(stats)
+                return _PVFallback()
+            end
+            _pv_cache_accept_node!(alg, gradτ, fτ, ψτ, dfτ)
             _inc_counter_positive_variation_accepts(stats)
             return _PVAccept(τ, alg.cached_gradient)
         end
@@ -736,10 +914,14 @@ function _pv_resolve_cell!(rng::Random.AbstractRNG, alg::PositiveVariationGridAd
             end
             remaining = threshold - left_result.area
             if remaining <= _pv_tol(alg, threshold)
-                _, _, _, _, grad_mid = _pv_observe_candidate!(
+                _, f_mid, ψ_mid, df_mid, grad_mid = _pv_observe_candidate!(
                     alg, model, flow, state, cache, stats, mid, probe_failure_handler)
-                copyto!(alg.cached_gradient, grad_mid)
-                alg.has_cached_gradient[] = true
+                if f_mid <= _pv_accept_rate_tol(alg, max(abs(fa), abs(fm), abs(fb), 1.0))
+                    return _pv_dense_resolve_cell!(
+                        alg, model, flow, state, cache, stats, a, fa, b, threshold, ψa, dfa,
+                        probe_failure_handler)
+                end
+                _pv_cache_accept_node!(alg, grad_mid, f_mid, ψ_mid, df_mid)
                 _inc_counter_positive_variation_accepts(stats)
                 return _PVAccept(mid, alg.cached_gradient)
             end
@@ -768,7 +950,8 @@ function _pv_resolve_cell!(rng::Random.AbstractRNG, alg::PositiveVariationGridAd
         return _PVSkip(0.0)
     end
 
-    τ = a + _linear_positive_area_time(fa, fb, h, threshold)
+    proposal_model = _pv_area_model(fa, fb, h, ψa, ψb, dfa, dfb)
+    τ = a + _pv_positive_area_time(proposal_model, fa, fb, h, threshold, ψa, ψb, dfa, dfb)
     τ = clamp(τ, nextfloat(a), prevfloat(b))
     _, fτ, ψτ, dfτ, gradτ = _pv_observe_candidate!(alg, model, flow, state, cache, stats, τ, probe_failure_handler)
     left_area = _pv_positive_area_estimate(fa, fτ, τ - a, ψa, ψτ, dfa, dfτ)
@@ -790,9 +973,9 @@ function _pv_resolve_cell!(rng::Random.AbstractRNG, alg::PositiveVariationGridAd
         child_tol = _pv_tol(alg, max(abs(threshold), child_area, area))
     end
 
-    if abs(left_area - threshold) <= child_tol && fτ >= -child_tol
-        copyto!(alg.cached_gradient, gradτ)
-        alg.has_cached_gradient[] = true
+    if abs(left_area - threshold) <= child_tol &&
+            fτ > _pv_accept_rate_tol(alg, max(abs(fa), abs(fτ), abs(fb), 1.0))
+        _pv_cache_accept_node!(alg, gradτ, fτ, ψτ, dfτ)
         _inc_counter_positive_variation_accepts(stats)
         return _PVAccept(τ, alg.cached_gradient)
     end
@@ -820,6 +1003,180 @@ function _pv_fallback!(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradien
 
     alg.has_cached_gradient[] = false
     return _next_event_time_with_probe(rng, model, flow, alg.fallback, state, cache, stats,
+        max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
+    model::PDMPModel{<:GlobalGradientStrategy}, flow::AnyBoomerang,
+    alg::PositiveVariationGridAdaptiveState, state::AbstractPDMPState, cache,
+    stats::AbstractStatisticCounter, max_horizon::Float64, include_refresh::Bool,
+    max_horizon_event::Symbol, probe_failure_handler::GridBoundaryProbe)
+
+    λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
+    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
+    hard_horizon = min(max_horizon, max_grid_horizon(flow))
+    search_horizon = min(hard_horizon, τ_refresh)
+    horizon_event = if τ_refresh <= hard_horizon
+        :refresh
+    else
+        max_horizon <= max_grid_horizon(flow) ? max_horizon_event : :horizon_hit
+    end
+    default_return = GradientMeta(alg.empty_∇ϕx)
+    if search_horizon <= 0.0
+        return 0.0, horizon_event, default_return
+    end
+
+    provider = _make_grad_provider(alg.fallback.grad_provider, model, flow, alg.fallback)
+    state_left = alg.state_cache
+    state_prop = alg.state_cache2
+    copyto!(state_left, state)
+
+    _inc_counter_grid_builds(stats)
+    _record_grid_schedule!(stats, alg)
+    _set_counter_grid_N_current(stats, alg.N[])
+
+    if alg.has_cached_gradient[]
+        _inc_counter_grid_cached_endpoint_reuses(stats)
+        _inc_counter_grid_endpoint_hessian_calls(stats)
+        y_left, d_left = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_left, flow, provider, false, alg.cached_gradient;
+            t_valid=0.0, t_invalid=0.0)
+        alg.has_cached_gradient[] = false
+    else
+        _inc_counter_grid_endpoint_evaluations(stats)
+        _inc_counter_grid_endpoint_gradient_calls(stats)
+        _inc_counter_grid_endpoint_hessian_calls(stats)
+        y_left, d_left = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_left, flow, provider, false;
+            t_valid=0.0, t_invalid=0.0)
+        _inc_counter_grid_points_evaluated(stats, 1)
+    end
+
+    h = alg.t_max[] / alg.N[]
+    t_left = 0.0
+    exp_target = rand(rng, Exponential())
+    cumulative_area = 0.0
+    proposal_attempts = 0
+    proposal_rejections = 0
+    safety = alg.safety_limit
+
+    while safety > 0
+        safety -= 1
+        t_right = min(t_left + h, search_horizon)
+        Δt_cell = t_right - t_left
+        if Δt_cell <= 0.0
+            alg.has_cached_gradient[] = false
+            _pv_shrink_grid_N!(alg)
+            _set_counter_grid_N_current(stats, alg.N[])
+            return search_horizon, horizon_event, default_return
+        end
+        _inc_counter_positive_variation_cells(stats)
+
+        move_forward_time!(state_left, Δt_cell, flow)
+        _inc_counter_grid_endpoint_evaluations(stats)
+        _inc_counter_grid_endpoint_gradient_calls(stats)
+        _inc_counter_grid_endpoint_hessian_calls(stats)
+        y_right, d_right = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_left, flow, provider, false;
+            t_valid=t_left, t_invalid=t_right)
+        _inc_counter_grid_points_evaluated(stats, 1)
+
+        Λ_cell = _tangent_intersection_bound(t_left, t_right, y_left, y_right, d_left, d_right)
+        lb_cell = pos(Λ_cell)
+        area_cell = lb_cell * Δt_cell
+
+        if cumulative_area + area_cell < exp_target
+            _inc_counter_positive_variation_skipped_cells(stats, 1)
+            cumulative_area += area_cell
+            t_left = t_right
+            y_left = y_right
+            d_left = d_right
+            if t_left >= search_horizon
+                alg.has_cached_gradient[] = false
+                _pv_shrink_grid_N!(alg)
+                _set_counter_grid_N_current(stats, alg.N[])
+                return search_horizon, horizon_event, default_return
+            end
+            if area_cell <= alg.validation_atol
+                h = min(h * alg.α⁺, alg.t_max[])
+            end
+            continue
+        end
+
+        while true
+            if lb_cell <= 0.0
+                cumulative_area += area_cell
+                break
+            end
+            τ_proposal = t_left + (exp_target - cumulative_area) / lb_cell
+            if τ_proposal >= t_right || !isfinite(τ_proposal)
+                cumulative_area += area_cell
+                break
+            end
+            if τ_refresh < τ_proposal
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                return τ_refresh, :refresh, default_return
+            end
+
+            copyto!(state_prop, state)
+            move_forward_time!(state_prop, τ_proposal, flow)
+            _inc_counter_grid_acceptance_gradient_calls(stats)
+            gradτ = _compute_grid_gradient_or_throw!(
+                state_prop, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
+            l_actual = λ(state_prop.ξ, gradτ, flow)
+            _inc_counter_grid_acceptance_tests(stats)
+            proposal_attempts += 1
+
+            if l_actual > lb_cell * (1 + 1e-10) + 1e-12
+                _inc_counter_grid_bound_violations(stats)
+                _inc_counter_positive_variation_fallbacks(stats)
+                alg.has_cached_gradient[] = false
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                return _pv_fallback!(rng, model, flow, alg, state, cache, stats,
+                    max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+            end
+
+            if rand(rng) * lb_cell <= l_actual
+                copyto!(alg.cached_gradient, gradτ)
+                alg.cached_f[] = Float64(dot(gradτ, state_prop.ξ.θ))
+                alg.cached_ψ[] = _pv_residual_potential(model, flow, state_prop, cache)
+                alg.cached_df[] = NaN
+                alg.has_cached_gradient[] = true
+                tightness = lb_cell <= 0.0 ? 0.0 : l_actual / lb_cell
+                _adapt_grid_N!(alg.fallback, tightness)
+                alg.N[] = max(alg.N_min, alg.fallback.N[])
+                alg.t_max[] = min(max_grid_horizon(flow), max(alg.t_max[] * alg.α⁻, τ_proposal * alg.α⁺))
+                _set_counter_grid_N_current(stats, alg.N[])
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                _inc_counter_positive_variation_accepts(stats)
+                return τ_proposal, :reflect, GradientMeta(alg.cached_gradient)
+            end
+
+            proposal_rejections += 1
+            exp_target += rand(rng, Exponential())
+            if cumulative_area + area_cell < exp_target
+                _inc_counter_positive_variation_skipped_cells(stats, 1)
+                cumulative_area += area_cell
+                break
+            end
+        end
+
+        t_left = t_right
+        y_left = y_right
+        d_left = d_right
+        if t_left >= search_horizon
+            alg.has_cached_gradient[] = false
+            _pv_shrink_grid_N!(alg)
+            _set_counter_grid_N_current(stats, alg.N[])
+            _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+            return search_horizon, horizon_event, default_return
+        end
+    end
+
+    _inc_counter_positive_variation_fallbacks(stats)
+    alg.has_cached_gradient[] = false
+    _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+    return _pv_fallback!(rng, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
@@ -863,6 +1220,12 @@ function _next_positive_variation_event_time!(rng::Random.AbstractRNG,
     stats::AbstractStatisticCounter, max_horizon::Float64, include_refresh::Bool,
     max_horizon_event::Symbol, probe_failure_handler::GridBoundaryProbe)
 
+    if !alg.approximate
+        return _next_positive_variation_envelope_event_time!(
+            rng, model, flow, alg, state, cache, stats, max_horizon,
+            include_refresh, max_horizon_event, probe_failure_handler)
+    end
+
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
     hard_horizon = min(max_horizon, max_grid_horizon(flow))
@@ -886,9 +1249,11 @@ function _next_positive_variation_event_time!(rng::Random.AbstractRNG,
     t_left, f_left, ψ_left, df_left = if alg.has_cached_gradient[]
         _inc_counter_grid_cached_endpoint_reuses(stats)
         alg.has_cached_gradient[] = false
-        f0 = _pv_signed_rate_from_gradient(state, alg.cached_gradient)
-        df0 = _pv_signed_rate_derivative(alg, state, flow, alg.cached_gradient)
-        0.0, f0, NaN, df0
+        # Reusing the accepted-event potential before coherent Hermite
+        # inversion can increase refinements because the area model and inverse
+        # still disagree. Keep the cached rate/derivative, but leave ψ disabled
+        # until the selected-model inversion work lands.
+        0.0, alg.cached_f[], NaN, alg.cached_df[]
     else
         _pv_observe_endpoint!(alg, model, flow, state, cache, stats, 0.0, probe_failure_handler)
     end

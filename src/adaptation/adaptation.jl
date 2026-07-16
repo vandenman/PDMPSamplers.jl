@@ -736,9 +736,12 @@ mutable struct RefreshRateAdapter <: AbstractAdapter
     const min_λref::Float64
     const max_λref::Float64
     const min_start_time::Float64
+    const objective::Symbol
+    const target_refresh_rate::Float64
     last_update::Float64
     no_updates_done::Int
     prev_total_evals::Int
+    prev_refresh_events::Int
     prev_pdmp_time::Float64
     prev_evals_per_time::Float64
     search_direction::Int
@@ -746,9 +749,10 @@ mutable struct RefreshRateAdapter <: AbstractAdapter
 end
 
 function RefreshRateAdapter(base_dt::Float64, min_start_time::Float64;
-    min_λref::Float64=0.01, max_λref::Float64=10.0)
+    min_λref::Float64=0.01, max_λref::Float64=10.0,
+    objective::Symbol=:evals_per_time, target_refresh_rate::Float64=NaN)
     RefreshRateAdapter(base_dt, min_λref, max_λref, min_start_time,
-        min_start_time, 0, 0, 0.0, Inf, 1, false)
+        objective, target_refresh_rate, min_start_time, 0, 0, 0, 0.0, Inf, 1, false)
 end
 
 function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::MutableBoomerang, grad, trace_mgr;
@@ -763,14 +767,31 @@ function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::Mutab
 
     total_evals = stats.∇f_calls + stats.∇²f_calls
     window_evals = total_evals - ad.prev_total_evals
+    refresh_events = _get_counter_refreshment_events(stats)
+    window_refreshes = refresh_events - ad.prev_refresh_events
     window_time = state.t[] - ad.prev_pdmp_time
 
-    if window_time <= 0 || window_evals <= 0
+    if window_time <= 0 || (ad.objective === :evals_per_time && window_evals <= 0)
         ad.prev_total_evals = total_evals
+        ad.prev_refresh_events = refresh_events
         ad.prev_pdmp_time = state.t[]
         ad.last_update = state.t[]
         ad.no_updates_done += 1
         return
+    end
+
+    if ad.objective === :refresh_rate
+        target = ad.target_refresh_rate
+        if isfinite(target) && target > 0
+            flow.λref = clamp(target, ad.min_λref, ad.max_λref)
+            ad.prev_total_evals = total_evals
+            ad.prev_refresh_events = refresh_events
+            ad.prev_pdmp_time = state.t[]
+            ad.last_update = state.t[]
+            ad.no_updates_done += 1
+            ad.did_update = true
+            return
+        end
     end
 
     evals_per_time = window_evals / window_time
@@ -794,6 +815,7 @@ function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::Mutab
     end
 
     ad.prev_total_evals = total_evals
+    ad.prev_refresh_events = refresh_events
     ad.prev_pdmp_time = state.t[]
     ad.last_update = state.t[]
     ad.no_updates_done += 1
@@ -813,9 +835,15 @@ function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warm
         scheme = :fullrank
     end
     boom_adapter = BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=scheme)
-    if t_warmup > 0
+    disable_refresh_adaptation = parse(Bool, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_DISABLE_REFRESH_ADAPTATION", "false"))
+    if t_warmup > 0 && !disable_refresh_adaptation
         λref_start = Float64(t0 + t_warmup * 0.5)
-        λref_adapter = RefreshRateAdapter(Float64(precond_dt * 2), λref_start)
+        objective = Symbol(get(ENV, "PDMP_ADAPTIVE_BOOMERANG_REFRESH_ADAPTATION_OBJECTIVE", "evals_per_time"))
+        target_refresh_rate = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_TARGET_REFRESH_RATE", "NaN"))
+        min_λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_MIN_LAMBDA_REF", "0.01"))
+        max_λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_MAX_LAMBDA_REF", "10.0"))
+        λref_adapter = RefreshRateAdapter(Float64(precond_dt * 2), λref_start;
+            min_λref, max_λref, objective, target_refresh_rate)
         return SequenceAdapter((boom_adapter, λref_adapter))
     end
     return boom_adapter

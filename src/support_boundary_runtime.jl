@@ -56,7 +56,7 @@ function _step!(
     τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling())
     @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-    needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+    needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats, phase)
     needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
 
     return event_type
@@ -80,7 +80,7 @@ function _step!(
 
         @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-        needs_saving, saving_args = handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+        needs_saving, saving_args = handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats, phase)
         needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
 
         return event_type
@@ -546,7 +546,7 @@ function _handle_capped_boundary_event!(
     support_boundary_options::SupportBoundaryOptions,
 )
     needs_saving, saving_args = try
-        handle_event!(rng, τ, model.grad, flow, alg, state, cache, event_type, meta, stats)
+        handle_event!(rng, τ, model.grad, flow, alg, state, cache, event_type, meta, stats, phase)
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)

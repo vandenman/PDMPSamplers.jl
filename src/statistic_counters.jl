@@ -804,6 +804,35 @@ end
     )
 end
 
+@counter_struct mutable struct BoomerangInterferenceCounter <: AbstractStatisticCounter
+    boomerang_interference_events::Int
+    boomerang_target_c_share_sum::Float64
+    boomerang_target_d_share_sum::Float64
+    boomerang_nuisance_driven_target_disturbances::Int
+end
+
+@counter_ops BoomerangInterferenceCounter begin
+    inc(
+        boomerang_interference_events,
+        boomerang_nuisance_driven_target_disturbances,
+    )
+
+    incval(
+        boomerang_target_c_share_sum,
+        boomerang_target_d_share_sum,
+    )
+
+    get_sum(
+        boomerang_interference_events,
+        boomerang_nuisance_driven_target_disturbances,
+    )
+
+    get_float(
+        boomerang_target_c_share_sum,
+        boomerang_target_d_share_sum,
+    )
+end
+
 # ===========================================================================================
 # Convenience type aliases for backward-compatible construction
 # ===========================================================================================
@@ -816,6 +845,7 @@ end
     GridThinningCounter,
     PhaseSummaryCounter,
     LazyBoundCounter,
+    BoomerangInterferenceCounter,
 )
 
 @counter_bundle(
@@ -831,4 +861,5 @@ end
     ComponentwiseAffineCounter,
     PhaseSummaryCounter,
     LazyBoundCounter,
+    BoomerangInterferenceCounter,
 )
