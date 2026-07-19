@@ -1,5 +1,26 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+struct GridTuningNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
+
+@testset "experimental shared-node bound" begin
+    bound_linear = PDMPSamplers._shared_node_cell_bound(NaN, NaN, 0.0, 1.0, 1.0, 2.0, 0.5)
+    @test bound_linear == 2.5
+
+    bound_concave = PDMPSamplers._shared_node_cell_bound(0.0, 0.0, 1.0, 1.0, 2.0, 0.0, 0.0)
+    @test bound_concave ≈ 1.0
+
+    # This control is deliberately numerical: two zero endpoint rates cannot
+    # reveal a positive oscillatory episode hidden inside the first cell.
+    hidden_peak_bound = PDMPSamplers._shared_node_cell_bound(
+        NaN, NaN, 0.0, 0.0, 1.0, 0.0, 100.0)
+    @test hidden_peak_bound == 0.0
+    @test sinpi(0.5)^2 > hidden_peak_bound
+
+    strategy = GridThinningStrategy(; bound=:shared_node, curvature_bound=2.0)
+    @test strategy.bound === :shared_node
+    @test strategy.bound_violation === :throw
+end
+
 import DifferentiationInterface as DI
 
 struct TestCellBound
@@ -1373,6 +1394,51 @@ end
         @test deriv == 0.0  # no HVP → zero derivative
     end
 
+    @testset "exact curvature is skipped at zero rate" begin
+        state = PDMPState(0.0, SkeletonPoint([1.0, 1.0], [1.0, 1.0]))
+        grad_calls = Ref(0)
+        hvp_calls = Ref(0)
+        vhv_calls = Ref(0)
+        grad = x -> begin
+            grad_calls[] += 1
+            [-1.0, -1.0]
+        end
+        hvp = (x, v) -> begin
+            hvp_calls[] += 1
+            copy(v)
+        end
+        vhv = (x, v, w) -> begin
+            vhv_calls[] += 1
+            dot(v, w)
+        end
+
+        for flow in (BouncyParticle(2, 0.0), ZigZag(2))
+            rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, (grad, hvp), false)
+            @test rate == 0.0
+            @test deriv == 0.0
+            @test hvp_calls[] == 0
+
+            rate_cached, deriv_cached = PDMPSamplers.get_rate_and_deriv(
+                state, flow, (grad, hvp), false, [-1.0, -1.0])
+            @test rate_cached == rate
+            @test deriv_cached == deriv
+            @test hvp_calls[] == 0
+
+            provider = PDMPSamplers.VHVProvider(grad, vhv, zeros(2))
+            rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(
+                state, flow, provider, false)
+            @test rate_vhv == rate
+            @test deriv_vhv == deriv
+            @test vhv_calls[] == 0
+        end
+
+        refresh_flow = BouncyParticle(2, 1.0)
+        rate_refresh, _ = PDMPSamplers.get_rate_and_deriv(
+            state, refresh_flow, (grad, hvp), true)
+        @test rate_refresh == 1.0
+        @test hvp_calls[] == 1
+    end
+
     @testset "get_rate_and_deriv with FiniteDiffHVP" begin
         d = 3
         target = gen_data(Distributions.MvNormal, d, 2.0)
@@ -1495,6 +1561,14 @@ end
         @test PDMPSamplers.min_grid_cells(zz, 5, 20) == 5
         @test PDMPSamplers.min_grid_cells(boom, 5, 20) == 5
         @test PDMPSamplers.min_grid_cells(boom, 15, 20) == 15
+        constant_strategy = GridThinningStrategy(; N=8, N_min=2)
+        value_strategy = GridThinningStrategy(; N=8, N_min=2,
+            bound=:value_quadratic, curvature_bound=3000.0)
+        @test PDMPSamplers._grid_min_cells(constant_strategy, boom, 8) == 5
+        @test PDMPSamplers._grid_min_cells(value_strategy, boom, 8) == 2
+        small_boomerang_strategy = GridThinningStrategy(;
+            N=8, N_min=2, allow_small_boomerang=true)
+        @test PDMPSamplers._grid_min_cells(small_boomerang_strategy, boom, 8) == 2
 
         @test PDMPSamplers.max_grid_horizon(zz) == 1e10
         @test PDMPSamplers.max_grid_horizon(boom) ≈ 8π
@@ -1585,7 +1659,16 @@ end
     @testset "GridThinningStrategy construction with use_fd_hvp" begin
         strat = GridThinningStrategy(; use_fd_hvp=true, N=30)
         @test strat.use_fd_hvp
+        @test strat.curvature_backend === :finite_difference
         @test strat.N == 30
+
+        exact_strat = GridThinningStrategy(; curvature_backend=:exact)
+        @test exact_strat.curvature_backend === :exact
+        @test !exact_strat.use_fd_hvp
+        @test_throws ArgumentError GridThinningStrategy(;
+            use_fd_hvp=true, curvature_backend=:exact)
+        @test_throws ArgumentError GridThinningStrategy(;
+            curvature_backend=:unknown)
 
         strat_linear = GridThinningStrategy(; bound=:linear, lazy=false,
             curvature_bound=(args...) -> (0.0))
@@ -1620,6 +1703,63 @@ end
             curvature_bound=(0.0))
         @test flat_strategy.N == 1
         @test flat_strategy.bound === :flat
+
+        value_strategy = GridThinningStrategy(;
+            bound=:value_quadratic,
+            N=1,
+            curvature_bound=(state, flow, a, b) -> 3.0)
+        @test value_strategy.bound === :value_quadratic
+        @test value_strategy.curvature_bound !== nothing
+
+        warmup_bound = WarmupCurvatureBound(;
+            initial_bound=10.0,
+            min_bound=1.0,
+            safety_factor=2.0,
+            probe_fraction=0.5,
+            probe_stride=1)
+        @test warmup_bound.current_bound == 10.0
+        @test warmup_bound.active
+    end
+
+    @testset "value-quadratic callable and warmup curvature providers" begin
+        function gaussian_grad!(out, x)
+            out[1] = x[1]
+            return out
+        end
+
+        model = PDMPModel(1, FullGradient(gaussian_grad!))
+        flow = BouncyParticle(1, 0.0)
+
+        calls = Ref(0)
+        callable_bound = (state, flow, a, b) -> begin
+            calls[] += 1
+            0.0
+        end
+        alg_callable = GridThinningStrategy(; N=1, N_min=1, t_max=0.5,
+            bound=:value_quadratic, curvature_bound=callable_bound,
+            bound_violation=:throw)
+        trace_callable, stats_callable = pdmp_sample(
+            SkeletonPoint([0.1], [1.0]), flow, model, alg_callable, 0.0, 1.0;
+            seed=20260717, progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test length(trace_callable) > 0
+        @test calls[] > 0
+        @test stats_callable.grid_bound_violations == 0
+
+        warmup_bound = WarmupCurvatureBound(; initial_bound=10.0, min_bound=1.0,
+            safety_factor=2.0, probe_fraction=0.5, probe_stride=1, apply=true)
+        alg_warmup = GridThinningStrategy(; N=1, N_min=1, t_max=0.5,
+            bound=:value_quadratic, curvature_bound=warmup_bound,
+            bound_violation=:throw)
+        trace_warmup, stats_warmup = pdmp_sample(
+            SkeletonPoint([0.1], [1.0]), flow, model, alg_warmup, 0.0, 1.5, 0.5;
+            seed=20260718, progress=false,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        @test length(trace_warmup) > 0
+        @test !warmup_bound.active
+        @test warmup_bound.observations > 0
+        @test warmup_bound.current_bound >= warmup_bound.min_bound
+        @test stats_warmup.grid_bound_violations == 0
     end
 
     @testset "R bridge GridThinning compatibility surface" begin
@@ -1688,6 +1828,44 @@ end
                 @test getproperty(stats, field) !== nothing
             end
         end
+    end
+
+    @testset "warmup grid tuning requires counters and freezes the selected schedule" begin
+        function tuning_grad!(out, x)
+            out .= x
+            return out
+        end
+
+        flow = Boomerang(Diagonal(ones(2)), zeros(2), 0.0)
+        model = PDMPModel(2, FullGradient(tuning_grad!))
+        tuning = GridWarmupTuning()
+        strategy = GridThinningStrategy(;
+            N=5, N_min=2, t_max=1.0, use_fd_hvp=true, warmup_tuning=tuning)
+        state0 = SkeletonPoint([0.2, -0.1], [0.4, 0.3])
+        rng = Xoshiro(20260718)
+        _, _, alg_noop, _, stats_noop = PDMPSamplers.initialize_state(
+            rng, flow, model, strategy, 0.0, state0;
+            statistic_counter=GridTuningNoopCounter)
+        @test_throws ArgumentError PDMPSamplers.finish_warmup!(alg_noop, stats_noop, flow)
+
+        _, _, alg, _, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, strategy, 0.0, state0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        stats.warmup_events = 10
+        stats.warmup_grid_endpoint_gradient_calls = 80
+        stats.warmup_grid_acceptance_gradient_calls = 10
+        PDMPSamplers.finish_warmup!(alg, stats, flow)
+        selected_N = alg.N[]
+        selected_tmax = alg.t_max[]
+        @test alg.schedule_frozen[]
+        @test stats.grid_schedule_frozen
+        @test stats.grid_final_N == selected_N
+        @test stats.grid_final_tmax == selected_tmax
+        @test stats.grid_warmup_objective_gradients_per_event == 9.0
+        PDMPSamplers._adapt_grid_N!(alg, 0.9)
+        PDMPSamplers._adapt_grid_t_max!(alg, 0.01, model.grad)
+        @test alg.N[] == selected_N
+        @test alg.t_max[] == selected_tmax
     end
 
     @testset "Early stopping in construct_upper_bound_grad_and_hess!" begin

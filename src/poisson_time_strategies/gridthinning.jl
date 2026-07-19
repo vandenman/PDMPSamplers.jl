@@ -95,10 +95,29 @@ end
 
 Adaptive GridThinning configuration.
 
-Preferred user-facing bounds are `:constant`, `:flat`, `:linear`, and `:auto`.
-The older `bound` keyword remains accepted as a compatibility alias.
-Passing neither keyword keeps the historical constant GridThinning behavior
-used by downstream packages.
+`curvature_backend` controls directional curvature evaluation explicitly:
+`:exact` requires a compatible joint, VHV, or HVP provider;
+`:finite_difference` evaluates curvature from shifted gradients; and `:auto`
+uses an exact provider when available, otherwise finite differences. Finite
+differences approximate the directional derivative and therefore have
+step-size/truncation error even when the underlying gradients are exact.
+`use_fd_hvp` remains a compatibility alias for
+`curvature_backend=:finite_difference`.
+
+Preferred user-facing bounds are `:constant`, `:flat`, `:linear`, `:auto`,
+and `:value_quadratic`. The explicit experimental `:shared_node` mode uses
+corrected signed rates at consecutive nodes, quadratic interpolation, and
+empirical secant-disagreement inflation. It is a numerical clock, not a
+certified thinning envelope. Passing neither `bound` keyword keeps the historical
+constant GridThinning behavior used by downstream packages.
+
+For `bound=:value_quadratic`, `curvature_bound` is a certified upper bound on
+the scalar rate curvature over each grid cell. If the cell width is `h`, the
+envelope is `max(r_left, r_right, 0) + curvature_bound*h^2/8`. The value may be
+a finite number or a callable `(state, flow, a, b) -> M_cell`. A callable may
+return `nothing` to fall back to ordinary GridThinning for that cell. Supplying
+a bound that is too small invalidates the envelope; proposal-time checks do not
+certify behavior between proposals.
 """
 struct GridThinningStrategy <: PoissonTimeStrategy
     N::Int
@@ -109,6 +128,7 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     safety_limit::Int
     early_stop_threshold::Float64
     use_fd_hvp::Bool
+    curvature_backend::Symbol
     post_warmup_simplify::Bool
     lazy::Bool
     bound::Symbol
@@ -121,42 +141,180 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     lazy_low_tightness_threshold::Float64
     lazy_max_low_tightness_rejections::Int
     lazy_max_rejections::Int
+    allow_small_boomerang::Bool
+    warmup_tuning
+end
+
+"""
+    GridWarmupTuning(; target_gradients_per_event=7.0,
+        horizon_rate_high=0.35, rejection_rate_high=1.25,
+        min_tmax=0.1, max_tmax=Inf, n_step=1,
+        tmax_grow=1.25, tmax_shrink=0.75)
+
+Optional post-warmup grid schedule tuning for `GridThinningStrategy`.
+Pass an instance as `warmup_tuning=` to enable it explicitly.
+"""
+struct GridWarmupTuning
+    target_gradients_per_event::Float64
+    horizon_rate_high::Float64
+    rejection_rate_high::Float64
+    min_tmax::Float64
+    max_tmax::Float64
+    n_step::Int
+    tmax_grow::Float64
+    tmax_shrink::Float64
+end
+
+function GridWarmupTuning(; target_gradients_per_event::Real=7.0,
+    horizon_rate_high::Real=0.35, rejection_rate_high::Real=1.25,
+    min_tmax::Real=0.1, max_tmax::Real=Inf, n_step::Integer=1,
+    tmax_grow::Real=1.25, tmax_shrink::Real=0.75)
+    target = float(target_gradients_per_event)
+    horizon_hi = float(horizon_rate_high)
+    rejection_hi = float(rejection_rate_high)
+    min_t = float(min_tmax)
+    max_t = float(max_tmax)
+    grow = float(tmax_grow)
+    shrink = float(tmax_shrink)
+    ispositive(target) || throw(ArgumentError("target_gradients_per_event must be positive"))
+    ispositive(horizon_hi) || throw(ArgumentError("horizon_rate_high must be positive"))
+    ispositive(rejection_hi) || throw(ArgumentError("rejection_rate_high must be positive"))
+    min_t >= 0 || throw(ArgumentError("min_tmax must be nonnegative"))
+    max_t > min_t || throw(ArgumentError("max_tmax must be greater than min_tmax"))
+    n_step > 0 || throw(ArgumentError("n_step must be positive"))
+    grow > 1 || throw(ArgumentError("tmax_grow must be greater than 1"))
+    0 < shrink < 1 || throw(ArgumentError("tmax_shrink must lie between 0 and 1"))
+    return GridWarmupTuning(target, horizon_hi, rejection_hi, min_t, max_t,
+        Int(n_step), grow, shrink)
+end
+
+"""
+    WarmupCurvatureBound(; initial_bound, min_bound=0.0, safety_factor=2.0,
+        probe_fraction=0.5, probe_stride=100, max_observations=1000,
+        apply=true)
+
+Experimental empirical curvature provider for `GridThinningStrategy(;
+bound=:value_quadratic)`.
+
+During warmup, midpoint probes estimate the smallest observed `M` needed by the
+implemented constant endpoint envelope. After warmup, `finish_warmup!` freezes
+the provider to `max(min_bound, safety_factor * observed_max)` when
+`apply=true`; with `apply=false` the initial bound is retained and the observed
+suggestion is only recorded.
+
+This provider is a tuning aid, not a certificate. Use a finite number or a
+problem-specific callable when exactness depends on an analytical bound.
+"""
+mutable struct WarmupCurvatureBound
+    initial_bound::Float64
+    current_bound::Float64
+    min_bound::Float64
+    safety_factor::Float64
+    probe_fraction::Float64
+    probe_stride::Int
+    max_observations::Int
+    cells_seen::Int
+    observed_max::Float64
+    observations::Int
+    active::Bool
+    apply::Bool
+end
+
+function WarmupCurvatureBound(; initial_bound::Real, min_bound::Real=0.0,
+    safety_factor::Real=2.0, probe_fraction::Real=0.5,
+    probe_stride::Integer=100, max_observations::Integer=1000,
+    apply::Bool=true)
+    initial = _curvature_bound_value(initial_bound)
+    min_value = _curvature_bound_value(min_bound)
+    factor = Float64(safety_factor)
+    isfinite(factor) && factor >= 1.0 ||
+        throw(ArgumentError("safety_factor must be finite and at least 1"))
+    probe = Float64(probe_fraction)
+    0.0 < probe < 1.0 ||
+        throw(ArgumentError("probe_fraction must lie strictly between 0 and 1"))
+    probe_stride > 0 || throw(ArgumentError("probe_stride must be positive"))
+    max_observations > 0 || throw(ArgumentError("max_observations must be positive"))
+    return WarmupCurvatureBound(initial, initial, min_value, factor, probe,
+        Int(probe_stride), Int(max_observations), 0, 0.0, 0, true, apply)
+end
+
+(bound::WarmupCurvatureBound)(state::AbstractPDMPState, flow::ContinuousDynamics, a::Real, b::Real) =
+    bound.current_bound
+
+function _update_warmup_curvature_bound!(bound::WarmupCurvatureBound, required::Real)
+    bound.active || return bound
+    value = max(Float64(required), 0.0)
+    bound.observed_max = max(bound.observed_max, value)
+    bound.observations += 1
+    return bound
+end
+
+function _finish_warmup_curvature_bound!(bound::WarmupCurvatureBound)
+    bound.active || return bound
+    suggested = max(bound.min_bound, bound.safety_factor * bound.observed_max)
+    if bound.apply
+        bound.current_bound = suggested
+    end
+    bound.active = false
+    return bound
 end
 
 _normalize_grid_bound(::Nothing) = :constant
+
+function _normalize_curvature_backend(curvature_backend, use_fd_hvp::Bool)
+    if curvature_backend === nothing
+        return use_fd_hvp ? :finite_difference : :auto
+    end
+    backend = Symbol(curvature_backend)
+    backend in (:exact, :finite_difference, :auto) || throw(ArgumentError(
+        "curvature_backend must be :exact, :finite_difference, or :auto"))
+    use_fd_hvp && backend !== :finite_difference && throw(ArgumentError(
+        "use_fd_hvp=true conflicts with curvature_backend=$(backend); use curvature_backend=:finite_difference"))
+    return backend
+end
 
 function _normalize_grid_bound(bound::Symbol)
     bound === :constant && return :constant
     bound === :flat && return :flat
     bound === :linear && return :linear
+    bound === :value_quadratic && return :value_quadratic
+    bound === :shared_node && return :shared_node
     bound === :auto && return :auto
     bound === :sticky_auto && return :sticky_auto
     throw(ArgumentError("unknown GridThinning bound $(bound)"))
 end
 
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
-    safety_limit::Int=500, early_stop_threshold::Real=5.0, use_fd_hvp::Bool=false, post_warmup_simplify::Bool=false,
+    safety_limit::Int=500, early_stop_threshold::Real=5.0, use_fd_hvp::Bool=false,
+    curvature_backend=nothing, post_warmup_simplify::Bool=false,
     lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing, linear_area_threshold::Real=0.95,
     linear_min_area_gain::Real=0.0, max_rejections_before_tail_restart::Int=100, max_componentwise_affine_segments_per_cell::Int=64,
-    lazy_low_tightness_threshold::Real=0.1, lazy_max_low_tightness_rejections::Int=3, lazy_max_rejections::Int=0)
+    lazy_low_tightness_threshold::Real=0.1, lazy_max_low_tightness_rejections::Int=3,
+    lazy_max_rejections::Int=0, allow_small_boomerang::Bool=false, warmup_tuning=nothing)
     bound_symbol = _normalize_grid_bound(bound)
+    if bound_symbol === :shared_node
+        curvature_bound isa Real && isfinite(curvature_bound) && curvature_bound >= 0 ||
+            throw(ArgumentError("bound=:shared_node requires a finite nonnegative numerical curvature_bound used as empirical inflation"))
+    end
     bound_violation_symbol = bound_violation === nothing ?
-        (bound_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
+        (bound_symbol === :constant ? :count : bound_symbol === :shared_node ? :throw : :shrink) : Symbol(bound_violation)
     lazy_low_tightness_threshold >= 0 ||
         throw(ArgumentError("lazy_low_tightness_threshold must be nonnegative"))
     lazy_max_low_tightness_rejections > 0 ||
         throw(ArgumentError("lazy_max_low_tightness_rejections must be positive"))
     lazy_max_rejections >= 0 ||
         throw(ArgumentError("lazy_max_rejections must be nonnegative; use 0 for the default derived cap"))
+    backend = _normalize_curvature_backend(curvature_backend, use_fd_hvp)
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
-        Float64(early_stop_threshold), use_fd_hvp, post_warmup_simplify,
+        Float64(early_stop_threshold), backend === :finite_difference, backend,
+        post_warmup_simplify,
         lazy, bound_symbol, curvature_bound, bound_violation_symbol,
         Float64(linear_area_threshold),
         Float64(linear_min_area_gain),
         max_rejections_before_tail_restart, max_componentwise_affine_segments_per_cell,
         Float64(lazy_low_tightness_threshold), lazy_max_low_tightness_rejections,
-        lazy_max_rejections)
+        lazy_max_rejections, allow_small_boomerang, warmup_tuning)
 end
 
 function Base.show(io::IO, strat::GridThinningStrategy)
@@ -165,11 +323,20 @@ function Base.show(io::IO, strat::GridThinningStrategy)
     print(io, ", bound=", strat.bound)
     strat.bound in (:linear, :auto) && print(io, ", linear_area_threshold=", strat.linear_area_threshold,
         ", linear_min_area_gain=", strat.linear_min_area_gain)
+    strat.bound in (:value_quadratic, :shared_node) && print(io, ", curvature_bound=", strat.curvature_bound)
     print(io, ")")
 end
 
 _default_early_stop(::ContinuousDynamics, est::Float64) = est
 _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_stop(pd.dynamics, est)
+
+function _grid_min_cells(strat::GridThinningStrategy, flow::ContinuousDynamics, N_base::Int)
+    strat.bound in (:value_quadratic, :shared_node) && return strat.N_min
+    if flow isa AnyBoomerang && strat.allow_small_boomerang
+        return strat.N_min
+    end
+    return min_grid_cells(flow, strat.N_min, N_base)
+end
 
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     T = typeof(strat.t_max)
@@ -180,11 +347,21 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
         throw(ArgumentError("max_componentwise_affine_segments_per_cell must be positive"))
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
     N_base = strat.N
-    N_min = min_grid_cells(flow, strat.N_min, N_base)
+    N_min = _grid_min_cells(strat, flow, N_base)
     est = _default_early_stop(flow, strat.early_stop_threshold)
     est = _adjust_early_stop(model.grad, est)
     N_max = max(N_base + 4, 2 * N_base)
-    _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, est, stats)
+    alg = _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, est, stats)
+    _set_counter_grid_initial_N(stats, alg.N[])
+    _set_counter_grid_final_N(stats, alg.N[])
+    _set_counter_grid_initial_tmax(stats, alg.t_max[])
+    _set_counter_grid_final_tmax(stats, alg.t_max[])
+    _set_counter_grid_initial_h(stats, alg.t_max[] / alg.N[])
+    _set_counter_grid_final_h(stats, alg.t_max[] / alg.N[])
+    _set_counter_grid_schedule_frozen(stats, false)
+    selected_backend = _selected_curvature_backend(strat.curvature_backend, model, flow)
+    _set_counter_curvature_backend(stats, selected_backend)
+    return alg
 end
 
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
@@ -223,10 +400,12 @@ function _return_grid_horizon!(alg, stats::AbstractStatisticCounter, flow::Conti
     alg.has_cached_gradient[] = false
     horizon_event === :horizon_hit || (alg.has_cached_rate_derivative[] = false)
     if horizon_event === :horizon_hit
-        _adapt_grid_on_horizon!(alg, flow)
-        alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
-        recompute_time_grid!(alg)
-        _inc_counter_grid_grows(stats)
+        if !alg.schedule_frozen[]
+            _adapt_grid_on_horizon!(alg, flow)
+            alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
+            recompute_time_grid!(alg)
+            _inc_counter_grid_grows(stats)
+        end
         _restore_lazy_after_grid!(alg, flow)
         return t_max, :horizon_hit, default_return
     end
@@ -250,7 +429,12 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     state_cache = copy(state)
     state_cache2 = copy(state)
     grad_provider = GradientProvider(state_cache.ξ.θ, flow, model.grad, cache)
-    fd_grad_provider = stats === nothing ? grad_provider : WithFDCurvatureStats(grad_provider, stats)
+    fd_grad_provider = grad_provider
+    grad_hvp_provider = GradHVPProvider(grad_provider, model.hvp)
+    vhv_provider = VHVProvider(grad_provider, model.vhv, similar(state.ξ.x))
+    fd_vhv_provider = FiniteDiffVHV(fd_grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x), stats)
+    event_provider = _initial_grid_event_provider(strat.curvature_backend, model, flow,
+        grad_hvp_provider, vhv_provider, fd_vhv_provider)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         PiecewiseAffineBound(2N_base),
@@ -261,11 +445,12 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         strat.safety_limit,
         N_min,
         N_max,
+        Ref(false),
         est,
         state_cache,
         state_cache2,
         similar(state.ξ.x, 0),
-        strat.use_fd_hvp,
+        strat.curvature_backend,
         similar(state.ξ.x),
         similar(state.ξ.x),
         similar(state.ξ.x),
@@ -282,9 +467,10 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         Ref(NaN),
         Ref(false),
         grad_provider,
-        GradHVPProvider(grad_provider, model.hvp),
-        VHVProvider(grad_provider, model.vhv, similar(state.ξ.x)),
-        FiniteDiffVHV(fd_grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x)),
+        grad_hvp_provider,
+        vhv_provider,
+        fd_vhv_provider,
+        event_provider,
         strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
@@ -295,10 +481,11 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         strat.lazy_low_tightness_threshold,
         strat.lazy_max_low_tightness_rejections,
         strat.lazy_max_rejections,
+        strat.warmup_tuning,
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD,EP} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
@@ -308,11 +495,12 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: P
     safety_limit::Int
     N_min::Int
     N_max::Int
+    schedule_frozen::Base.RefValue{Bool}
     early_stop_threshold::Float64
     state_cache::S
     state_cache2::S
     empty_∇ϕx::V
-    use_fd_hvp::Bool
+    curvature_backend::Symbol
     fd_buf::Vector{Float64}
     fd_grad_buf::Vector{Float64}
     fd_w_buf::Vector{Float64}
@@ -332,6 +520,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: P
     grad_hvp_provider::GH
     vhv_provider::VP
     fd_vhv_provider::FD
+    event_provider::EP
     bound::Symbol
     curvature_bound
     bound_violation::Symbol
@@ -342,12 +531,99 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD} <: P
     lazy_low_tightness_threshold::Float64
     lazy_max_low_tightness_rejections::Int
     lazy_max_rejections::Int
+    warmup_tuning
 end
 
 accept_reflection_event(::Random.AbstractRNG, ::GridAdaptiveState, args...) = true
 accept_reflection_event(::GridAdaptiveState, args...) = true
 
 recompute_time_grid!(alg::GridAdaptiveState) = recompute_time_grid!(alg.pcb, alg.t_max[], alg.N[])
+
+finish_warmup!(::PoissonTimeStrategy, ::AbstractStatisticCounter) = nothing
+finish_warmup!(alg::PoissonTimeStrategy, stats::AbstractStatisticCounter, ::ContinuousDynamics) =
+    finish_warmup!(alg, stats)
+
+_record_final_grid_state!(::PoissonTimeStrategy, ::AbstractStatisticCounter) = nothing
+
+function _record_final_grid_state!(alg::GridAdaptiveState, stats::AbstractStatisticCounter)
+    _set_counter_grid_final_N(stats, alg.N[])
+    _set_counter_grid_final_tmax(stats, alg.t_max[])
+    _set_counter_grid_final_h(stats, alg.t_max[] / alg.N[])
+    _set_counter_grid_schedule_frozen(stats, alg.schedule_frozen[])
+    return nothing
+end
+
+function finish_warmup!(alg::GridAdaptiveState, ::AbstractStatisticCounter)
+    alg.curvature_bound isa WarmupCurvatureBound &&
+        _finish_warmup_curvature_bound!(alg.curvature_bound)
+    return nothing
+end
+
+function _required_grid_counter_value(stats::AbstractStatisticCounter, name::Symbol)
+    hasproperty(stats, name) || throw(ArgumentError(
+        "GridWarmupTuning requires statistic counter field $(name)"))
+    value = getproperty(stats, name)
+    value isa Real || throw(ArgumentError(
+        "GridWarmupTuning requires numeric statistic counter field $(name)"))
+    return Float64(value)
+end
+
+function _maybe_tune_grid_after_warmup!(alg::GridAdaptiveState, stats::AbstractStatisticCounter, flow::ContinuousDynamics)
+    tuning = alg.warmup_tuning
+    tuning === nothing && return nothing
+    events = max(_required_grid_counter_value(stats, :warmup_events), 1.0)
+    endpoint_grad = _required_grid_counter_value(stats, :warmup_grid_endpoint_gradient_calls)
+    acceptance_grad = _required_grid_counter_value(stats, :warmup_grid_acceptance_gradient_calls)
+    gradients_per_event = (endpoint_grad + acceptance_grad) / events
+    horizon_hits = _required_grid_counter_value(stats, :grid_horizon_hits)
+    rejections = _required_grid_counter_value(stats, :lazy_proposal_rejections)
+    horizon_rate = horizon_hits / events
+    rejection_rate = rejections / events
+
+    _set_counter_grid_warmup_objective_events(stats, events)
+    _set_counter_grid_warmup_objective_endpoint_gradients(stats, endpoint_grad)
+    _set_counter_grid_warmup_objective_acceptance_gradients(stats, acceptance_grad)
+    _set_counter_grid_warmup_objective_gradients_per_event(stats, gradients_per_event)
+    _set_counter_grid_warmup_objective_horizon_hits(stats, horizon_hits)
+    _set_counter_grid_warmup_objective_horizon_rate(stats, horizon_rate)
+    _set_counter_grid_warmup_objective_rejections(stats, rejections)
+    _set_counter_grid_warmup_objective_rejection_rate(stats, rejection_rate)
+
+    changed = false
+    if gradients_per_event > tuning.target_gradients_per_event && alg.N[] > alg.N_min
+        alg.N[] = max(alg.N_min, alg.N[] - tuning.n_step)
+        changed = true
+    elseif horizon_rate > tuning.horizon_rate_high && alg.N[] < alg.N_max
+        alg.N[] = min(alg.N_max, alg.N[] + tuning.n_step)
+        changed = true
+    end
+
+    old_tmax = alg.t_max[]
+    max_tmax = min(tuning.max_tmax, max_grid_horizon(flow))
+    if horizon_rate > tuning.horizon_rate_high
+        alg.t_max[] = min(max_tmax, old_tmax * tuning.tmax_grow)
+    elseif rejection_rate > tuning.rejection_rate_high
+        alg.t_max[] = max(tuning.min_tmax, old_tmax * tuning.tmax_shrink)
+    end
+    changed |= alg.t_max[] != old_tmax
+
+    if changed
+        recompute_time_grid!(alg)
+        _set_counter_grid_N_current(stats, alg.N[])
+    end
+    alg.schedule_frozen[] = true
+    _set_counter_grid_final_N(stats, alg.N[])
+    _set_counter_grid_final_tmax(stats, alg.t_max[])
+    _set_counter_grid_final_h(stats, alg.t_max[] / alg.N[])
+    _set_counter_grid_schedule_frozen(stats, true)
+    return nothing
+end
+
+function finish_warmup!(alg::GridAdaptiveState, stats::AbstractStatisticCounter, flow::ContinuousDynamics)
+    finish_warmup!(alg, stats)
+    _maybe_tune_grid_after_warmup!(alg, stats, flow)
+    return nothing
+end
 
 function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     alg.t_max[] = t_max
@@ -468,8 +744,385 @@ function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, 
     )
 end
 
+_can_use_value_quadratic_grid(flow::ContinuousDynamics, curvature_bound) =
+    _rate_aggregation(flow) === :scalar && curvature_bound !== nothing
+
+function _shared_node_cell_bound(
+    t_previous::Real,
+    y_previous::Real,
+    t_left::Real,
+    y_left::Real,
+    t_right::Real,
+    y_right::Real,
+    inflation::Real,
+)
+    scale = max(Float64(inflation), 0.0)
+    endpoint_max = max(Float64(y_left), Float64(y_right), 0.0)
+    if !isfinite(t_previous) || !(t_previous < t_left < t_right)
+        return endpoint_max + scale * abs(Float64(y_right) - Float64(y_left))
+    end
+    slope_left = (Float64(y_left) - Float64(y_previous)) / (Float64(t_left) - Float64(t_previous))
+    slope_right = (Float64(y_right) - Float64(y_left)) / (Float64(t_right) - Float64(t_left))
+    quadratic = (slope_right - slope_left) / (Float64(t_right) - Float64(t_previous))
+    linear = slope_left - quadratic * (Float64(t_previous) + Float64(t_left))
+    predicted_max = endpoint_max
+    if quadratic < 0.0
+        vertex = -linear / (2 * quadratic)
+        if t_left < vertex < t_right
+            constant = Float64(y_left) - quadratic * Float64(t_left)^2 - linear * Float64(t_left)
+            predicted_max = max(predicted_max, quadratic * vertex^2 + linear * vertex + constant)
+        end
+    end
+    defect = abs(slope_right - slope_left) * (Float64(t_right) - Float64(t_left))
+    return max(predicted_max, 0.0) + scale * defect
+end
+
+@inline function _value_quadratic_cell_bound(y_left::Real, y_right::Real, cell_width::Real, residual_bound::Real)
+    residual = max(Float64(residual_bound), 0.0) * Float64(cell_width)^2 / 8
+    return max(Float64(y_left), Float64(y_right), 0.0) + residual
+end
+
+function _value_rate_at_state!(
+    probe_failure_handler::GridBoundaryProbe,
+    state::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    grad_provider,
+    t_valid::Float64,
+    t_invalid::Float64,
+)
+    rate, _ = _get_rate_and_deriv_or_throw(
+        probe_failure_handler, state, flow, (grad_provider, nothing), false;
+        t_valid, t_invalid)
+    return rate
+end
+
+function _signed_rate_at_state!(
+    ::NoGridBoundaryProbe,
+    state::AbstractPDMPState,
+    grad_provider,
+    ::Float64,
+    ::Float64,
+)
+    return Float64(dot(grad_provider(state.ξ.x), state.ξ.θ))
+end
+
+function _signed_rate_at_state!(
+    probe::GridBoundaryProbeHandler,
+    state::AbstractPDMPState,
+    grad_provider,
+    t_valid::Float64,
+    t_invalid::Float64,
+)
+    try
+        return Float64(dot(grad_provider(state.ξ.x), state.ξ.θ))
+    catch err
+        _throw_grid_boundary_error(probe, state, err; t_valid, t_invalid)
+    end
+end
+
+_maybe_probe_warmup_curvature_bound!(args...) = nothing
+
+function _maybe_probe_warmup_curvature_bound!(
+    bound::WarmupCurvatureBound,
+    probe_failure_handler::GridBoundaryProbe,
+    state_probe::AbstractPDMPState,
+    state_start::AbstractPDMPState,
+    flow::ContinuousDynamics,
+    grad_provider,
+    t_left::Float64,
+    t_right::Float64,
+    y_left::Float64,
+    y_right::Float64,
+    stats::AbstractStatisticCounter,
+)
+    bound.active || return nothing
+    bound.cells_seen += 1
+    bound.observations < bound.max_observations || return nothing
+    rem(bound.cells_seen, bound.probe_stride) == 0 || return nothing
+    h = t_right - t_left
+    ispositive(h) || return nothing
+    copyto!(state_probe, state_start)
+    t_probe = t_left + bound.probe_fraction * h
+    t_probe != 0.0 && move_forward_time!(state_probe, t_probe, flow)
+    _inc_counter_grid_certificate_calls(stats)
+    _inc_counter_grid_points_evaluated(stats, 1)
+    y_probe = _value_rate_at_state!(
+        probe_failure_handler, state_probe, flow, grad_provider, t_left, t_right)
+    required = 8 * max(0.0, y_probe - max(y_left, y_right, 0.0)) / (h * h)
+    _update_warmup_curvature_bound!(bound, required)
+    return nothing
+end
+
+function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+    alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
+    max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit,
+    probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
+    ) where {FL<:ContinuousDynamics}
+
+    shared_node = alg.bound === :shared_node
+    _can_use_value_quadratic_grid(flow, alg.curvature_bound) ||
+        return _next_event_time_lazy!(rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
+            model, flow, alg, state, cache, stats, max_horizon, include_refresh,
+            max_horizon_event, probe_failure_handler)
+
+    state_ = alg.state_cache
+    state2_ = alg.state_cache2
+    copyto!(state_, state)
+
+    λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
+    default_return = GradientMeta(alg.empty_∇ϕx)
+
+    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
+
+    N = alg.N[]
+    t_max = alg.t_max[]
+    effective_horizon, horizon_event = _effective_grid_horizon(model.grad, t_max, τ_refresh, max_horizon, max_horizon_event)
+    Δt = effective_horizon / N
+    max_t_max = max_grid_horizon(flow)
+
+    if alg.has_cached_gradient[]
+        _inc_counter_grid_cached_endpoint_reuses(stats)
+        y_left = shared_node ? Float64(dot(alg.cached_gradient, state_.ξ.θ)) :
+            pos(λ(state_.ξ, alg.cached_gradient, flow))
+        alg.has_cached_gradient[] = false
+        alg.has_cached_rate_derivative[] = false
+    else
+        _inc_counter_grid_endpoint_evaluations(stats)
+        _inc_counter_grid_endpoint_gradient_calls(stats)
+        y_left = shared_node ?
+            _signed_rate_at_state!(probe_failure_handler, state_, alg.grad_provider, 0.0, 0.0) :
+            _value_rate_at_state!(probe_failure_handler, state_, flow, alg.grad_provider, 0.0, 0.0)
+    end
+    t_left = 0.0
+    t_previous = NaN
+    y_previous = NaN
+
+    cumulative_area = 0.0
+    exp_target = rand(rng, Exponential())
+    safety_limit = alg.safety_limit
+    default_max_rejections = min(25, max(10, alg.safety_limit ÷ 2))
+    max_rejections = alg.lazy_max_rejections > 0 ? alg.lazy_max_rejections : default_max_rejections
+    low_tightness_rejections = 0
+    low_tightness_threshold = alg.lazy_low_tightness_threshold
+    max_low_tightness_rejections = alg.lazy_max_low_tightness_rejections
+    proposal_attempts = 0
+    proposal_rejections = 0
+    tightness_sum = 0.0
+    min_tightness = Inf
+    max_tightness = -Inf
+
+    _inc_counter_grid_builds(stats)
+    _inc_counter_grid_points_evaluated(stats, 1)
+    _record_grid_schedule!(stats, alg)
+
+    while safety_limit > 0
+        safety_limit -= 1
+
+        t_right = t_left + Δt
+        t_right > effective_horizon && (t_right = effective_horizon)
+        Δt_cell = t_right - t_left
+        if Δt_cell <= 0.0
+            return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event, max_t_max, default_return)
+        end
+
+        move_forward_time!(state_, Δt_cell, flow)
+        _inc_counter_grid_endpoint_evaluations(stats)
+        _inc_counter_grid_endpoint_gradient_calls(stats)
+        y_right = shared_node ?
+            _signed_rate_at_state!(probe_failure_handler, state_, alg.grad_provider, t_left, t_right) :
+            _value_rate_at_state!(probe_failure_handler, state_, flow, alg.grad_provider, t_left, t_right)
+        _inc_counter_grid_points_evaluated(stats, 1)
+
+        residual_bound = if shared_node
+            Float64(alg.curvature_bound)
+        else
+            value = _evaluate_curvature_bound(alg.curvature_bound, state, flow, t_left, t_right, stats)
+            value === nothing && return _next_event_time_lazy!(
+                rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
+                model, flow, alg, state, cache, stats, max_horizon, include_refresh,
+                max_horizon_event, probe_failure_handler)
+            _maybe_probe_warmup_curvature_bound!(
+                alg.curvature_bound, probe_failure_handler, state2_, state, flow,
+                alg.grad_provider, t_left, t_right, Float64(y_left), Float64(y_right), stats)
+            value
+        end
+
+        if shared_node
+            _inc_counter_shared_node_cells(stats)
+            isfinite(t_previous) ? _inc_counter_shared_node_three_point_cells(stats) :
+                _inc_counter_shared_node_two_point_cells(stats)
+        end
+        Λ_cell = shared_node ?
+            _shared_node_cell_bound(t_previous, y_previous, t_left, y_left, t_right, y_right, residual_bound) :
+            _value_quadratic_cell_bound(y_left, y_right, Δt_cell, residual_bound)
+        area_cell = pos(Λ_cell) * Δt_cell
+
+        if area_cell <= 0.0
+            t_previous = t_left
+            y_previous = y_left
+            t_left = t_right
+            y_left = y_right
+            if t_right >= effective_horizon
+                alg.has_cached_rate_derivative[] = false
+                return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event,
+                    max_t_max, default_return)
+            end
+            continue
+        end
+
+        if cumulative_area + area_cell < exp_target
+            cumulative_area += area_cell
+            t_previous = t_left
+            y_previous = y_left
+            t_left = t_right
+            y_left = y_right
+            if t_right >= effective_horizon
+                alg.has_cached_rate_derivative[] = false
+                return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event,
+                    max_t_max, default_return)
+            end
+            continue
+        end
+
+        while true
+            lb_proposal = pos(Λ_cell)
+            τ_proposal = t_left + (exp_target - cumulative_area) / lb_proposal
+            if τ_proposal >= t_right || !isfinite(τ_proposal)
+                t_previous = t_left
+                y_previous = y_left
+                t_left = t_right
+                y_left = y_right
+                cumulative_area = 0.0
+                exp_target = rand(rng, Exponential())
+                if t_right >= effective_horizon
+                    alg.has_cached_rate_derivative[] = false
+                    return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event,
+                        max_t_max, default_return)
+                end
+                break
+            end
+
+            if τ_refresh < τ_proposal
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                _invalidate_cached_gradient!(alg)
+                return τ_refresh, :refresh, default_return
+            end
+
+            copyto!(state2_, state)
+            move_forward_time!(state2_, τ_proposal, flow)
+            _inc_counter_grid_acceptance_gradient_calls(stats)
+            ∇ϕx = _compute_grid_gradient_or_throw!(
+                state2_, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
+
+            l_actual = λ(state2_.ξ, ∇ϕx, flow)
+            signed_actual = shared_node ? Float64(dot(∇ϕx, state2_.ξ.θ)) : Float64(l_actual)
+            _inc_counter_grid_acceptance_tests(stats)
+            proposal_attempts += 1
+
+            tightness = _safe_tightness(l_actual, lb_proposal)
+            tightness_sum += tightness
+            min_tightness = min(min_tightness, tightness)
+            max_tightness = max(max_tightness, tightness)
+
+            if l_actual > lb_proposal * (1 + 1e-10) + 1e-12
+                _inc_counter_lazy_fallback_bound_violation(stats)
+                _inc_counter_grid_bound_violations(stats)
+                if alg.bound_violation === :throw
+                    throw(ErrorException(_grid_bound_violation_message(
+                        alg, stats, state2_, flow, τ_proposal, NaN, l_actual,
+                        lb_proposal, exp_target, λ_refresh, false)))
+                elseif alg.bound_violation === :shrink
+                    _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                    alg.has_cached_gradient[] = false
+                    alg.has_cached_rate_derivative[] = false
+                    _shrink_grid_after_bound_violation!(alg, stats)
+                    return _next_event_time_lazy!(
+                        rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
+                        model, flow, alg, state, cache, stats, max_horizon, include_refresh,
+                        max_horizon_event, probe_failure_handler)
+                end
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                alg.has_cached_gradient[] = false
+                alg.has_cached_rate_derivative[] = false
+                return _next_event_time_lazy!(
+                    rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
+                    model, flow, alg, state, cache, stats, max_horizon, include_refresh,
+                    max_horizon_event, probe_failure_handler)
+            end
+
+            if rand(rng) * lb_proposal <= l_actual
+                copyto!(alg.cached_gradient, ∇ϕx)
+                alg.has_cached_gradient[] = true
+                alg.has_cached_rate_derivative[] = false
+                _adapt_grid_N!(alg, tightness)
+                _adapt_grid_t_max!(alg, τ_proposal, model.grad)
+                _set_counter_grid_N_current(stats, alg.N[])
+                alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                return τ_proposal, :reflect, GradientMeta(∇ϕx)
+            end
+
+            proposal_rejections += 1
+            if tightness < low_tightness_threshold
+                low_tightness_rejections += 1
+            else
+                low_tightness_rejections = 0
+            end
+
+            if low_tightness_rejections >= max_low_tightness_rejections || proposal_rejections >= max_rejections
+                low_tightness_rejections >= max_low_tightness_rejections &&
+                    _inc_counter_lazy_fallback_low_tightness(stats)
+                _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                alg.has_cached_gradient[] = false
+                alg.has_cached_rate_derivative[] = false
+                _increase_grid_N!(alg)
+                recompute_time_grid!(alg)
+                return _next_event_time_lazy!(
+                    rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
+                    model, flow, alg, state, cache, stats, max_horizon, include_refresh,
+                    max_horizon_event, probe_failure_handler)
+            end
+
+            cumulative_area += lb_proposal * (τ_proposal - t_left)
+            t_previous = t_left
+            y_previous = y_left
+            t_left = τ_proposal
+            y_left = signed_actual
+            Δt_tail = t_right - t_left
+            if Δt_tail <= 0.0
+                t_left = t_right
+                y_left = y_right
+                cumulative_area = 0.0
+                exp_target = rand(rng, Exponential())
+                if t_right >= effective_horizon
+                    alg.has_cached_rate_derivative[] = false
+                    return _return_grid_horizon!(alg, stats, flow, t_max, effective_horizon, horizon_event,
+                        max_t_max, default_return)
+                end
+                break
+            end
+            Λ_tail = shared_node ?
+                _shared_node_cell_bound(t_previous, y_previous, t_left, y_left, t_right, y_right, residual_bound) :
+                _value_quadratic_cell_bound(y_left, y_right, Δt_tail, residual_bound)
+            isfinite(Λ_tail) && (Λ_cell = min(Λ_cell, Λ_tail))
+            exp_target += rand(rng, Exponential())
+        end
+    end
+
+    if isfinite(τ_refresh) && τ_refresh <= min(t_max, max_horizon)
+        alg.has_cached_gradient[] = false
+        alg.has_cached_rate_derivative[] = false
+        return τ_refresh, :refresh, default_return
+    end
+
+    _throw_grid_safety_limit_error(state, flow, model; t_invalid=effective_horizon,
+        message=shared_node ? "Safety limit reached in experimental shared-node Grid algorithm" :
+            "Safety limit reached in value-quadratic Grid algorithm")
+end
 
 function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState)
+    backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
+    backend === :finite_difference && return alg.fd_vhv_provider
     joint_func = model.joint
     if joint_func !== nothing && _joint_compatible(flow)
         return joint_func
@@ -479,12 +1132,107 @@ function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynami
         return alg.vhv_provider
     end
     hvp_func = model.hvp
-    if hvp_func === nothing
-        # Always fall back to finite-diff curvature when no HVP is available.
-        # This gives much tighter bounds than gradient-only mode.
-        return alg.fd_vhv_provider
-    end
+    hvp_func === nothing && throw(ArgumentError(
+        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
     return alg.grad_hvp_provider
+end
+
+function _initial_grid_event_provider(
+    backend::Symbol,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    grad_hvp_provider,
+    vhv_provider,
+    fd_vhv_provider,
+)
+    selected = _selected_curvature_backend(backend, model, flow)
+    selected === :finite_difference && return fd_vhv_provider
+    joint_func = model.joint
+    if joint_func !== nothing && _joint_compatible(flow)
+        return joint_func
+    end
+    vhv_func = model.vhv
+    vhv_func !== nothing && return vhv_provider
+    hvp_func = model.hvp
+    hvp_func === nothing && throw(ArgumentError(
+        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
+    return grad_hvp_provider
+end
+
+function _next_event_time_with_provider!(
+    rng::Random.AbstractRNG,
+    grad_and_hvp,
+    model::PDMPModel{<:GlobalGradientStrategy},
+    flow::FL,
+    alg::GridAdaptiveState,
+    state::AbstractPDMPState,
+    cache,
+    stats::AbstractStatisticCounter,
+    max_horizon::Float64,
+    include_refresh::Bool,
+    max_horizon_event::Symbol,
+    probe_failure_handler::GridBoundaryProbe,
+) where {FL<:ContinuousDynamics}
+    if alg.lazy_enabled[]
+        return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
+            max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+    end
+    return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
+        max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+@inline function _typed_grid_event(result::Tuple)
+    τ = result[1]::Real
+    τ_float = Float64(τ)::Float64
+    return (τ_float, result[2]::Symbol, result[3]::GradientMeta)
+end
+
+function _next_event_time_with_selected_provider!(
+    rng::Random.AbstractRNG,
+    model::PDMPModel{<:GlobalGradientStrategy},
+    flow::FL,
+    alg::GridAdaptiveState,
+    state::AbstractPDMPState,
+    cache,
+    stats::AbstractStatisticCounter,
+    max_horizon::Float64,
+    include_refresh::Bool,
+    max_horizon_event::Symbol,
+    probe_failure_handler::GridBoundaryProbe,
+) where {FL<:ContinuousDynamics}
+    backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
+    if backend === :finite_difference
+        return _next_event_time_with_provider!(rng, alg.fd_vhv_provider, model, flow, alg, state,
+            cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+    end
+    joint_func = model.joint
+    if joint_func !== nothing && _joint_compatible(flow)
+        return _next_event_time_with_provider!(rng, joint_func, model, flow, alg, state,
+            cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+    end
+    vhv_func = model.vhv
+    if vhv_func !== nothing
+        return _next_event_time_with_provider!(rng, alg.vhv_provider, model, flow, alg, state,
+            cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+    end
+    hvp_func = model.hvp
+    hvp_func === nothing && throw(ArgumentError(
+        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
+    return _next_event_time_with_provider!(rng, alg.grad_hvp_provider, model, flow, alg, state,
+        cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+@inline function _has_exact_curvature_provider(model::PDMPModel, flow::ContinuousDynamics)
+    return (model.joint !== nothing && _joint_compatible(flow)) ||
+        model.vhv !== nothing || model.hvp !== nothing
+end
+
+function _selected_curvature_backend(backend::Symbol, model::PDMPModel, flow::ContinuousDynamics)
+    backend === :finite_difference && return :finite_difference
+    has_exact = _has_exact_curvature_provider(model, flow)
+    backend === :exact && !has_exact && throw(ArgumentError(
+        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
+    return has_exact ? :exact : :finite_difference
 end
 
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
@@ -506,21 +1254,20 @@ function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<
     max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol,
     probe_failure_handler::GridBoundaryProbe) where {FL<:ContinuousDynamics}
     if isfinite(alg.constant_bound_rate[])
-        return _constant_bound_event_time(rng, model, flow, alg, state, cache, stats,
-            max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+        return _typed_grid_event(_constant_bound_event_time(rng, model, flow, alg, state, cache, stats,
+            max_horizon, include_refresh, max_horizon_event, probe_failure_handler))
+    end
+
+    if alg.bound in (:value_quadratic, :shared_node)
+        return _typed_grid_event(_next_event_time_value_quadratic!(
+            rng, model, flow, alg, state, cache, stats,
+            max_horizon, include_refresh, max_horizon_event, probe_failure_handler))
     end
 
     state_ = alg.state_cache
     copyto!(state_, state)
 
-    grad_and_hvp = _make_grad_provider(alg.grad_provider, model, flow, alg)
-
-    # Function barrier: specialized on the concrete type of grad_and_hvp
-    if alg.lazy_enabled[]
-        return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
-            max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
-    return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
+    return _next_event_time_with_provider!(rng, alg.event_provider, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
@@ -617,8 +1364,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         cached_g0, cached_dg0 = NaN, NaN
         cached_gradient = nothing
         if modes.use_constant_batched_signed
-            alg.has_cached_gradient[] = false
-            alg.has_cached_rate_derivative[] = false
+            _invalidate_cached_gradient!(alg)
         end
     end
     n_cells_bounded, built_area = _build_grid_bound_prefix!(pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
@@ -718,7 +1464,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             n_cells_bounded, built_area = _build_grid_bound_prefix!(pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
                 cumulative_exp, probe_failure_handler, modes; start_cell, initial_integral=built_area, append=true)
         end
-        if rejection_count >= max_rejections
+        if rejection_count >= max_rejections && !alg.schedule_frozen[]
             # Too many rejections.  Do not restart the dominating process at
             # the original time: proposals before the last rejected time have
             # already been consumed.  Instead restart a fresh local thinning
@@ -987,6 +1733,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
             if τ_refresh < τ_proposal
                 _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
+                _invalidate_cached_gradient!(alg)
                 return τ_refresh, :refresh, default_return
             end
 
@@ -1089,6 +1836,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 end
 
 function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)
+    alg.schedule_frozen[] && return nothing
     N = alg.N[]
     if tightness > 0.5 && N > alg.N_min
         # Bounds are tight enough, try fewer grid cells
@@ -1103,6 +1851,7 @@ function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)
 end
 
 function _increase_grid_N!(alg::GridAdaptiveState)
+    alg.schedule_frozen[] && return nothing
     N = alg.N[]
     new_N = min(alg.N_max, N + 4)
     if new_N != N
@@ -1112,6 +1861,7 @@ function _increase_grid_N!(alg::GridAdaptiveState)
 end
 
 function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::GradientStrategy)
+    alg.schedule_frozen[] && return nothing
     t_max = alg.t_max[]
     if τ_accepted < 0.25 * t_max
         new_t_max = max(4.0 * τ_accepted, 0.1)
@@ -1122,6 +1872,7 @@ function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::Grad
     end
 end
 function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::SubsampledGradient)
+    alg.schedule_frozen[] && return nothing
     t_max = alg.t_max[]
     if τ_accepted < 0.05 * t_max
         new_t_max = max(20.0 * τ_accepted, 0.5)
@@ -1133,6 +1884,7 @@ function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::Subs
 end
 
 function _shrink_t_max_on_rejection!(alg::GridAdaptiveState, pcb::PiecewiseConstantBound, cumulative_exp::Float64, ::GradientStrategy)
+    alg.schedule_frozen[] && return nothing
     total_integral = sum(i -> pos(pcb.Λ_vals[i]) * (pcb.t_grid[i+1] - pcb.t_grid[i]), 1:alg.N[])
     if total_integral > 0 && cumulative_exp < 0.1 * total_integral
         alg.t_max[] = max(alg.t_max[] * alg.α⁻, 0.1)
@@ -1151,7 +1903,7 @@ function _maybe_activate_constant_bound!(alg::GridAdaptiveState, stats::Abstract
     reflection_ratio = _get_counter_reflections_accepted(stats) / total_events
     reflection_ratio > 0.3 && return nothing
     max_rate = alg.max_observed_rate[]
-    max_rate <= 0.0 && return nothing
+    !ispositive(max_rate) && return nothing
     alg.constant_bound_rate[] = max_rate * 2.0
     return nothing
 end

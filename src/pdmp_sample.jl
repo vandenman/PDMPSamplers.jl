@@ -208,6 +208,7 @@ function _record_phase_stats!(
     full_reflection_grad_start::Int,
     prior_grad_start::Int,
     fd_curvature_grad_start::Int,
+    potential_start::Int,
     grid_start::NamedTuple,
     time_start::UInt64,
 )
@@ -221,6 +222,7 @@ function _record_phase_stats!(
         _inc_counter_warmup_full_reflection_gradient_calls(stats, _get_counter_full_reflection_gradient_calls(stats) - full_reflection_grad_start)
         _inc_counter_warmup_prior_gradient_calls(stats, _get_counter_prior_gradient_calls(stats) - prior_grad_start)
         _inc_counter_warmup_fd_curvature_gradient_calls(stats, _get_counter_fd_curvature_gradient_calls(stats) - fd_curvature_grad_start)
+        _inc_counter_warmup_potential_calls(stats, _get_counter_potential_calls(stats) - potential_start)
         _inc_counter_warmup_exact_curvature_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
         _inc_counter_warmup_grid_endpoint_evaluations(stats, _get_counter_grid_endpoint_evaluations(stats) - grid_start.endpoint_evaluations)
         _inc_counter_warmup_grid_endpoint_gradient_calls(stats, _get_counter_grid_endpoint_gradient_calls(stats) - grid_start.endpoint_gradient_calls)
@@ -241,6 +243,7 @@ function _record_phase_stats!(
         _inc_counter_main_full_reflection_gradient_calls(stats, _get_counter_full_reflection_gradient_calls(stats) - full_reflection_grad_start)
         _inc_counter_main_prior_gradient_calls(stats, _get_counter_prior_gradient_calls(stats) - prior_grad_start)
         _inc_counter_main_fd_curvature_gradient_calls(stats, _get_counter_fd_curvature_gradient_calls(stats) - fd_curvature_grad_start)
+        _inc_counter_main_potential_calls(stats, _get_counter_potential_calls(stats) - potential_start)
         _inc_counter_main_exact_curvature_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
         _inc_counter_main_grid_endpoint_evaluations(stats, _get_counter_grid_endpoint_evaluations(stats) - grid_start.endpoint_evaluations)
         _inc_counter_main_grid_endpoint_gradient_calls(stats, _get_counter_grid_endpoint_gradient_calls(stats) - grid_start.endpoint_gradient_calls)
@@ -267,6 +270,7 @@ function _record_phase_stats!(
     full_reflection_grad_start::Int,
     prior_grad_start::Int,
     fd_curvature_grad_start::Int,
+    potential_start::Int,
     time_start::UInt64,
 )
     grid_start = (;
@@ -283,7 +287,7 @@ function _record_phase_stats!(
     return _record_phase_stats!(
         stats, phase, events_start, grad_start, hess_start, stochastic_grad_start,
         full_grad_start, full_reflection_grad_start, prior_grad_start,
-        fd_curvature_grad_start, grid_start, time_start)
+        fd_curvature_grad_start, potential_start, grid_start, time_start)
 end
 
 function _run_phase!(
@@ -318,6 +322,7 @@ function _run_phase!(
     phase_full_reflection_grad_start = _get_counter_full_reflection_gradient_calls(stats)
     phase_prior_grad_start = _get_counter_prior_gradient_calls(stats)
     phase_fd_curvature_grad_start = _get_counter_fd_curvature_gradient_calls(stats)
+    phase_potential_start = _get_counter_potential_calls(stats)
     phase_grid_start = (;
         endpoint_evaluations=_get_counter_grid_endpoint_evaluations(stats),
         endpoint_gradient_calls=_get_counter_grid_endpoint_gradient_calls(stats),
@@ -337,7 +342,8 @@ function _run_phase!(
             _record_phase_stats!(
                 stats, phase, phase_events_start, phase_grad_start, phase_hess_start,
                 phase_stochastic_grad_start, phase_full_grad_start, phase_full_reflection_grad_start,
-                phase_prior_grad_start, phase_fd_curvature_grad_start, phase_grid_start, phase_time_start)
+                phase_prior_grad_start, phase_fd_curvature_grad_start, phase_potential_start,
+                phase_grid_start, phase_time_start)
             return nothing
         end
 
@@ -505,12 +511,14 @@ function _pdmp_sample_single(
         trace_manager, stats, health, :warmup, adapter, progress, prg, tstop, T_float,
         progress_stops, boundary_policy, original_model, support_boundary_options)
 
+    finish_warmup!(alg_, stats, flow)
     _maybe_activate_constant_bound!(alg_, stats)
 
     _run_phase_with_boundary_policy!(rng, stop_criterion, state, model_, flow, alg_, cache,
         trace_manager, stats, health, :main, adapter, progress, prg, tstop, T_float,
         progress_stops, boundary_policy, original_model, support_boundary_options)
 
+    _record_final_grid_state!(alg_, stats)
     _set_counter_elapsed_time(stats, (time_ns() - t_start) / 1e9)
 
     return compact(get_main_trace(trace_manager)), stats

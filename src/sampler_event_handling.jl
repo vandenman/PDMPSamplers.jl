@@ -61,26 +61,8 @@ function _compute_reflection_gradient!(
     end
 end
 
-const _BOOMERANG_INTERFERENCE_TARGET_ENV = Ref("")
 const _BOOMERANG_INTERFERENCE_TARGET_INDICES = Int[]
-
-function _boomerang_interference_target_indices()
-    raw = get(ENV, "PDMP_BOOMERANG_INTERFERENCE_TARGET_INDICES", "")
-    if raw != _BOOMERANG_INTERFERENCE_TARGET_ENV[]
-        empty!(_BOOMERANG_INTERFERENCE_TARGET_INDICES)
-        if !isempty(strip(raw))
-            for part in split(raw, ',')
-                s = strip(part)
-                isempty(s) && continue
-                push!(_BOOMERANG_INTERFERENCE_TARGET_INDICES, parse(Int, s))
-            end
-            sort!(_BOOMERANG_INTERFERENCE_TARGET_INDICES)
-            unique!(_BOOMERANG_INTERFERENCE_TARGET_INDICES)
-        end
-        _BOOMERANG_INTERFERENCE_TARGET_ENV[] = raw
-    end
-    return _BOOMERANG_INTERFERENCE_TARGET_INDICES
-end
+_boomerang_interference_target_indices() = _BOOMERANG_INTERFERENCE_TARGET_INDICES
 
 @inline function _diag_metric_quad_subset(Γ::Diagonal, z::AbstractVector, indices::AbstractVector{Int})
     q = 0.0
@@ -141,7 +123,7 @@ function _record_boomerang_interference!(
             c_target += abs(Float64(θ[i]) * Float64(∇ϕ[i]))
         end
     end
-    c_share = c_total > 0.0 ? c_target / c_total : 0.0
+    c_share = ispositive(c_total) ? c_target / c_total : 0.0
 
     z = cache.z
     copyto!(z, ∇ϕ)
@@ -159,14 +141,14 @@ function _record_boomerang_interference!(
     else
         max(_diag_metric_quad_subset(flow.Γ, z, target_indices), 0.0)
     end
-    d_share = d_total > 0.0 ? min(d_target / d_total, 1.0) : 0.0
+    d_share = ispositive(d_total) ? min(d_target / d_total, 1.0) : 0.0
 
     _inc_counter_boomerang_interference_events(stats)
     _inc_counter_boomerang_target_c_share_sum(stats, c_share)
     _inc_counter_boomerang_target_d_share_sum(stats, d_share)
 
-    c_threshold = parse(Float64, get(ENV, "PDMP_BOOMERANG_INTERFERENCE_C_THRESHOLD", "0.1"))
-    d_threshold = parse(Float64, get(ENV, "PDMP_BOOMERANG_INTERFERENCE_D_THRESHOLD", "0.25"))
+    c_threshold = 0.1
+    d_threshold = 0.25
     if c_share <= c_threshold && d_share >= d_threshold
         _inc_counter_boomerang_nuisance_driven_target_disturbances(stats)
     end
@@ -235,7 +217,13 @@ function _handle_global_event_impl!(
     elseif event_type == :sticky
         _inc_counter_sticky_events(stats)
         i = meta.i
+        position_will_snap = state.free[i]
         stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
+        if position_will_snap &&
+            alg isa Union{StickyLoopState,AggregateStickyLoopState} &&
+            alg.inner_alg_state isa GridAdaptiveState
+            _invalidate_cached_gradient!(alg.inner_alg_state)
+        end
         set_active_set!(gradient_strategy, state.free)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true

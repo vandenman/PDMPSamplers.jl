@@ -3,6 +3,44 @@ struct NoAdaptation <: AbstractAdapter end
 adapt!(::Random.AbstractRNG, ::NoAdaptation, args...; kwargs...) = nothing
 adapt!(ad::AbstractAdapter, args...; kwargs...) = adapt!(Random.default_rng(), ad, args...;  kwargs...)
 
+"""
+    BoomerangAdaptationOptions(; sticky_aware=true, sticky_min_free_time=10.0,
+        sticky_free_shrink_time=50.0, adapt_refresh=true,
+        refresh_objective=:evals_per_time, target_refresh_rate=NaN,
+        min_λref=0.01, max_λref=10.0)
+
+Explicit configuration for `AdaptiveBoomerang` warmup adaptation.
+"""
+struct BoomerangAdaptationOptions
+    sticky_aware::Bool
+    sticky_min_free_time::Float64
+    sticky_free_shrink_time::Float64
+    adapt_refresh::Bool
+    refresh_objective::Symbol
+    target_refresh_rate::Float64
+    min_λref::Float64
+    max_λref::Float64
+end
+
+function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
+    sticky_min_free_time::Real=10.0,
+    sticky_free_shrink_time::Real=50.0,
+    adapt_refresh::Bool=true, refresh_objective::Symbol=:evals_per_time,
+    target_refresh_rate::Real=NaN, min_λref::Real=0.01, max_λref::Real=10.0)
+    min_free = float(sticky_min_free_time)
+    shrink_time = float(sticky_free_shrink_time)
+    min_ref = float(min_λref)
+    max_ref = float(max_λref)
+    min_free >= 0 || throw(ArgumentError("sticky_min_free_time must be nonnegative"))
+    shrink_time >= 0 || throw(ArgumentError("sticky_free_shrink_time must be nonnegative"))
+    ispositive(min_ref) || throw(ArgumentError("min_λref must be positive"))
+    max_ref >= min_ref || throw(ArgumentError("max_λref must be at least min_λref"))
+    refresh_objective in (:evals_per_time, :refresh_rate) ||
+        throw(ArgumentError("refresh_objective must be :evals_per_time or :refresh_rate"))
+    return BoomerangAdaptationOptions(sticky_aware, min_free, shrink_time,
+        adapt_refresh, refresh_objective, float(target_refresh_rate), min_ref, max_ref)
+end
+
 struct SequenceAdapter{T} <: AbstractAdapter
     adapters::T
 end
@@ -45,7 +83,7 @@ end
 GradientResampler() = GradientResampler(0.0, -Inf)
 
 function adapt!(::Random.AbstractRNG, ad::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    if ad.dt <= 0.0 || (state.t[] - ad.last_update >= ad.dt)
+    if !ispositive(ad.dt) || (state.t[] - ad.last_update >= ad.dt)
         grad.resample_indices!(grad.nsub)
         ad.last_update = state.t[]
     end
@@ -210,8 +248,14 @@ mutable struct WelfordBoomerangStats
     sum_x_dt::Vector{Float64}
     sum_x2_dt::Vector{Float64}
     sum_xy_dt::Union{Nothing, Matrix{Float64}}
+    free_time::Vector{Float64}
+    free_sum_x_dt::Vector{Float64}
+    free_sum_x2_dt::Vector{Float64}
+    pair_free_time::Union{Nothing, Matrix{Float64}}
+    pair_sum_xy_dt::Union{Nothing, Matrix{Float64}}
     prev_x::Vector{Float64}
     prev_theta::Vector{Float64}
+    prev_free::BitVector
     prev_t::Float64
     initialized::Bool
 end
@@ -220,7 +264,10 @@ function WelfordBoomerangStats(d::Integer; fullrank::Bool=false)
     WelfordBoomerangStats(
         0.0, zeros(d), zeros(d),
         fullrank ? zeros(d, d) : nothing,
-        zeros(d), zeros(d), 0.0, false,
+        zeros(d), zeros(d), zeros(d),
+        fullrank ? zeros(d, d) : nothing,
+        fullrank ? zeros(d, d) : nothing,
+        zeros(d), zeros(d), trues(d), 0.0, false,
     )
 end
 
@@ -297,11 +344,87 @@ function _boom_raw_S11!(S11::AbstractMatrix, x0::AbstractVector, theta0::Abstrac
     return S11
 end
 
+function _boom_raw_S1_masked!(S1::AbstractVector, time::AbstractVector,
+                              x0::AbstractVector, theta0::AbstractVector,
+                              mu::AbstractVector, free::AbstractVector{Bool},
+                              dt::Float64)
+    sd, cd = sincos(dt)
+    omc = 1 - cd
+    @inbounds for i in eachindex(S1)
+        free[i] || continue
+        ai = x0[i] - mu[i]
+        S1[i] += ai * sd + theta0[i] * omc + mu[i] * dt
+        time[i] += dt
+    end
+    return S1
+end
+
+function _boom_raw_S2_masked!(S2::AbstractVector, x0::AbstractVector,
+                              theta0::AbstractVector, mu::AbstractVector,
+                              free::AbstractVector{Bool}, dt::Float64)
+    sd, cd = sincos(dt)
+    s2d = sin(2 * dt)
+    omc = 1 - cd
+    sd2 = sd * sd
+    half_dt = dt / 2
+    @inbounds for i in eachindex(S2)
+        free[i] || continue
+        ai = x0[i] - mu[i]
+        bi = theta0[i]
+        mui = mu[i]
+        S2[i] += (ai^2 * (half_dt + s2d / 4) +
+                  bi^2 * (half_dt - s2d / 4) +
+                  mui^2 * dt +
+                  ai * bi * sd2 +
+                  2 * ai * mui * sd +
+                  2 * bi * mui * omc)
+    end
+    return S2
+end
+
+function _boom_raw_S11_masked!(S11::AbstractMatrix, pair_time::AbstractMatrix,
+                               x0::AbstractVector, theta0::AbstractVector,
+                               mu::AbstractVector, free::AbstractVector{Bool},
+                               dt::Float64)
+    sd, cd = sincos(dt)
+    s2d = sin(2 * dt)
+    omc = 1 - cd
+    sd2 = sd * sd
+    half_dt = dt / 2
+    d = length(x0)
+    @inbounds for j in 1:d
+        free[j] || continue
+        aj = x0[j] - mu[j]
+        bj = theta0[j]
+        muj = mu[j]
+        for i in j:d
+            (free[i] && free[j]) || continue
+            ai = x0[i] - mu[i]
+            bi = theta0[i]
+            mui = mu[i]
+            val = (ai * aj * (half_dt + s2d / 4) +
+                   bi * bj * (half_dt - s2d / 4) +
+                   (ai * bj + aj * bi) / 2 * sd2 +
+                   mui * muj * dt +
+                   (ai * muj + aj * mui) * sd +
+                   (bi * muj + bj * mui) * omc)
+            S11[i, j] += val
+            pair_time[i, j] += dt
+            if i != j
+                S11[j, i] += val
+                pair_time[j, i] += dt
+            end
+        end
+    end
+    return S11
+end
+
 function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::AbstractVector,
                          t::Float64, flow::MutableBoomerang)
     if !ws.initialized
         ws.prev_x .= x
         ws.prev_theta .= theta
+        fill!(ws.prev_free, true)
         ws.prev_t = t
         ws.initialized = true
         return ws
@@ -311,6 +434,7 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     if dt <= 0
         ws.prev_x .= x
         ws.prev_theta .= theta
+        fill!(ws.prev_free, true)
         ws.prev_t = t
         return ws
     end
@@ -320,9 +444,59 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     _boom_raw_S1!(ws.sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
     _boom_raw_S2!(ws.sum_x2_dt, ws.prev_x, ws.prev_theta, mu, dt)
     ws.sum_xy_dt !== nothing && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    @inbounds for i in eachindex(ws.free_time)
+        ws.free_time[i] += dt
+        ws.free_sum_x_dt[i] = ws.sum_x_dt[i]
+        ws.free_sum_x2_dt[i] = ws.sum_x2_dt[i]
+    end
+    if ws.pair_sum_xy_dt !== nothing && ws.pair_free_time !== nothing && ws.sum_xy_dt !== nothing
+        @inbounds for j in axes(ws.pair_free_time, 2), i in axes(ws.pair_free_time, 1)
+            ws.pair_free_time[i, j] += dt
+            ws.pair_sum_xy_dt[i, j] = ws.sum_xy_dt[i, j]
+        end
+    end
 
     ws.prev_x .= x
     ws.prev_theta .= theta
+    fill!(ws.prev_free, true)
+    ws.prev_t = t
+    return ws
+end
+
+function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::AbstractVector,
+                         free::AbstractVector{Bool}, t::Float64, flow::MutableBoomerang)
+    if !ws.initialized
+        ws.prev_x .= x
+        ws.prev_theta .= theta
+        ws.prev_free .= free
+        ws.prev_t = t
+        ws.initialized = true
+        return ws
+    end
+
+    dt = t - ws.prev_t
+    if dt <= 0
+        ws.prev_x .= x
+        ws.prev_theta .= theta
+        ws.prev_free .= free
+        ws.prev_t = t
+        return ws
+    end
+
+    mu = flow.μ
+    ws.total_time += dt
+    _boom_raw_S1!(ws.sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    _boom_raw_S2!(ws.sum_x2_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    ws.sum_xy_dt !== nothing && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    _boom_raw_S1_masked!(ws.free_sum_x_dt, ws.free_time, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
+    _boom_raw_S2_masked!(ws.free_sum_x2_dt, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
+    if ws.pair_sum_xy_dt !== nothing && ws.pair_free_time !== nothing
+        _boom_raw_S11_masked!(ws.pair_sum_xy_dt, ws.pair_free_time, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
+    end
+
+    ws.prev_x .= x
+    ws.prev_theta .= theta
+    ws.prev_free .= free
     ws.prev_t = t
     return ws
 end
@@ -331,6 +505,15 @@ function reset_segment_start!(ws::WelfordBoomerangStats, x::AbstractVector,
                                theta::AbstractVector, t::Float64)
     ws.prev_x .= x
     ws.prev_theta .= theta
+    ws.prev_t = t
+    return ws
+end
+
+function reset_segment_start!(ws::WelfordBoomerangStats, x::AbstractVector,
+                              theta::AbstractVector, free::AbstractVector{Bool}, t::Float64)
+    ws.prev_x .= x
+    ws.prev_theta .= theta
+    ws.prev_free .= free
     ws.prev_t = t
     return ws
 end
@@ -441,7 +624,7 @@ end
 FullrankWorkspace(d::Int) = FullrankWorkspace(Vector{Float64}(undef, d), Matrix{Float64}(undef, d, d))
 
 """
-    BoomerangAdapter{S, W} <: AbstractAdapter
+    BoomerangAdapter{S, W, O} <: AbstractAdapter
 
 Adapter for `MutableBoomerang` that learns μ and Γ during warmup.
 Supports `:diagonal` (Phase 1) and `:fullrank` (Phase 2) schemes.
@@ -449,9 +632,9 @@ Supports `:diagonal` (Phase 1) and `:fullrank` (Phase 2) schemes.
 Parameterized on the stats accumulator type `S`, which defaults to
 `WelfordBoomerangStats` for numerically stable per-event updates.
 `W` is the workspace type (`Nothing` for diagonal, `FullrankWorkspace`
-for fullrank/lowrank).
+for fullrank/lowrank), and `O` is the explicit adaptation options type.
 """
-mutable struct BoomerangAdapter{S, W} <: AbstractAdapter
+mutable struct BoomerangAdapter{S, W, O} <: AbstractAdapter
     const base_dt::Float64
     last_update::Float64
     no_updates_done::Int
@@ -459,32 +642,44 @@ mutable struct BoomerangAdapter{S, W} <: AbstractAdapter
     stats::S
     did_update::Bool
     const workspace::W
+    const options::O
 end
 
-function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal)
+function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal,
+    options::BoomerangAdaptationOptions=BoomerangAdaptationOptions())
     stats = WelfordBoomerangStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
     needs_ws = scheme == :fullrank || scheme == :lowrank
     ws = needs_ws ? FullrankWorkspace(d) : nothing
-    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false, ws)
+    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false, ws, options)
 end
 
 function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     ad.did_update = false
 
     if phase === :warmup
-        welford_update!(ad.stats, state.ξ.x, state.ξ.θ, state.t[], flow)
+        _boomerang_stats_update!(ad.stats, state, flow)
     end
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
-        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace)
+        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace, ad.options)
         refresh_velocity!(rng, state, flow)
-        reset_segment_start!(ad.stats, state.ξ.x, state.ξ.θ, state.t[])
+        _boomerang_stats_reset_start!(ad.stats, state)
         ad.last_update = state.t[]
         ad.no_updates_done += 1
         ad.did_update = true
     end
 end
+
+_boomerang_stats_update!(stats::WelfordBoomerangStats, state, flow::MutableBoomerang) =
+    welford_update!(stats, state.ξ.x, state.ξ.θ, state.t[], flow)
+_boomerang_stats_update!(stats::WelfordBoomerangStats, state::StickyPDMPState, flow::MutableBoomerang) =
+    welford_update!(stats, state.ξ.x, state.ξ.θ, state.free, state.t[], flow)
+
+_boomerang_stats_reset_start!(stats::WelfordBoomerangStats, state) =
+    reset_segment_start!(stats, state.ξ.x, state.ξ.θ, state.t[])
+_boomerang_stats_reset_start!(stats::WelfordBoomerangStats, state::StickyPDMPState) =
+    reset_segment_start!(stats, state.ξ.x, state.ξ.θ, state.free, state.t[])
 
 # Fallback: if the flow is not MutableBoomerang, do nothing
 adapt!(::Random.AbstractRNG, ::BoomerangAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
@@ -499,6 +694,8 @@ did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 # --- 6. update_boomerang! implementations ---
 
 const BOOM_DIAG_FLOOR = 1e-8
+const BOOM_STICKY_MIN_FREE_TIME_DEFAULT = 10.0
+const BOOM_STICKY_FREE_SHRINK_TIME_DEFAULT = 50.0
 
 _has_data(stats::WelfordBoomerangStats) = stats.total_time > 0
 _shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
@@ -510,17 +707,29 @@ Update `flow.μ` and diagonal `flow.Γ` from online sufficient statistics.
 Zero-allocation: computes mean, variance, and Cholesky factors in a single pass.
 """
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:diagonal}, ::Nothing)
+    return update_boomerang!(flow, stats, Val(:diagonal), nothing, BoomerangAdaptationOptions())
+end
+
+function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
+    ::Val{:diagonal}, ::Nothing, options::BoomerangAdaptationOptions)
     _has_data(stats) || return flow
     d = length(flow.μ)
     T = stats.total_time
-    stats_mean!(flow.μ, stats)
     @inbounds for i in 1:d
-        if T > 0
-            μi = stats.sum_x_dt[i] / T
-            σ2 = max(stats.sum_x2_dt[i] / T - μi * μi, BOOM_DIAG_FLOOR^2)
-        else
-            σ2 = 1.0
+        μ_total = stats.sum_x_dt[i] / T
+        σ2_total = max(stats.sum_x2_dt[i] / T - μ_total * μ_total, BOOM_DIAG_FLOOR^2)
+        Ti_free = stats.free_time[i]
+        μi = μ_total
+        σ2 = σ2_total
+        if options.sticky_aware && Ti_free >= options.sticky_min_free_time
+            μ_free = stats.free_sum_x_dt[i] / Ti_free
+            σ2_free = max(stats.free_sum_x2_dt[i] / Ti_free - μ_free * μ_free, BOOM_DIAG_FLOOR^2)
+            w = ispositive(options.sticky_free_shrink_time) ?
+                Ti_free / (Ti_free + options.sticky_free_shrink_time) : 1.0
+            μi = w * μ_free + (1 - w) * μ_total
+            σ2 = w * σ2_free + (1 - w) * σ2_total
         end
+        flow.μ[i] = μi
         γ = 1.0 / σ2
         flow.Γ[i, i] = γ
         s = sqrt(γ)
@@ -550,6 +759,11 @@ Explicit symmetrization `(M + M')/2` is unnecessary since `stats_cov!` produces
 symmetric output and shrinkage preserves it; `Symmetric()` wrappers suffice.
 """
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:fullrank}, ws::FullrankWorkspace)
+    return update_boomerang!(flow, stats, Val(:fullrank), ws, BoomerangAdaptationOptions())
+end
+
+function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
+    ::Val{:fullrank}, ws::FullrankWorkspace, ::BoomerangAdaptationOptions)
     _has_data(stats) || return flow
     d = length(flow.μ)
     vec_d = ws.vec_d
@@ -656,6 +870,11 @@ end
 # --- Low-rank adaptation ---
 
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats, ::Val{:lowrank}, ws::FullrankWorkspace)
+    return update_boomerang!(flow, stats, Val(:lowrank), ws, BoomerangAdaptationOptions())
+end
+
+function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
+    ::Val{:lowrank}, ws::FullrankWorkspace, ::BoomerangAdaptationOptions)
     _has_data(stats) || return flow
 
     lrp = flow.Γ::LowRankPrecision
@@ -825,7 +1044,8 @@ end
 adapt!(::Random.AbstractRNG, ::RefreshRateAdapter, state, flow, grad, trace_mgr; kwargs...) = nothing
 did_dynamics_adapt(::RefreshRateAdapter) = false
 
-function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warmup=0.0)
+function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warmup=0.0;
+    options::BoomerangAdaptationOptions=BoomerangAdaptationOptions())
     d = length(flow.μ)
     if flow.Γ isa Diagonal
         scheme = :diagonal
@@ -834,16 +1054,14 @@ function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warm
     else
         scheme = :fullrank
     end
-    boom_adapter = BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme=scheme)
-    disable_refresh_adaptation = parse(Bool, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_DISABLE_REFRESH_ADAPTATION", "false"))
-    if t_warmup > 0 && !disable_refresh_adaptation
+    boom_adapter = BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme, options)
+    if t_warmup > 0 && options.adapt_refresh
         λref_start = Float64(t0 + t_warmup * 0.5)
-        objective = Symbol(get(ENV, "PDMP_ADAPTIVE_BOOMERANG_REFRESH_ADAPTATION_OBJECTIVE", "evals_per_time"))
-        target_refresh_rate = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_TARGET_REFRESH_RATE", "NaN"))
-        min_λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_MIN_LAMBDA_REF", "0.01"))
-        max_λref = parse(Float64, get(ENV, "PDMP_ADAPTIVE_BOOMERANG_MAX_LAMBDA_REF", "10.0"))
         λref_adapter = RefreshRateAdapter(Float64(precond_dt * 2), λref_start;
-            min_λref, max_λref, objective, target_refresh_rate)
+            min_λref=options.min_λref,
+            max_λref=options.max_λref,
+            objective=options.refresh_objective,
+            target_refresh_rate=options.target_refresh_rate)
         return SequenceAdapter((boom_adapter, λref_adapter))
     end
     return boom_adapter

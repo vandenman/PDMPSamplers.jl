@@ -144,6 +144,9 @@ export
     CoordinateWiseGradient,
     compute_gradient!,
     set_active_set!,
+    WarmupCurvatureBound,
+    GridWarmupTuning,
+    BoomerangAdaptationOptions,
 
     # Dependent Gaussian slab support
     AbstractModelPriorOdds,
@@ -251,6 +254,7 @@ export
     TotalWallTimeCriterion,
     ESSCriterion,
     OnlineESSCriterion,
+    AdaptiveWarmupCriterion,
     AnyCriterion,
     AllCriteria,
     stop_after,

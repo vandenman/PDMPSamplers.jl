@@ -129,6 +129,37 @@ else
                 @test out_copy ≈ out
             end
 
+            @testset "potential-only capability" begin
+                sm_potential = BridgeStan.StanModel(stan_file, data_file)
+                model_potential = PDMPModel(sm_potential; hvp=false)
+                out = zeros(d)
+                PDMPSamplers.compute_gradient!(model_potential.grad, x_test, out)
+                gradient_potential = PDMPSamplers._last_gradient_potential(model_potential)
+                gradient_snapshot = copy(out)
+
+                @test PDMPSamplers._potential_available(model_potential)
+                @test PDMPSamplers._potential(model_potential, x_test) ≈ gradient_potential
+                @test out == gradient_snapshot
+
+                model_copy = PDMPSamplers._copy_model(model_potential)
+                @test model_copy.grad.f.model.stanmodel != model_potential.grad.f.model.stanmodel
+                @test PDMPSamplers._potential(model_copy, x_test) ≈ gradient_potential
+
+                stats = PDMPSamplers.StatisticCounter()
+                counted_model = PDMPSamplers.with_stats(model_potential, stats)
+                @test PDMPSamplers._potential(counted_model, x_test) ≈ gradient_potential
+                @test stats.potential_calls == 1
+                @test stats.∇f_calls == 0
+                @test stats.grid_endpoint_gradient_calls == 0
+                @test stats.fd_curvature_gradient_calls == 0
+                @test stats.grid_acceptance_gradient_calls == 0
+
+                unavailable = PDMPModel(d, FullGradient((out, x) -> copyto!(out, x)))
+                @test !PDMPSamplers._potential_available(unavailable)
+                @test_throws ArgumentError PDMPSamplers._potential(unavailable, x_test)
+                @test_throws ErrorException PDMPSamplers._potential(model_potential, fill(NaN, d))
+            end
+
             @testset "fast_log_density_hvp!" begin
                 sm_unit_hvp = BridgeStan.StanModel(stan_file, data_file)
                 model_unit_hvp = PDMPModel(sm_unit_hvp; hvp=true)

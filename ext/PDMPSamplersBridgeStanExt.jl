@@ -3,7 +3,7 @@ module PDMPSamplersBridgeStanExt
 using PDMPSamplers
 using BridgeStan
 using Base.Libc.Libdl: dlsym, dlpath
-import PDMPSamplers: PDMPModel, FullGradient, _last_gradient_potential
+import PDMPSamplers: PDMPModel, FullGradient, _last_gradient_potential, _potential_available, _potential
 
 # ── FastBridgeStanModel ──────────────────────────────────────────────────────
 # Eliminates per-call overhead from BridgeStan: caches dlsym function pointers
@@ -15,20 +15,38 @@ struct FastBridgeStanModel
     owner::BridgeStan.StanModel
     lib::Ptr{Nothing}
     stanmodel::Ptr{BridgeStan.StanModelStruct}
+    log_density_fn::Ptr{Nothing}
     grad_fn::Ptr{Nothing}
     hvp_fn::Ptr{Nothing}
     lp::Base.RefValue{Float64}
+    potential_lp::Base.RefValue{Float64}
     err::Base.RefValue{Cstring}
     d::Int
 end
 
 function FastBridgeStanModel(sm::BridgeStan.StanModel)
     d = BridgeStan.param_unc_num(sm)
+    log_density_fn = dlsym(sm.lib, :bs_log_density)
     grad_fn = dlsym(sm.lib, :bs_log_density_gradient)
     hvp_fn = dlsym(sm.lib, :bs_log_density_hessian_vector_product)
     lp = Ref(0.0)
+    potential_lp = Ref(0.0)
     err = Ref{Cstring}()
-    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, grad_fn, hvp_fn, lp, err, d)
+    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, log_density_fn, grad_fn, hvp_fn, lp, potential_lp, err, d)
+end
+
+function fast_potential(m::FastBridgeStanModel, q::Vector{Float64})
+    m.potential_lp[] = 0.0
+    rc = @ccall $(m.log_density_fn)(
+        m.stanmodel::Ptr{BridgeStan.StanModelStruct},
+        true::Bool, true::Bool,
+        q::Ref{Cdouble}, m.potential_lp::Ref{Cdouble},
+        m.err::Ref{Cstring},
+    )::Cint
+    if rc != 0
+        error("BridgeStan log density failed (code $rc)") # COV_EXCL_LINE
+    end
+    return -m.potential_lp[]
 end
 
 function Base.copy(m::FastBridgeStanModel)
@@ -80,6 +98,8 @@ end
 
 Base.copy(g::BridgeStanGradient) = BridgeStanGradient(copy(g.model))
 PDMPSamplers._copy_callable(g::BridgeStanGradient) = copy(g)
+_potential_available(::BridgeStanGradient) = true
+_potential(g::BridgeStanGradient, x::Vector{Float64}) = fast_potential(g.model, x)
 _last_gradient_potential(model::PDMPModel{<:FullGradient{<:BridgeStanGradient}}) =
     -model.grad.f.model.lp[]
 

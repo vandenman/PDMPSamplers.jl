@@ -97,6 +97,56 @@
         @test alg_.sticky_times == sticky_before_horizon
     end
 
+    @testset "Sticky GridThinning caps inner search at sticky horizon" begin
+        d = 2
+        target = gen_data(Distributions.ZeroMeanIsoNormal, d)
+        flow = Boomerang(Diagonal(ones(d)), zeros(d), 0.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = Sticky(GridThinningStrategy(t_max=2.0), fill(0.5, d))
+        ξ0 = SkeletonPoint([0.2, 1.0], [-1.0, 0.0])
+
+        rng = Random.Xoshiro(2468)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        @test alg_ isa PDMPSamplers.StickyLoopState
+
+        tmax_before = alg_.inner_alg_state.t_max[]
+        sticky_time = first(alg_.sticky_pq)[2]
+        @test 0 < sticky_time < tmax_before
+
+        dt, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats)
+        @test event_type === :sticky
+        @test dt ≈ sticky_time - state.t[]
+        @test meta.i == first(alg_.sticky_pq)[1]
+        @test alg_.inner_alg_state.t_max[] == tmax_before
+    end
+
+    @testset "Sticky Boomerang horizon updates freeze times without redrawing independent unstick clocks" begin
+        d = 3
+        target = gen_data(Distributions.ZeroMeanIsoNormal, d)
+        flow = Boomerang(Diagonal(ones(d)), [0.2, -0.1, 0.3], 0.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = Sticky(GridThinningStrategy(), fill(0.5, d))
+        ξ0 = SkeletonPoint([0.4, 0.0, -0.5], [-0.2, 0.0, 0.3])
+
+        rng = Random.Xoshiro(1357)
+        state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        state.free .= BitVector([true, false, true])
+        state.ξ.x .= [0.4, 0.0, -0.5]
+        state.ξ.θ .= [-0.2, 0.0, 0.3]
+        state.old_velocity .= [0.0, 1.25, 0.0]
+        PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
+
+        old_stuck_time = alg_.sticky_times[2]
+        PDMPSamplers.move_forward_time!(state, 0.1, flow)
+        PDMPSamplers._update_sticky_schedule_after_horizon_hit!(rng, alg_, state, flow)
+
+        @test alg_.sticky_times[1] ≈ state.t[] + PDMPSamplers.freezing_time(state.ξ, flow, 1)
+        @test alg_.sticky_times[3] ≈ state.t[] + PDMPSamplers.freezing_time(state.ξ, flow, 3)
+        @test alg_.sticky_times[2] == old_stuck_time
+    end
+
     @testset "Sticky ZigZag fast-path does not enqueue non-stickable coordinates" begin
         d = 4
         target = gen_data(Distributions.ZeroMeanIsoNormal, d)

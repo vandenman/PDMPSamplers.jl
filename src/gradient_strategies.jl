@@ -12,6 +12,7 @@ Synchronize stateful gradients or targets with the active/free coordinates of
 a `StickyPDMPState`. The default method is a no-op.
 """
 set_active_set!(object, free::BitVector) = nothing
+
 function set_active_set!(f::Base.Fix1, free::BitVector)
     set_active_set!(f.f, free)
     set_active_set!(f.x, free)

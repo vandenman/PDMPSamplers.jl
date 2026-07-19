@@ -330,6 +330,104 @@ end
 stop_reason(::OnlineESSCriterion) = :reached_ess
 
 """
+    AdaptiveWarmupCriterion(; min_time, max_time, stable_time,
+        min_events=100, check_every=25)
+
+Stop warmup after a minimum PDMP time and event count once no dynamics
+adaptation reset has been observed for `stable_time`. Always stops at
+`max_time`. This is a generic convergence proxy for adaptive dynamics such as
+AdaptiveBoomerang: it does not inspect model-specific coordinates, and it keeps
+the fixed maximum warmup cap as a safety fallback.
+"""
+mutable struct AdaptiveWarmupCriterion <: StoppingCriterion
+    min_time::Float64
+    max_time::Float64
+    stable_time::Float64
+    min_events::Int
+    check_every::Int
+    start_time::Float64
+    events_start::Int
+    events_since_check::Int
+    last_reset_count::Int
+    stable_start_time::Float64
+    satisfied::Bool
+    reason::Symbol
+end
+
+function AdaptiveWarmupCriterion(; min_time::Real, max_time::Real,
+    stable_time::Real, min_events::Integer=100, check_every::Integer=25)
+    min_t = Float64(min_time)
+    max_t = Float64(max_time)
+    stable_t = Float64(stable_time)
+    isfinite(min_t) && min_t >= 0 ||
+        throw(ArgumentError("min_time must be finite and nonnegative"))
+    isfinite(max_t) && max_t > min_t ||
+        throw(ArgumentError("max_time must be finite and greater than min_time"))
+    isfinite(stable_t) && stable_t >= 0 ||
+        throw(ArgumentError("stable_time must be finite and nonnegative"))
+    min_events >= 0 || throw(ArgumentError("min_events must be nonnegative"))
+    check_every > 0 || throw(ArgumentError("check_every must be positive"))
+    return AdaptiveWarmupCriterion(min_t, max_t, stable_t, Int(min_events),
+        Int(check_every), 0.0, 0, 0, 0, 0.0, false, :none)
+end
+
+_phase_event_count(stats) =
+    _get_counter_reflections_events(stats) +
+    _get_counter_refreshment_events(stats) +
+    _get_counter_sticky_events(stats)
+
+_criterion_counter_value(stats, name::Symbol) = try
+    Int(getproperty(stats, name))
+catch
+    0
+end
+
+function initialize!(c::AdaptiveWarmupCriterion, state, trace_manager, stats)
+    c.start_time = Float64(state.t[])
+    c.events_start = _phase_event_count(stats)
+    c.events_since_check = 0
+    c.last_reset_count = _criterion_counter_value(stats, :grid_resets_from_dynamics_adaptation)
+    c.stable_start_time = Float64(state.t[])
+    c.satisfied = false
+    c.reason = :none
+    return nothing
+end
+
+function update!(c::AdaptiveWarmupCriterion, state, trace_manager, stats, event_type)
+    c.events_since_check += 1
+    reset_count = _criterion_counter_value(stats, :grid_resets_from_dynamics_adaptation)
+    if reset_count != c.last_reset_count
+        c.last_reset_count = reset_count
+        c.stable_start_time = Float64(state.t[])
+    end
+    return nothing
+end
+
+function is_satisfied(c::AdaptiveWarmupCriterion, state, trace_manager, stats)
+    c.satisfied && return true
+    elapsed = Float64(state.t[]) - c.start_time
+    if elapsed >= c.max_time
+        c.satisfied = true
+        c.reason = :reached_time
+        return true
+    end
+    c.events_since_check >= c.check_every || return false
+    c.events_since_check = 0
+    elapsed >= c.min_time || return false
+    events = _phase_event_count(stats) - c.events_start
+    events >= c.min_events || return false
+    stable_elapsed = Float64(state.t[]) - c.stable_start_time
+    if stable_elapsed >= c.stable_time
+        c.satisfied = true
+        c.reason = :warmup_stabilized
+        return true
+    end
+    return false
+end
+
+stop_reason(c::AdaptiveWarmupCriterion) = c.reason
+
+"""
     AnyCriterion(criteria...)
 
 Stop when any child criterion is satisfied.
@@ -433,6 +531,25 @@ function Base.copy(c::OnlineESSCriterion)
 end
 
 Base.copy(c::FixedTimeCriterion) = c
+
+function Base.copy(c::AdaptiveWarmupCriterion)
+    copied = AdaptiveWarmupCriterion(;
+        min_time=c.min_time,
+        max_time=c.max_time,
+        stable_time=c.stable_time,
+        min_events=c.min_events,
+        check_every=c.check_every,
+    )
+    copied.start_time = c.start_time
+    copied.events_start = c.events_start
+    copied.events_since_check = c.events_since_check
+    copied.last_reset_count = c.last_reset_count
+    copied.stable_start_time = c.stable_start_time
+    copied.satisfied = c.satisfied
+    copied.reason = c.reason
+    return copied
+end
+
 function Base.copy(c::EventCountCriterion)
     ec = EventCountCriterion(c.max_events)
     ec.baseline = c.baseline

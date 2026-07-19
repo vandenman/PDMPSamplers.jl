@@ -106,9 +106,9 @@ function _to_internal(strat::PositiveVariationGridThinningStrategy, rng::Random.
     state_cache = copy(state)
     state_cache2 = copy(state)
     grad_provider = GradientProvider(state_cache.ξ.θ, flow, model.grad, cache)
-    fd_grad_provider = WithFDCurvatureStats(grad_provider, stats)
+    fd_grad_provider = grad_provider
     derivative_provider = FiniteDiffVHV(
-        fd_grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x))
+        fd_grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x), stats)
     return PositiveVariationGridAdaptiveState(
         Ref(strat.N), Ref(strat.t_max), strat.α⁺, strat.α⁻, strat.safety_limit,
         min_grid_cells(flow, strat.N_min, strat.N), strat.max_refinement_depth,
@@ -179,11 +179,11 @@ function _linear_positive_area_time(fa::Float64, fb::Float64, h::Float64, area::
         disc = max(fa * fa + 2.0 * s * area / h, 0.0)
         u = (-fa + sqrt(disc)) / s
         return h * clamp(u, 0.0, 1.0)
-    elseif fa < 0.0 && fb > 0.0
+    elseif fa < 0.0 && ispositive(fb)
         u0 = -fa / s
         u = u0 + sqrt(max(2.0 * area / (h * s), 0.0))
         return h * clamp(u, u0, 1.0)
-    elseif fa > 0.0 && fb < 0.0
+    elseif ispositive(fa) && fb < 0.0
         disc = max(fa * fa + 2.0 * s * area / h, 0.0)
         u = (-fa + sqrt(disc)) / s
         return h * clamp(u, 0.0, fa / (fa - fb))
@@ -294,7 +294,7 @@ function _pv_quadratic_positive_area(A::Float64, B::Float64, C::Float64, h::Floa
         end
     else
         disc = B * B - 4.0 * A * C
-        if disc > 0.0
+        if ispositive(disc)
             sdisc = sqrt(disc)
             r1 = (-B - sdisc) / (2.0 * A)
             r2 = (-B + sdisc) / (2.0 * A)
@@ -331,7 +331,7 @@ function _pv_quadratic_positive_area(A::Float64, B::Float64, C::Float64, h::Floa
         lo = prev
         mid = 0.5 * (lo + hi)
         qmid = _pv_quadratic_value(A, B, C, mid)
-        if qmid > 0.0
+        if ispositive(qmid)
             total += _pv_quadratic_integral(A, B, C, hi) -
                 _pv_quadratic_integral(A, B, C, lo)
         end
@@ -372,7 +372,7 @@ end
         end
     else
         disc = B * B - 4.0 * A * C
-        if disc > 0.0
+        if ispositive(disc)
             sdisc = sqrt(disc)
             r1 = (-B - sdisc) / (2.0 * A)
             r2 = (-B + sdisc) / (2.0 * A)
@@ -401,7 +401,7 @@ end
         hi = ifelse(j == 1, b2, ifelse(j == 2, b3, b4))
         lo = prev
         mid = 0.5 * (lo + hi)
-        if _pv_quadratic_value(A, B, C, mid) > 0.0
+        if ispositive(_pv_quadratic_value(A, B, C, mid))
             total += _pv_quadratic_integral(A, B, C, hi) -
                 _pv_quadratic_integral(A, B, C, lo)
         end
@@ -514,7 +514,7 @@ function _pv_cubic_hermite_positive_area(fa::Float64, da::Float64, fb::Float64, 
         end
     else
         disc = B * B - 4.0 * A * C
-        if disc > 0.0
+        if ispositive(disc)
             sdisc = sqrt(disc)
             r1 = (-B - sdisc) / (2.0 * A)
             r2 = (-B + sdisc) / (2.0 * A)
@@ -601,7 +601,7 @@ function _pv_cubic_hermite_positive_area(fa::Float64, da::Float64, fb::Float64, 
         lo = prev
         hi <= lo && continue
         mid = 0.5 * (lo + hi)
-        if _pv_cubic_hermite_value(fa, da, fb, db, h, mid) > 0.0
+        if ispositive(_pv_cubic_hermite_value(fa, da, fb, db, h, mid))
             total += _pv_cubic_hermite_integral(fa, da, fb, db, h, hi) -
                 _pv_cubic_hermite_integral(fa, da, fb, db, h, lo)
         end
@@ -863,7 +863,7 @@ function _pv_resolve_cell!(rng::Random.AbstractRNG, alg::PositiveVariationGridAd
         return _pv_dense_resolve_cell!(
             alg, model, flow, state, cache, stats, a, fa, b, threshold, ψa, dfa, probe_failure_handler)
     end
-    if alg.dense_cell_width > 0.0 && h <= alg.dense_cell_width
+    if ispositive(alg.dense_cell_width) && h <= alg.dense_cell_width
         return _pv_dense_resolve_cell!(
             alg, model, flow, state, cache, stats, a, fa, b, threshold, ψa, dfa, probe_failure_handler)
     end
@@ -891,7 +891,7 @@ function _pv_resolve_cell!(rng::Random.AbstractRNG, alg::PositiveVariationGridAd
             child_area = left_area + right_area
             child_tol = _pv_tol(alg, max(abs(threshold), area, child_area))
         end
-        if alg.skip_slope_safety > 0.0
+        if ispositive(alg.skip_slope_safety)
             half_h = 0.5 * h
             L = alg.skip_slope_safety * max(
                 abs(fm - fa) / half_h,

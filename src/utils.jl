@@ -38,13 +38,16 @@ _provider_hvp((grad, hvp)::Tuple) = hvp
 _provider_grad(provider::GradHVPProvider) = provider.grad
 _provider_hvp(provider::GradHVPProvider) = provider.hvp
 
-struct FiniteDiffVHV{G}
+struct FiniteDiffVHV{G,S}
     grad::G
     buf::Vector{Float64}
     grad_buf::Vector{Float64}
     w_buf::Vector{Float64}
+    stats::S
 end
 FiniteDiffVHV(grad, buf::Vector{Float64}) =
     FiniteDiffVHV(grad, buf, similar(buf), similar(buf))
 FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) =
     FiniteDiffVHV(grad, buf, similar(buf), w_buf)
+FiniteDiffVHV(grad, buf::Vector{Float64}, grad_buf::Vector{Float64}, w_buf::Vector{Float64}) =
+    FiniteDiffVHV(grad, buf, grad_buf, w_buf, nothing)

@@ -162,17 +162,17 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     grad = _provider_grad(provider)
     hvp = _provider_hvp(provider)
     ∇U_xt = grad(xt)
-    Hxt_vt = hvp(xt, vt)  # Hessian-vector product
 
     # base rate (before positive-part)
     f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-
-    f_prime_t = ∂λ∂t(state, ∇U_xt, Hxt_vt, flow)
-
     rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    if !ispositive(f_t)
+        return rate, zero(f_t)
+    end
 
-    return rate, rate_deriv
+    Hxt_vt = hvp(xt, vt)  # Hessian-vector product
+    f_prime_t = ∂λ∂t(state, ∇U_xt, Hxt_vt, flow)
+    return rate, ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 
 end
 
@@ -180,12 +180,14 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     add_rate::Bool, cached_gradient::AbstractVector)
     xt, vt = state.ξ.x, state.ξ.θ
     hvp = _provider_hvp(provider)
-    Hxt_vt = hvp(xt, vt)
     f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    f_prime_t = ∂λ∂t(state, cached_gradient, Hxt_vt, flow)
     rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    if !ispositive(f_t)
+        return rate, zero(f_t)
+    end
+    Hxt_vt = hvp(xt, vt)
+    f_prime_t = ∂λ∂t(state, cached_gradient, Hxt_vt, flow)
+    return rate, ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 end
 
 function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, ∇U_xt::AbstractVector, ::ContinuousDynamics)
@@ -212,24 +214,26 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     ∇U_xt = provider.grad(xt)
 
     f_t = λ(state.ξ, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    if !ispositive(f_t)
+        return rate, zero(f_t)
+    end
 
     curvature_scalar = _compute_vhv_scalar(provider, state, ∇U_xt, flow)
     f_prime_t = ∂λ∂t(state, ∇U_xt, curvature_scalar, flow)
-
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-
-    return rate, rate_deriv
+    return rate, ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::VHVProvider,
     add_rate::Bool, cached_gradient::AbstractVector)
     f_t = λ(state.ξ, cached_gradient, flow) + (add_rate ? refresh_rate(flow) : 0.0)
+    rate = pos(f_t)
+    if !ispositive(f_t)
+        return rate, zero(f_t)
+    end
     curvature_scalar = _compute_vhv_scalar(provider, state, cached_gradient, flow)
     f_prime_t = ∂λ∂t(state, cached_gradient, curvature_scalar, flow)
-    rate = pos(f_t)
-    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
-    return rate, rate_deriv
+    return rate, ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 end
 
 function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, provider::WithStatsJoint, add_rate::Bool=true)
@@ -329,6 +333,7 @@ function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVecto
     h = _fd_step_size(xt, vt)
     iszero(h) && return h
     fd.buf .= xt .+ h .* vt
+    fd.stats !== nothing && _inc_counter_fd_curvature_gradient_calls(fd.stats)
     ∇U_shifted = fd.grad(fd.buf)
     return (dot(wt, ∇U_shifted) - dot(wt, fd.grad_buf)) / h
 end

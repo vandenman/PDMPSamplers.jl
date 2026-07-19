@@ -227,6 +227,22 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         @test stats.main_exact_curvature_calls == stats.∇²f_calls
     end
 
+    @testset "FiniteDiffVHV counts only shifted curvature gradients" begin
+        stats = PDMPSamplers.DevelStatisticCounter()
+        grad = PDMPSamplers.with_stats(x -> copy(x), stats, Val(:ordinary_full_gradient))
+        fd = PDMPSamplers.FiniteDiffVHV(grad, zeros(1), zeros(1), zeros(1), stats)
+        state = PDMPState(0.0, SkeletonPoint([1.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+
+        rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, fd, false)
+
+        @test rate ≈ 1.0
+        @test deriv ≈ 1.0
+        @test stats.∇f_calls == 2
+        @test stats.full_gradient_calls == 2
+        @test stats.fd_curvature_gradient_calls == 1
+    end
+
     # @testset "PreconditionedDynamics with warmup adaptation" begin
     #     d = 3
     #     target = gen_data(Distributions.MvNormal, d, 1.0)

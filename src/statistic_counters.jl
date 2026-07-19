@@ -372,6 +372,7 @@ end
     full_reflection_gradient_calls::Int
     prior_gradient_calls::Int
     fd_curvature_gradient_calls::Int
+    potential_calls::Int
 end
 
 @counter_ops GradientCallCounter begin
@@ -383,6 +384,7 @@ end
         full_reflection_gradient_calls,
         prior_gradient_calls,
         fd_curvature_gradient_calls,
+        potential_calls,
     )
 
     get_sum(
@@ -393,6 +395,7 @@ end
         full_reflection_gradient_calls,
         prior_gradient_calls,
         fd_curvature_gradient_calls,
+        potential_calls,
     )
 end
 
@@ -422,6 +425,22 @@ end
     grid_N_sum::Float64
     grid_tmax_sum::Float64
     grid_h_sum::Float64
+    grid_initial_N::Int
+    grid_final_N::Int
+    grid_initial_tmax::Float64
+    grid_final_tmax::Float64
+    grid_initial_h::Float64
+    grid_final_h::Float64
+    grid_warmup_objective_events::Float64
+    grid_warmup_objective_endpoint_gradients::Float64
+    grid_warmup_objective_acceptance_gradients::Float64
+    grid_warmup_objective_gradients_per_event::Float64
+    grid_warmup_objective_horizon_hits::Float64
+    grid_warmup_objective_horizon_rate::Float64
+    grid_warmup_objective_rejections::Float64
+    grid_warmup_objective_rejection_rate::Float64
+    grid_schedule_frozen::Bool
+    curvature_backend::Symbol
     grid_certificate_calls::Int
     grid_certificate_fallbacks::Int
     grid_budget_extensions::Int
@@ -444,6 +463,9 @@ end
     positive_variation_fallbacks::Int
     positive_variation_accepts::Int
     positive_variation_skipped_cells::Int
+    shared_node_cells::Int
+    shared_node_two_point_cells::Int
+    shared_node_three_point_cells::Int
 end
 
 @counter_ops GridThinningCounter begin
@@ -470,6 +492,9 @@ end
         positive_variation_refinements,
         positive_variation_fallbacks,
         positive_variation_accepts,
+        shared_node_cells,
+        shared_node_two_point_cells,
+        shared_node_three_point_cells,
     )
 
     incval(
@@ -486,7 +511,25 @@ end
         positive_variation_skipped_cells,
     )
 
-    set(grid_N_current)
+    set(
+        grid_N_current,
+        grid_initial_N,
+        grid_final_N,
+        grid_initial_tmax,
+        grid_final_tmax,
+        grid_initial_h,
+        grid_final_h,
+        grid_warmup_objective_events,
+        grid_warmup_objective_endpoint_gradients,
+        grid_warmup_objective_acceptance_gradients,
+        grid_warmup_objective_gradients_per_event,
+        grid_warmup_objective_horizon_hits,
+        grid_warmup_objective_horizon_rate,
+        grid_warmup_objective_rejections,
+        grid_warmup_objective_rejection_rate,
+        grid_schedule_frozen,
+        curvature_backend,
+    )
 
     get_sum(
         grid_acceptance_tests,
@@ -496,6 +539,7 @@ end
         grid_endpoint_derivative_calls,
         grid_acceptance_gradient_calls,
         grid_cached_endpoint_reuses,
+        grid_budget_tail_restarts,
         grid_points_evaluated,
         grid_endpoint_derivative_points_loaded,
     )
@@ -711,6 +755,8 @@ end
     main_prior_gradient_calls::Int
     warmup_fd_curvature_gradient_calls::Int
     main_fd_curvature_gradient_calls::Int
+    warmup_potential_calls::Int
+    main_potential_calls::Int
     warmup_exact_curvature_calls::Int
     main_exact_curvature_calls::Int
     warmup_grid_endpoint_evaluations::Int
@@ -755,6 +801,8 @@ end
         main_prior_gradient_calls,
         warmup_fd_curvature_gradient_calls,
         main_fd_curvature_gradient_calls,
+        warmup_potential_calls,
+        main_potential_calls,
         warmup_exact_curvature_calls,
         main_exact_curvature_calls,
         warmup_grid_endpoint_evaluations,
@@ -799,6 +847,11 @@ end
     )
 
     incval(
+        lazy_proposal_attempts,
+        lazy_proposal_rejections,
+    )
+
+    get_sum(
         lazy_proposal_attempts,
         lazy_proposal_rejections,
     )

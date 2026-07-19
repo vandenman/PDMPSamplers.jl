@@ -87,6 +87,25 @@
         end
     end
 
+    @testset "PDMPDiscretize keeps frozen Boomerang coordinates frozen" begin
+        # Regression: discretization must mirror sticky segment semantics. A
+        # frozen coordinate is encoded in the trace as x=0 and θ=0; Boomerang's
+        # nonzero μ must not pull it away from zero between trace events.
+        d = 2
+        μ = [2.0, -1.0]
+        for flow in (Boomerang(Diagonal(ones(d)), μ), AdaptiveBoomerang(Diagonal(ones(d)), μ))
+            events = [
+                PDMPEvent(0.0, [0.0, 1.0], [0.0, 0.5]),
+                PDMPEvent(2.0, [0.0, 1.0], [0.0, 0.5]),
+            ]
+            trace = PDMPTrace(events, flow)
+            samples = Matrix(PDMPDiscretize(trace, 0.5))
+
+            @test all(iszero, samples[:, 1])
+            @test any(!iszero, samples[:, 2])
+        end
+    end
+
     @testset "_time_below_segment for Boomerang" begin
         boom = Boomerang(3)
         μj = 0.0

@@ -34,6 +34,10 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test_throws ArgumentError OnlineESSCriterion(1.0; check_every=0)
         @test_throws ArgumentError OnlineESSCriterion(1.0; min_samples=1)
         @test_throws ArgumentError OnlineESSCriterion(1.0; batch_size=0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=-1.0, max_time=10.0, stable_time=1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=10.0, max_time=10.0, stable_time=1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=1.0, max_time=10.0, stable_time=-1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=1.0, max_time=10.0, stable_time=1.0, check_every=0)
         @test_throws ArgumentError AnyCriterion()
         @test_throws ArgumentError AllCriteria()
 
@@ -45,6 +49,37 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test stop_after(; ess=50.0, ess_mode=:online, events=100) isa AnyCriterion
         @test_throws ArgumentError stop_after(; ess=50.0, ess_mode=:invalid)
         @test_throws ArgumentError stop_after()
+    end
+
+    @testset "AdaptiveWarmupCriterion unit behavior" begin
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        stats = PDMPSamplers.DevelStatisticCounter()
+        criterion = AdaptiveWarmupCriterion(;
+            min_time=2.0, max_time=10.0, stable_time=1.0,
+            min_events=2, check_every=1)
+
+        PDMPSamplers.initialize!(criterion, state, nothing, stats)
+        @test !PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+
+        state.t[] = 1.5
+        PDMPSamplers._inc_counter_reflections_events(stats)
+        PDMPSamplers._inc_counter_reflections_events(stats)
+        PDMPSamplers.update!(criterion, state, nothing, stats, :reflect)
+        @test !PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+
+        state.t[] = 2.25
+        PDMPSamplers.update!(criterion, state, nothing, stats, :reflect)
+        @test PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+        @test PDMPSamplers.stop_reason(criterion) == :warmup_stabilized
+
+        capped = AdaptiveWarmupCriterion(;
+            min_time=2.0, max_time=3.0, stable_time=10.0,
+            min_events=100, check_every=10)
+        state.t[] = 0.0
+        PDMPSamplers.initialize!(capped, state, nothing, stats)
+        state.t[] = 3.0
+        @test PDMPSamplers.is_satisfied(capped, state, nothing, stats)
+        @test PDMPSamplers.stop_reason(capped) == :reached_time
     end
 
     @testset "Backward compatible default" begin

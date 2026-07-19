@@ -1685,6 +1685,11 @@ function _update_sticky_schedule_after_horizon_hit!(rng::Random.AbstractRNG, alg
     return nothing
 end
 
+function _update_sticky_schedule_after_horizon_hit!(::Random.AbstractRNG, alg::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, state::StickyPDMPState, flow::ContinuousDynamics)
+    update_all_freeze_times!(alg, state, flow)
+    return nothing
+end
+
 function _update_sticky_schedule_after_horizon_hit!(::Random.AbstractRNG, ::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, ::StickyPDMPState, ::ZigZag)
     return nothing
 end
@@ -1791,7 +1796,7 @@ end
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
         inner_alg_state::GridAdaptiveState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter, max_horizon::Float64)
-    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats, max_horizon, false, :horizon_hit)
+    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats, max_horizon, false, :sticky_horizon_hit)
 end
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
@@ -1876,20 +1881,23 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         # end
         # @show τ
 
-        # Sample refresh time independently at the sticky level
+        # Sample refresh time independently at the sticky level and cap the
+        # inner search.  GridThinning mutates its grid state while searching;
+        # letting it search past a sticky/refresh boundary wastes gradients and
+        # may adapt the proposal using a segment that the sticky wrapper will
+        # discard.
         τ_refresh = rand_refresh_time(rng, flow)
-        tʳ = t + τ_refresh
+        τ_sticky = max(0.0, tᶠ - t)
+        max_horizon = min(τ_sticky, τ_refresh)
 
         _inc_counter_sticky_inner_searches(stats)
-        τ, event_type, meta = next_event_time(rng, model, flow, inner_alg_state, state, cache, stats, Inf, false)
+        τ, event_type, meta = _bounded_inner_event_time(
+            rng, model, flow, inner_alg_state, state, cache, stats, max_horizon)
 
-        t′ = t + τ
-
-        if tᶠ < t′ && tᶠ < tʳ #  sticky event happens first
+        if τ_sticky <= τ && τ_sticky <= τ_refresh # sticky event happens first
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
-            Δt = tᶠ - t
-            return Δt, :sticky, CoordinateMeta(i)
-        elseif tʳ < t′
+            return τ_sticky, :sticky, CoordinateMeta(i)
+        elseif τ_refresh <= τ
             _inc_counter_sticky_inner_wasted_by_refresh(stats)
             return τ_refresh, :refresh, GradientMeta(alg.empty_∇ϕx)
         else
@@ -1913,6 +1921,14 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
 end
 
 _reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)
+finish_warmup!(alg::StickyLoopState, stats::AbstractStatisticCounter, flow::ContinuousDynamics) =
+    finish_warmup!(alg.inner_alg_state, stats, flow)
+finish_warmup!(alg::AggregateStickyLoopState, stats::AbstractStatisticCounter, flow::ContinuousDynamics) =
+    finish_warmup!(alg.inner_alg_state, stats, flow)
+_record_final_grid_state!(alg::StickyLoopState, stats::AbstractStatisticCounter) =
+    _record_final_grid_state!(alg.inner_alg_state, stats)
+_record_final_grid_state!(alg::AggregateStickyLoopState, stats::AbstractStatisticCounter) =
+    _record_final_grid_state!(alg.inner_alg_state, stats)
 _invalidate_cached_gradient!(alg::StickyLoopState) = _invalidate_cached_gradient!(alg.inner_alg_state)
 
 function _maybe_activate_constant_bound!(alg::StickyLoopState, stats::AbstractStatisticCounter)

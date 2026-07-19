@@ -182,6 +182,21 @@ end
 
 _last_gradient_potential(::PDMPModel) = nothing
 
+_potential_available(::Any) = false
+_potential_available(model::PDMPModel) = _potential_available(model.grad)
+_potential_available(grad::FullGradient) = _potential_available(grad.f)
+_potential_available(ws::WithStats) = _potential_available(ws.f)
+
+function _potential(model::PDMPModel, x::Vector{Float64})
+    _potential_available(model) || throw(ArgumentError("potential-only evaluation is unavailable for this model"))
+    return _potential(model.grad, x)
+end
+_potential(grad::FullGradient, x::Vector{Float64}) = _potential(grad.f, x)
+function _potential(ws::WithStats, x::Vector{Float64})
+    _inc_counter_potential_calls(ws.stats)
+    return _potential(ws.f, x)
+end
+
 struct InplaceHVP{F, O<:AbstractVector} <: Function
     f::F
     out::O

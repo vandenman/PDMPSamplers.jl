@@ -364,6 +364,29 @@ _to_range(D::PDMPDiscretize) = first(D.trace).time:D.dt:last_event_time(D.trace)
 Base.IteratorSize(::PDMPDiscretize) = Base.HasLength()
 Base.length(D::PDMPDiscretize) = length(_to_range(D))
 
+@inline function _discretize_free_mask!(free::BitVector, x::AbstractVector, θ::AbstractVector)
+    @inbounds for i in eachindex(free, x, θ)
+        free[i] = !(iszero(x[i]) && iszero(θ[i]))
+    end
+    return free
+end
+
+function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free::BitVector)
+    move_forward_time!(ξ, τ, flow)
+    return ξ
+end
+
+function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::BitVector)
+    _discretize_free_mask!(free, ξ.x, ξ.θ)
+    move_forward_time!(ξ, τ, flow, free)
+    return ξ
+end
+
+function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::PreconditionedDynamics, free::BitVector)
+    _discretize_move_forward!(ξ, τ, flow.dynamics, free)
+    return ξ
+end
+
 function Base.iterate(D::PDMPDiscretize)
     trace = D.trace
     _isempty_trace(trace) && return nothing
@@ -381,13 +404,14 @@ function Base.iterate(D::PDMPDiscretize)
     range_iterator_state = iterate(t_range)[2]
 
     k = trace isa FactorizedTrace ? 1 : 2
+    free = trues(length(x))
 
-    iterator_state = (t_range, range_iterator_state, x, θ, k)
+    iterator_state = (t_range, range_iterator_state, x, θ, k, free)
 
     return (t_start => x), iterator_state
 end
 
-function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last, k))
+function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last, k, free))
     trace = D.trace
 
     # 1. Determine the next discrete time step from the range iterator
@@ -407,7 +431,7 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
         # for the factorized case, we need to call _to_next_event! for every skipped event
         while k_current <= _n_raw_events(trace) && _event_time(trace, k_current) < t_new
             Δt = _event_time(trace, k_current) - t_current
-            move_forward_time!(ξ, Δt, trace.flow)
+            _discretize_move_forward!(ξ, Δt, trace.flow, free)
             t_current = _apply_event!(x_current, θ_current, trace, k_current)
             k_current += 1
         end
@@ -428,11 +452,11 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
     Δt_final = t_new - t_current
     @assert Δt_final >= 0 "Should be impossible!"
     if ispositive(Δt_final)
-        move_forward_time!(ξ, Δt_final, trace.flow)
+        _discretize_move_forward!(ξ, Δt_final, trace.flow, free)
     end
 
     # 5. Return the calculated state and the new iterator state for the next call
-    new_iterator_state = (t_range, new_range_state, x_current, θ_current, k_current)
+    new_iterator_state = (t_range, new_range_state, x_current, θ_current, k_current, free)
 
     return (t_new => x_current), new_iterator_state
 end
