@@ -216,7 +216,7 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         @test stats.∇²f_calls == 1
 
         PDMPSamplers._record_phase_stats!(
-            stats, :main, 0, 0, 0, 0, 0, 0, 0, 0, time_ns())
+            stats, :main, 0, 0, 0, 0, 0, 0, 0, 0, 0, time_ns())
         @test stats.main_gradient_calls == stats.∇f_calls
         @test stats.main_hessian_calls == stats.∇²f_calls
         @test stats.main_stochastic_gradient_calls == stats.stochastic_gradient_calls
