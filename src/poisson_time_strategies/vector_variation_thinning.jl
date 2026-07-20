@@ -562,7 +562,7 @@ function _next_vector_variation_event_time!(rng::Random.AbstractRNG,
     _vv_supported_flow(flow) || return _vv_fallback!(rng, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
     hard_horizon = min(max_horizon, max_grid_horizon(flow))
     search_horizon = min(hard_horizon, τ_refresh)
     horizon_event = if τ_refresh <= hard_horizon
@@ -579,7 +579,7 @@ function _next_vector_variation_event_time!(rng::Random.AbstractRNG,
     _record_grid_schedule!(stats, alg)
     _set_counter_grid_N_current(stats, alg.N[])
 
-    exp_target = rand(rng, Exponential())
+    exp_target = Random.randexp(rng)
     cumulative_area = 0.0
     proposal_attempts = 0
     proposal_rejections = 0
@@ -677,7 +677,7 @@ function _next_vector_variation_event_time!(rng::Random.AbstractRNG,
             end
 
             proposal_rejections += 1
-            exp_target += rand(rng, Exponential())
+            exp_target += Random.randexp(rng)
             if cumulative_area + area_cell < exp_target
                 _inc_counter_positive_variation_skipped_cells(stats, 1)
                 cumulative_area += area_cell

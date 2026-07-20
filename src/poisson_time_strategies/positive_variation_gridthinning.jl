@@ -152,41 +152,48 @@ function _pv_shrink_grid_N!(alg::PositiveVariationGridAdaptiveState)
     return nothing
 end
 
-_linear_positive_area(fa::Float64, fb::Float64, h::Float64) = begin
-    h <= 0.0 && return 0.0
-    if fa <= 0.0 && fb <= 0.0
-        return 0.0
-    elseif fa >= 0.0 && fb >= 0.0
-        return 0.5 * h * (fa + fb)
-    elseif fa < 0.0
+function _linear_positive_area(fa::Real, fb::Real, h::Real)
+    T = promote_type(typeof(fa), typeof(fb), typeof(h))
+    z = zero(T)
+    half = one(T) / 2
+    !ispositive(h) && return z
+    if !ispositive(fa) && !ispositive(fb)
+        return z
+    elseif ispositive(fa) && ispositive(fb)
+        return half * h * (fa + fb)
+    elseif !ispositive(fa)
         u0 = -fa / (fb - fa)
-        return 0.5 * h * fb * (1.0 - u0)
+        return half * h * fb * (one(T) - u0)
     else
         u0 = fa / (fa - fb)
-        return 0.5 * h * fa * u0
+        return half * h * fa * u0
     end
 end
 
-function _linear_positive_area_time(fa::Float64, fb::Float64, h::Float64, area::Float64)
-    area <= 0.0 && return 0.0
+function _linear_positive_area_time(fa::Real, fb::Real, h::Real, area::Real)
+    T = promote_type(typeof(fa), typeof(fb), typeof(h), typeof(area))
+    z = zero(T)
+    o = one(T)
+    epsT = eps(float(o))
+    !ispositive(area) && return z
     total = _linear_positive_area(fa, fb, h)
     area >= total && return h
     s = fb - fa
-    if fa >= 0.0 && fb >= 0.0
-        if abs(s) <= eps(Float64) * max(abs(fa), abs(fb), 1.0)
-            return area / max(fa, eps(Float64))
+    if ispositive(fa) && ispositive(fb)
+        if abs(s) <= epsT * max(abs(fa), abs(fb), o)
+            return area / max(fa, epsT)
         end
-        disc = max(fa * fa + 2.0 * s * area / h, 0.0)
+        disc = max(fa * fa + 2o * s * area / h, z)
         u = (-fa + sqrt(disc)) / s
-        return h * clamp(u, 0.0, 1.0)
-    elseif fa < 0.0 && ispositive(fb)
+        return h * clamp(u, z, o)
+    elseif !ispositive(fa) && ispositive(fb)
         u0 = -fa / s
-        u = u0 + sqrt(max(2.0 * area / (h * s), 0.0))
-        return h * clamp(u, u0, 1.0)
-    elseif ispositive(fa) && fb < 0.0
-        disc = max(fa * fa + 2.0 * s * area / h, 0.0)
+        u = u0 + sqrt(max(2o * area / (h * s), z))
+        return h * clamp(u, u0, o)
+    elseif ispositive(fa) && !ispositive(fb)
+        disc = max(fa * fa + 2o * s * area / h, z)
         u = (-fa + sqrt(disc)) / s
-        return h * clamp(u, 0.0, fa / (fa - fb))
+        return h * clamp(u, z, fa / (fa - fb))
     end
     return h
 end
@@ -1013,7 +1020,7 @@ function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
     max_horizon_event::Symbol, probe_failure_handler::GridBoundaryProbe)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
     hard_horizon = min(max_horizon, max_grid_horizon(flow))
     search_horizon = min(hard_horizon, τ_refresh)
     horizon_event = if τ_refresh <= hard_horizon
@@ -1054,7 +1061,7 @@ function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
 
     h = alg.t_max[] / alg.N[]
     t_left = 0.0
-    exp_target = rand(rng, Exponential())
+    exp_target = Random.randexp(rng)
     cumulative_area = 0.0
     proposal_attempts = 0
     proposal_rejections = 0
@@ -1064,7 +1071,7 @@ function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
         safety -= 1
         t_right = min(t_left + h, search_horizon)
         Δt_cell = t_right - t_left
-        if Δt_cell <= 0.0
+        if !ispositive(Δt_cell)
             alg.has_cached_gradient[] = false
             _pv_shrink_grid_N!(alg)
             _set_counter_grid_N_current(stats, alg.N[])
@@ -1153,7 +1160,7 @@ function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
             end
 
             proposal_rejections += 1
-            exp_target += rand(rng, Exponential())
+            exp_target += Random.randexp(rng)
             if cumulative_area + area_cell < exp_target
                 _inc_counter_positive_variation_skipped_cells(stats, 1)
                 cumulative_area += area_cell
@@ -1227,7 +1234,7 @@ function _next_positive_variation_event_time!(rng::Random.AbstractRNG,
     end
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-    τ_refresh = ispositive(λ_refresh) ? rand(rng, Exponential(inv(λ_refresh))) : Inf
+    τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
     hard_horizon = min(max_horizon, max_grid_horizon(flow))
     search_horizon = min(hard_horizon, τ_refresh)
     horizon_event = if τ_refresh <= hard_horizon
@@ -1244,7 +1251,7 @@ function _next_positive_variation_event_time!(rng::Random.AbstractRNG,
     _record_grid_schedule!(stats, alg)
     _set_counter_grid_N_current(stats, alg.N[])
 
-    threshold = rand(rng, Exponential())
+    threshold = Random.randexp(rng)
     h = alg.t_max[] / alg.N[]
     t_left, f_left, ψ_left, df_left = if alg.has_cached_gradient[]
         _inc_counter_grid_cached_endpoint_reuses(stats)
