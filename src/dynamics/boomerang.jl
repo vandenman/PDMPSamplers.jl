@@ -417,7 +417,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
 )
     grad = _provider_grad(provider)
     return _boomerang_rate_and_derivative(
@@ -427,7 +427,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
     cached_gradient::AbstractVector,
 )
     return _boomerang_rate_and_derivative(

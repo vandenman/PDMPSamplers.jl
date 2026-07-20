@@ -17,7 +17,7 @@ end
     expected_rate = dot(cached, θ)
     expected_deriv = dot(θ, A * θ)
 
-    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, hvp), cached) ==
+    @test PDMPSamplers.rate_and_derivative(state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cached) ==
         (expected_rate, expected_deriv)
 
     vhv_provider = PDMPSamplers.VHVProvider(grad, vhv)
@@ -32,9 +32,9 @@ end
         (expected_rate, expected_deriv)
     @test stats.∇²f_calls == 1
 
-    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, nothing)) ==
+    @test PDMPSamplers.rate_and_derivative(state, flow, PDMPSamplers.GradientOnlyProvider(grad)) ==
         (expected_rate, 0.0)
-    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, nothing), cached) ==
+    @test PDMPSamplers.rate_and_derivative(state, flow, PDMPSamplers.GradientOnlyProvider(grad), cached) ==
         (expected_rate, 0.0)
 
     fd = PDMPSamplers.FiniteDiffVHV(grad, zeros(2))
@@ -44,7 +44,7 @@ end
     @test fd.grad_buf == cached
 
     preconditioned = PreconditionedDynamics(DiagonalPreconditioner([2.0, 4.0]), flow)
-    @test PDMPSamplers.rate_and_derivative(state, preconditioned, (grad, hvp), cached) ==
+    @test PDMPSamplers.rate_and_derivative(state, preconditioned, PDMPSamplers.GradHVPProvider(grad, hvp), cached) ==
         (expected_rate, expected_deriv)
 end
 
@@ -58,8 +58,8 @@ end
     flow = Boomerang(Diagonal([1.5, 2.5]), zeros(2), 0.0)
     cached = grad(x)
 
-    @test PDMPSamplers.rate_and_derivative(state, flow, (grad, hvp), cached) ==
-        PDMPSamplers.rate_and_derivative(state, flow, (grad, hvp))
+    @test PDMPSamplers.rate_and_derivative(state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cached) ==
+        PDMPSamplers.rate_and_derivative(state, flow, PDMPSamplers.GradHVPProvider(grad, hvp))
 
     out = zeros(2)
     @test PDMPSamplers._reference_mul!(out, flow, x) === out
@@ -81,8 +81,8 @@ end
     state = PDMPState(0.0, SkeletonPoint([1.0, 2.0], [1.0, -1.0]))
     grad = x -> copy(x)
     hvp = (x, v) -> copy(v)
-    provider = (grad, hvp)
-    no_hvp = (grad, nothing)
+    provider = PDMPSamplers.GradHVPProvider(grad, hvp)
+    no_hvp = PDMPSamplers.GradientOnlyProvider(grad)
 
     @test PDMPSamplers._rate_aggregation(BouncyParticle(2)) === :scalar
     @test PDMPSamplers._rate_aggregation(Boomerang(2)) === :scalar
@@ -96,7 +96,7 @@ end
     @test !PDMPSamplers._provider_has_directional_derivative(no_hvp)
     @test PDMPSamplers._supports_rate_derivatives(provider, BouncyParticle(2))
     @test !PDMPSamplers._supports_rate_derivatives(no_hvp, Boomerang(2))
-    @test PDMPSamplers._uses_builtin_grid_provider(PDMPSamplers.GradHVPProvider(grad, hvp))
+    @test PDMPSamplers._uses_builtin_grid_provider(provider)
     @test PDMPSamplers._joint_compatible(BouncyParticle(2))
     @test !PDMPSamplers._joint_compatible(ZigZag(2))
     @test PDMPSamplers.max_grid_horizon(BouncyParticle(2)) == 1e10
@@ -187,7 +187,9 @@ import ForwardDiff
             yvals1[i], dvals1[i] = DI.value_and_derivative(f, prep, ad_type, xvals[i])
             local state_ = move_forward_time(state, xvals[i], flow)
             grad_func = PDMPSamplers.make_grad_U_func(state_, flow, grad, cache)
-            yvals2[i], dvals2[i] = PDMPSamplers.get_rate_and_deriv(state_, flow, (grad_func, (x, v)->neg_hvp!(target, out, x, v)), false)
+            provider = PDMPSamplers.GradHVPProvider(
+                grad_func, (x, v) -> neg_hvp!(target, out, x, v))
+            yvals2[i], dvals2[i] = PDMPSamplers.get_rate_and_deriv(state_, flow, provider, false)
         end
         @test yvals1 ≈ yvals2
         @test dvals1 ≈ dvals2

@@ -37,8 +37,12 @@ function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
     max_ref >= min_ref || throw(ArgumentError("max_λref must be at least min_λref"))
     refresh_objective in (:evals_per_time, :refresh_rate) ||
         throw(ArgumentError("refresh_objective must be :evals_per_time or :refresh_rate"))
+    target = float(target_refresh_rate)
+    if refresh_objective === :refresh_rate && !(isfinite(target) && ispositive(target))
+        throw(ArgumentError("target_refresh_rate must be positive and finite when refresh_objective=:refresh_rate"))
+    end
     return BoomerangAdaptationOptions(sticky_aware, min_free, shrink_time,
-        adapt_refresh, refresh_objective, float(target_refresh_rate), min_ref, max_ref)
+        adapt_refresh, refresh_objective, target, min_ref, max_ref)
 end
 
 struct SequenceAdapter{T} <: AbstractAdapter
@@ -247,12 +251,10 @@ mutable struct WelfordBoomerangStats
     total_time::Float64
     sum_x_dt::Vector{Float64}
     sum_x2_dt::Vector{Float64}
-    sum_xy_dt::Union{Nothing, Matrix{Float64}}
+    sum_xy_dt::Matrix{Float64}
     free_time::Vector{Float64}
     free_sum_x_dt::Vector{Float64}
     free_sum_x2_dt::Vector{Float64}
-    pair_free_time::Union{Nothing, Matrix{Float64}}
-    pair_sum_xy_dt::Union{Nothing, Matrix{Float64}}
     prev_x::Vector{Float64}
     prev_theta::Vector{Float64}
     prev_free::BitVector
@@ -263,12 +265,21 @@ end
 function WelfordBoomerangStats(d::Integer; fullrank::Bool=false)
     WelfordBoomerangStats(
         0.0, zeros(d), zeros(d),
-        fullrank ? zeros(d, d) : nothing,
-        zeros(d), zeros(d), zeros(d),
-        fullrank ? zeros(d, d) : nothing,
-        fullrank ? zeros(d, d) : nothing,
+        fullrank ? zeros(d, d) : zeros(0, 0),
+        zeros(d), Float64[], Float64[],
         zeros(d), zeros(d), trues(d), 0.0, false,
     )
+end
+
+function _ensure_free_moments!(ws::WelfordBoomerangStats)
+    d = length(ws.sum_x_dt)
+    if length(ws.free_sum_x_dt) != d
+        resize!(ws.free_sum_x_dt, d)
+        resize!(ws.free_sum_x2_dt, d)
+        copyto!(ws.free_sum_x_dt, ws.sum_x_dt)
+        copyto!(ws.free_sum_x2_dt, ws.sum_x2_dt)
+    end
+    return ws
 end
 
 # --- Private exact segment integral helpers ---
@@ -382,43 +393,6 @@ function _boom_raw_S2_masked!(S2::AbstractVector, x0::AbstractVector,
     return S2
 end
 
-function _boom_raw_S11_masked!(S11::AbstractMatrix, pair_time::AbstractMatrix,
-                               x0::AbstractVector, theta0::AbstractVector,
-                               mu::AbstractVector, free::AbstractVector{Bool},
-                               dt::Float64)
-    sd, cd = sincos(dt)
-    s2d = sin(2 * dt)
-    omc = 1 - cd
-    sd2 = sd * sd
-    half_dt = dt / 2
-    d = length(x0)
-    @inbounds for j in 1:d
-        free[j] || continue
-        aj = x0[j] - mu[j]
-        bj = theta0[j]
-        muj = mu[j]
-        for i in j:d
-            (free[i] && free[j]) || continue
-            ai = x0[i] - mu[i]
-            bi = theta0[i]
-            mui = mu[i]
-            val = (ai * aj * (half_dt + s2d / 4) +
-                   bi * bj * (half_dt - s2d / 4) +
-                   (ai * bj + aj * bi) / 2 * sd2 +
-                   mui * muj * dt +
-                   (ai * muj + aj * mui) * sd +
-                   (bi * muj + bj * mui) * omc)
-            S11[i, j] += val
-            pair_time[i, j] += dt
-            if i != j
-                S11[j, i] += val
-                pair_time[j, i] += dt
-            end
-        end
-    end
-    return S11
-end
-
 function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::AbstractVector,
                          t::Float64, flow::MutableBoomerang)
     if !ws.initialized
@@ -431,7 +405,7 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     end
 
     dt = t - ws.prev_t
-    if dt <= 0
+    if !ispositive(dt)
         ws.prev_x .= x
         ws.prev_theta .= theta
         fill!(ws.prev_free, true)
@@ -443,17 +417,9 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     ws.total_time += dt
     _boom_raw_S1!(ws.sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
     _boom_raw_S2!(ws.sum_x2_dt, ws.prev_x, ws.prev_theta, mu, dt)
-    ws.sum_xy_dt !== nothing && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    !isempty(ws.sum_xy_dt) && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
     @inbounds for i in eachindex(ws.free_time)
         ws.free_time[i] += dt
-        ws.free_sum_x_dt[i] = ws.sum_x_dt[i]
-        ws.free_sum_x2_dt[i] = ws.sum_x2_dt[i]
-    end
-    if ws.pair_sum_xy_dt !== nothing && ws.pair_free_time !== nothing && ws.sum_xy_dt !== nothing
-        @inbounds for j in axes(ws.pair_free_time, 2), i in axes(ws.pair_free_time, 1)
-            ws.pair_free_time[i, j] += dt
-            ws.pair_sum_xy_dt[i, j] = ws.sum_xy_dt[i, j]
-        end
     end
 
     ws.prev_x .= x
@@ -475,7 +441,7 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     end
 
     dt = t - ws.prev_t
-    if dt <= 0
+    if !ispositive(dt)
         ws.prev_x .= x
         ws.prev_theta .= theta
         ws.prev_free .= free
@@ -484,14 +450,19 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     end
 
     mu = flow.μ
+    all_free = all(ws.prev_free)
+    all_free || _ensure_free_moments!(ws)
     ws.total_time += dt
     _boom_raw_S1!(ws.sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
     _boom_raw_S2!(ws.sum_x2_dt, ws.prev_x, ws.prev_theta, mu, dt)
-    ws.sum_xy_dt !== nothing && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
-    _boom_raw_S1_masked!(ws.free_sum_x_dt, ws.free_time, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
-    _boom_raw_S2_masked!(ws.free_sum_x2_dt, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
-    if ws.pair_sum_xy_dt !== nothing && ws.pair_free_time !== nothing
-        _boom_raw_S11_masked!(ws.pair_sum_xy_dt, ws.pair_free_time, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
+    !isempty(ws.sum_xy_dt) && _boom_raw_S11!(ws.sum_xy_dt, ws.prev_x, ws.prev_theta, mu, dt)
+    if all_free
+        @inbounds for i in eachindex(ws.free_time)
+            ws.free_time[i] += dt
+        end
+    else
+        _boom_raw_S1_masked!(ws.free_sum_x_dt, ws.free_time, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
+        _boom_raw_S2_masked!(ws.free_sum_x2_dt, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
     end
 
     ws.prev_x .= x
@@ -521,7 +492,7 @@ end
 function stats_mean(ws::WelfordBoomerangStats)
     d = length(ws.sum_x_dt)
     μ = zeros(d)
-    ws.total_time > 0 || return μ
+    ispositive(ws.total_time) || return μ
     T = ws.total_time
     @inbounds for i in 1:d
         μ[i] = ws.sum_x_dt[i] / T
@@ -532,7 +503,7 @@ end
 function stats_var(ws::WelfordBoomerangStats)
     d = length(ws.sum_x_dt)
     v = ones(d)
-    ws.total_time > 0 || return v
+    ispositive(ws.total_time) || return v
     T = ws.total_time
     @inbounds for i in 1:d
         m = ws.sum_x_dt[i] / T
@@ -546,8 +517,8 @@ stats_std(ws::WelfordBoomerangStats) = sqrt.(stats_var(ws))
 function stats_cov(ws::WelfordBoomerangStats)
     d = length(ws.sum_x_dt)
     sum_xy = ws.sum_xy_dt
-    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
-    ws.total_time <= 0 && return Matrix{Float64}(I, d, d)
+    isempty(sum_xy) && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
+    !ispositive(ws.total_time) && return Matrix{Float64}(I, d, d)
     T = ws.total_time
     C = zeros(d, d)
     @inbounds for j in 1:d
@@ -568,7 +539,7 @@ _coord_time(stats::WelfordBoomerangStats, ::Int) = stats.total_time
 
 function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
     T = stats.total_time
-    if T > 0
+    if ispositive(T)
         @inbounds for i in eachindex(μ)
             μ[i] = stats.sum_x_dt[i] / T
         end
@@ -580,13 +551,13 @@ end
 
 function stats_cov!(C::AbstractMatrix, stats::WelfordBoomerangStats)
     sum_xy = stats.sum_xy_dt
-    sum_xy === nothing && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
+    isempty(sum_xy) && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
     _stats_cov_inner!(C, stats.sum_x_dt, sum_xy, stats.total_time)
 end
 
 function _stats_cov_inner!(C::AbstractMatrix, sum_x::Vector{Float64}, sum_xy::Matrix{Float64}, T::Float64)
     d = size(C, 1)
-    if T <= 0
+    if !ispositive(T)
         fill!(C, 0.0)
         @inbounds for i in 1:d; C[i, i] = 1.0; end
         return C
@@ -697,7 +668,7 @@ const BOOM_DIAG_FLOOR = 1e-8
 const BOOM_STICKY_MIN_FREE_TIME_DEFAULT = 10.0
 const BOOM_STICKY_FREE_SHRINK_TIME_DEFAULT = 50.0
 
-_has_data(stats::WelfordBoomerangStats) = stats.total_time > 0
+_has_data(stats::WelfordBoomerangStats) = ispositive(stats.total_time)
 _shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
 
 """
@@ -722,8 +693,11 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
         μi = μ_total
         σ2 = σ2_total
         if options.sticky_aware && Ti_free >= options.sticky_min_free_time
-            μ_free = stats.free_sum_x_dt[i] / Ti_free
-            σ2_free = max(stats.free_sum_x2_dt[i] / Ti_free - μ_free * μ_free, BOOM_DIAG_FLOOR^2)
+            use_total_free_moments = isempty(stats.free_sum_x_dt) || Ti_free == T
+            sx_free = use_total_free_moments ? stats.sum_x_dt[i] : stats.free_sum_x_dt[i]
+            sx2_free = use_total_free_moments ? stats.sum_x2_dt[i] : stats.free_sum_x2_dt[i]
+            μ_free = sx_free / Ti_free
+            σ2_free = max(sx2_free / Ti_free - μ_free * μ_free, BOOM_DIAG_FLOOR^2)
             w = ispositive(options.sticky_free_shrink_time) ?
                 Ti_free / (Ti_free + options.sticky_free_shrink_time) : 1.0
             μi = w * μ_free + (1 - w) * μ_total
@@ -970,6 +944,11 @@ end
 function RefreshRateAdapter(base_dt::Float64, min_start_time::Float64;
     min_λref::Float64=0.01, max_λref::Float64=10.0,
     objective::Symbol=:evals_per_time, target_refresh_rate::Float64=NaN)
+    objective in (:evals_per_time, :refresh_rate) ||
+        throw(ArgumentError("objective must be :evals_per_time or :refresh_rate"))
+    if objective === :refresh_rate && !(isfinite(target_refresh_rate) && ispositive(target_refresh_rate))
+        throw(ArgumentError("target_refresh_rate must be positive and finite when objective=:refresh_rate"))
+    end
     RefreshRateAdapter(base_dt, min_λref, max_λref, min_start_time,
         objective, target_refresh_rate, min_start_time, 0, 0, 0, 0.0, Inf, 1, false)
 end
@@ -990,7 +969,7 @@ function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::Mutab
     window_refreshes = refresh_events - ad.prev_refresh_events
     window_time = state.t[] - ad.prev_pdmp_time
 
-    if window_time <= 0 || (ad.objective === :evals_per_time && window_evals <= 0)
+    if !ispositive(window_time) || (ad.objective === :evals_per_time && window_evals <= 0)
         ad.prev_total_evals = total_evals
         ad.prev_refresh_events = refresh_events
         ad.prev_pdmp_time = state.t[]
@@ -1000,17 +979,18 @@ function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::Mutab
     end
 
     if ad.objective === :refresh_rate
-        target = ad.target_refresh_rate
-        if isfinite(target) && target > 0
-            flow.λref = clamp(target, ad.min_λref, ad.max_λref)
-            ad.prev_total_evals = total_evals
-            ad.prev_refresh_events = refresh_events
-            ad.prev_pdmp_time = state.t[]
-            ad.last_update = state.t[]
-            ad.no_updates_done += 1
-            ad.did_update = true
-            return
-        end
+        observed_rate = window_refreshes / window_time
+        step = 1.5 ^ (1.0 / (1.0 + ad.no_updates_done * 0.5))
+        flow.λref = observed_rate <= ad.target_refresh_rate ?
+            min(flow.λref * step, ad.max_λref) :
+            max(flow.λref / step, ad.min_λref)
+        ad.prev_total_evals = total_evals
+        ad.prev_refresh_events = refresh_events
+        ad.prev_pdmp_time = state.t[]
+        ad.last_update = state.t[]
+        ad.no_updates_done += 1
+        ad.did_update = true
+        return
     end
 
     evals_per_time = window_evals / window_time

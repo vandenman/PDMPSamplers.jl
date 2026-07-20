@@ -268,7 +268,7 @@ function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, f
         (x, v) -> DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
     end
 
-    return construct_upper_bound_grad_and_hess!(pcb, state, flow, (∇U, hvp))
+    return construct_upper_bound_grad_and_hess!(pcb, state, flow, GradHVPProvider(∇U, hvp))
 end
 
 

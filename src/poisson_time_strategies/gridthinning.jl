@@ -791,7 +791,7 @@ function _value_rate_at_state!(
     t_invalid::Float64,
 )
     rate, _ = _get_rate_and_deriv_or_throw(
-        probe_failure_handler, state, flow, (grad_provider, nothing), false;
+        probe_failure_handler, state, flow, GradientOnlyProvider(grad_provider), false;
         t_valid, t_invalid)
     return rate
 end

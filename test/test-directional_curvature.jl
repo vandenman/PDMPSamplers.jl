@@ -85,7 +85,7 @@ end
             dot(w, Hv)
         end
 
-        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, (grad_func, hvp_func), false)
+        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func), false)
         provider = PDMPSamplers.VHVProvider(grad_func, vhv_func)
         rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(state, flow, provider, false)
 
@@ -118,7 +118,7 @@ end
             dot(w, Hv)
         end
 
-        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, (grad_func, hvp_func), false)
+        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func), false)
         provider = PDMPSamplers.VHVProvider(grad_func, vhv_func)
         rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(state, flow, provider, false)
 

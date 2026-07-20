@@ -226,7 +226,7 @@ end
 (ws::WithStatsVHV)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
 set_active_set!(ws::WithStatsVHV, free::BitVector) = set_active_set!(ws.f, free)
 
-struct WithStatsJoint{F,S} <: Function
+struct WithStatsJoint{F,S} <: AbstractRateDerivativeProvider
     f::F
     stats::S
 end

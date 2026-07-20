@@ -255,7 +255,7 @@
         @test stats.total_time == 0.0
         @test stats.sum_x_dt == zeros(d)
         @test stats.sum_x2_dt == zeros(d)
-        @test stats.sum_xy_dt === nothing
+        @test isempty(stats.sum_xy_dt)
 
         μ = PDMPSamplers.stats_mean(stats)
         σ² = PDMPSamplers.stats_var(stats)
@@ -263,7 +263,7 @@
         @test σ² == ones(d)
 
         stats_fr = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        @test stats_fr.sum_xy_dt !== nothing
+        @test !isempty(stats_fr.sum_xy_dt)
         @test size(stats_fr.sum_xy_dt) == (d, d)
     end
 

@@ -48,7 +48,7 @@
     @testset "WelfordBoomerangStats fullrank mode" begin
         d = 4
         ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        @test ws.sum_xy_dt !== nothing
+        @test !isempty(ws.sum_xy_dt)
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
 
         Random.seed!(42)
@@ -214,6 +214,30 @@
         @test PDMPSamplers.adapt!(na) === nothing
     end
 
+    @testset "RefreshRateAdapter refresh-rate objective" begin
+        @test_throws ArgumentError PDMPSamplers.BoomerangAdaptationOptions(;
+            refresh_objective=:refresh_rate)
+        @test_throws ArgumentError PDMPSamplers.RefreshRateAdapter(
+            1.0, 0.0; objective=:refresh_rate)
+
+        flow = AdaptiveBoomerang(2; scheme=:diagonal, λref=1.0)
+        state = PDMPSamplers.PDMPState(0.0, PDMPSamplers.SkeletonPoint(zeros(2), ones(2)))
+        stats = PDMPSamplers.StatisticCounter()
+        ad = PDMPSamplers.RefreshRateAdapter(
+            1.0, 0.0; objective=:refresh_rate, target_refresh_rate=2.0)
+
+        state.t[] = 1.0
+        stats.refreshment_events = 1
+        PDMPSamplers.adapt!(ad, state, flow, nothing, nothing; stats)
+        @test flow.λref > 1.0
+
+        λref_after_increase = flow.λref
+        state.t[] = 2.0
+        stats.refreshment_events = 10
+        PDMPSamplers.adapt!(ad, state, flow, nothing, nothing; stats)
+        @test flow.λref < λref_after_increase
+    end
+
     @testset "default_adapter fallbacks" begin
         zz = ZigZag(3)
         grad = FullGradient(x -> x)
@@ -277,7 +301,7 @@
         @test ad.no_updates_done == 0
         @test ad.scheme == :fullrank
         @test ad.stats isa PDMPSamplers.WelfordBoomerangStats
-        @test ad.stats.sum_xy_dt !== nothing
+        @test !isempty(ad.stats.sum_xy_dt)
     end
 
     @testset "Allocation-free stats helpers" begin

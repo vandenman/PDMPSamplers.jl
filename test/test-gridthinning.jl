@@ -452,7 +452,7 @@ end
 
         for (x0, v0, tmax) in ((-0.5, 1.0, 1.0), (0.5, 1.0, 1.0))
             state = PDMPState(0.0, SkeletonPoint([x0], [v0]))
-            provider = (x -> [x[1]], (x, v) -> [v[1]])
+            provider = PDMPSamplers.GradHVPProvider(x -> [x[1]], (x, v) -> [v[1]])
 
             pcb_flat = PDMPSamplers.PiecewiseConstantBound([0.0, tmax], zeros(1))
             pab_flat = PDMPSamplers.PiecewiseAffineBound(2)
@@ -480,7 +480,7 @@ end
     @testset "auto chooses flat or affine cells by area gain" begin
         flow = BouncyParticle(1, 0.0)
         cert = (0.0)
-        provider = (x -> [x[1]], (x, v) -> [v[1]])
+        provider = PDMPSamplers.GradHVPProvider(x -> [x[1]], (x, v) -> [v[1]])
 
         flat_state = PDMPState(0.0, SkeletonPoint([1.0], [0.0]))
         flat_pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], zeros(1))
@@ -542,7 +542,7 @@ end
     @testset "single-pass signed inflated grid avoids duplicate endpoint pass" begin
         grad = x -> [x[1]]
         hvp = (x, v) -> [v[1]]
-        provider = (grad, hvp)
+        provider = PDMPSamplers.GradHVPProvider(grad, hvp)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
         flow = BouncyParticle(1, 0.0)
         pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], [0.0])
@@ -573,7 +573,7 @@ end
     @testset "single-pass signed inflated grid accepts callable cell certificates" begin
         grad = x -> [x[1]]
         hvp = (x, v) -> [v[1]]
-        provider = (grad, hvp)
+        provider = PDMPSamplers.GradHVPProvider(grad, hvp)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
         flow = BouncyParticle(1, 0.0)
         pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 0.5, 1.0], zeros(2))
@@ -796,16 +796,16 @@ end
         cert = (0.0)
 
         @test PDMPSamplers._rate_aggregation(flow) === :componentwise
-        @test PDMPSamplers._can_use_signed_grid(state, flow, (grad, hvp))
-        @test !PDMPSamplers._can_use_signed_grid(state, flow, (grad, nothing))
+        @test PDMPSamplers._can_use_signed_grid(state, flow, PDMPSamplers.GradHVPProvider(grad, hvp))
+        @test !PDMPSamplers._can_use_signed_grid(state, flow, PDMPSamplers.GradientOnlyProvider(grad))
         G, dG = PDMPSamplers.rate_derivatives_for_grid(
-            (grad, hvp), state, flow, t_grid, length(t_grid))
+            PDMPSamplers.GradHVPProvider(grad, hvp), state, flow, t_grid, length(t_grid))
         @test size(G) == (2, length(t_grid))
         @test all(dG .≈ 1.0)
 
         stats = PDMPSamplers.DevelStatisticCounter()
         n = PDMPSamplers.construct_rate_bound_grid!(
-            pab, pcb, state, flow, (grad, hvp), cert;
+            pab, pcb, state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cert;
             build_affine=true,
             stats)
         @test n == length(pcb.Λ_vals)
@@ -840,7 +840,7 @@ end
         stats = PDMPSamplers.DevelStatisticCounter()
 
         PDMPSamplers.construct_rate_bound_grid!(
-            pab, pcb, state, flow, (grad, hvp), cert;
+            pab, pcb, state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cert;
             build_affine=true,
             stats)
 
@@ -870,7 +870,7 @@ end
         pab = PDMPSamplers.PiecewiseAffineBound(2d + 2)
         stats = PDMPSamplers.DevelStatisticCounter()
         PDMPSamplers.construct_rate_bound_grid!(
-            pab, pcb, state, flow, (grad, hvp), cert;
+            pab, pcb, state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cert;
             build_affine=true,
             stats,
             max_componentwise_affine_segments_per_cell=256)
@@ -888,7 +888,7 @@ end
         pab_cap = PDMPSamplers.PiecewiseAffineBound(8)
         stats_cap = PDMPSamplers.DevelStatisticCounter()
         PDMPSamplers.construct_rate_bound_grid!(
-            pab_cap, pcb_cap, state, flow, (grad, hvp), cert;
+            pab_cap, pcb_cap, state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cert;
             build_affine=true,
             stats=stats_cap,
             max_componentwise_affine_segments_per_cell=32)
@@ -909,9 +909,10 @@ end
         raw_hvp = (x, v) -> Γ * v
 
         @test PDMPSamplers._rate_aggregation(flow) === :scalar
-        @test PDMPSamplers._can_use_signed_grid(state, flow, (corrected_grad, raw_hvp))
+        provider = PDMPSamplers.GradHVPProvider(corrected_grad, raw_hvp)
+        @test PDMPSamplers._can_use_signed_grid(state, flow, provider)
         g, dg = PDMPSamplers.rate_and_derivative(
-            state, flow, (corrected_grad, raw_hvp))
+            state, flow, provider)
         @test g ≈ 0.0 atol=1e-12
         @test dg ≈ 0.0 atol=1e-12
     end
@@ -932,8 +933,8 @@ end
         a = A * y .+ b
         g_expected = dot(a, θ)
         dg_expected = dot(θ, A * θ) - dot(a, y)
-        g, dg = PDMPSamplers.rate_and_derivative(
-            state, flow, (corrected_grad, raw_hvp))
+        provider = PDMPSamplers.GradHVPProvider(corrected_grad, raw_hvp)
+        g, dg = PDMPSamplers.rate_and_derivative(state, flow, provider)
         @test g ≈ g_expected atol=1e-12
         @test dg ≈ dg_expected atol=1e-12
 
@@ -981,8 +982,8 @@ end
 
         corrected_grad = x -> A * (x .- μ) .+ b
         raw_hvp = (x, v) -> (Γ + A) * v
-        g, dg = PDMPSamplers.rate_and_derivative(
-            state, flow, (corrected_grad, raw_hvp))
+        provider = PDMPSamplers.GradHVPProvider(corrected_grad, raw_hvp)
+        g, dg = PDMPSamplers.rate_and_derivative(state, flow, provider)
         h = 1e-6
         fd = (actual_rate(h) - actual_rate(-h)) / (2h)
 
@@ -1165,8 +1166,8 @@ end
             w = sigmoid.(η) .* (1 .- sigmoid.(η)) .* Xv
             vec(transpose(X) * w .+ Γ * v)
         end
-        g, dg = PDMPSamplers.rate_and_derivative(
-            state, flow, (corrected_grad, raw_hvp))
+        provider = PDMPSamplers.GradHVPProvider(corrected_grad, raw_hvp)
+        g, dg = PDMPSamplers.rate_and_derivative(state, flow, provider)
         h = 1e-6
         fd = (actual_rate(h) - actual_rate(-h)) / (2h)
         @test g ≈ actual_rate(0.0) atol=1e-12
@@ -1194,7 +1195,7 @@ end
         pcb = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(length(t_grid) - 1))
         pab = PDMPSamplers.PiecewiseAffineBound(16)
         PDMPSamplers.construct_rate_bound_grid!(
-            pab, pcb, state, flow, (corrected_grad, raw_hvp), cert;
+            pab, pcb, state, flow, provider, cert;
             build_affine=true,
             stats=PDMPSamplers.DevelStatisticCounter())
         for cell in eachindex(pcb.Λ_vals), t in range(t_grid[cell], t_grid[cell + 1]; length=11)
@@ -1263,24 +1264,24 @@ end
 
         dbps = PreconditionedBPS(d; refresh_rate=0.0, scale=[0.5, 1.5, 2.0])
         @test PDMPSamplers._rate_aggregation(dbps) === :scalar
-        @test PDMPSamplers._can_use_signed_grid(state, dbps, (grad, hvp))
-        g, dg = PDMPSamplers.rate_and_derivative(state, dbps, (grad, hvp))
+        @test PDMPSamplers._can_use_signed_grid(state, dbps, PDMPSamplers.GradHVPProvider(grad, hvp))
+        g, dg = PDMPSamplers.rate_and_derivative(state, dbps, PDMPSamplers.GradHVPProvider(grad, hvp))
         @test g ≈ dot(state.ξ.x, state.ξ.θ)
         @test dg ≈ dot(state.ξ.θ, state.ξ.θ)
 
         dense_bps = DensePreconditionedBPS(d; refresh_rate=0.0)
         @test PDMPSamplers._rate_aggregation(dense_bps) === :scalar
-        @test PDMPSamplers._can_use_signed_grid(state, dense_bps, (grad, hvp))
+        @test PDMPSamplers._can_use_signed_grid(state, dense_bps, PDMPSamplers.GradHVPProvider(grad, hvp))
         g_dense, dg_dense = PDMPSamplers.rate_and_derivative(
-            state, dense_bps, (grad, hvp))
+            state, dense_bps, PDMPSamplers.GradHVPProvider(grad, hvp))
         @test g_dense ≈ dot(state.ξ.x, state.ξ.θ)
         @test dg_dense ≈ dot(state.ξ.θ, state.ξ.θ)
 
         dzz = PreconditionedZigZag(d; scale=[0.5, 1.5, 2.0])
         @test PDMPSamplers._rate_aggregation(dzz) === :componentwise
-        @test PDMPSamplers._can_use_signed_grid(state, dzz, (grad, hvp))
+        @test PDMPSamplers._can_use_signed_grid(state, dzz, PDMPSamplers.GradHVPProvider(grad, hvp))
         G_diag, dG_diag = PDMPSamplers.rate_derivatives_for_grid(
-            (grad, hvp), state, dzz, [0.0], 1)
+            PDMPSamplers.GradHVPProvider(grad, hvp), state, dzz, [0.0], 1)
         @test vec(G_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.x
         @test vec(dG_diag[:, 1]) ≈ state.ξ.θ .* state.ξ.θ
 
@@ -1294,9 +1295,9 @@ end
         θ = L * v
         zz_state = PDMPState(0.0, SkeletonPoint([0.3, -0.4, 0.2], θ))
         @test PDMPSamplers._rate_aggregation(flow) === :componentwise
-        @test PDMPSamplers._can_use_signed_grid(zz_state, flow, (grad, hvp))
+        @test PDMPSamplers._can_use_signed_grid(zz_state, flow, PDMPSamplers.GradHVPProvider(grad, hvp))
         G, dG = PDMPSamplers.rate_derivatives_for_grid(
-            (grad, hvp), zz_state, flow, [0.0], 1)
+            PDMPSamplers.GradHVPProvider(grad, hvp), zz_state, flow, [0.0], 1)
         η = L' * zz_state.ξ.x
         Hθ_z = L' * θ
         @test vec(G[:, 1]) ≈ v .* η
@@ -1323,7 +1324,7 @@ end
         pab = PDMPSamplers.PiecewiseAffineBound(16)
 
         PDMPSamplers.construct_rate_bound_grid!(
-            pab, pcb, state, flow, (grad, hvp), cert;
+            pab, pcb, state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), cert;
             build_affine=true,
             stats=PDMPSamplers.DevelStatisticCounter())
         for t in range(0.0, 1.0; length=31)
@@ -1377,7 +1378,7 @@ end
         @test Λ_vals2[1] >= max(y_vals[1], y_vals[2])
     end
 
-    @testset "get_rate_and_deriv with Tuple{G,Nothing} (no HVP)" begin
+    @testset "get_rate_and_deriv with GradientOnlyProvider" begin
         d = 3
         target = gen_data(Distributions.MvNormal, d, 2.0)
         flow = ZigZag(d)
@@ -1389,7 +1390,7 @@ end
             out
         end
 
-        rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, (grad_func, nothing))
+        rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradientOnlyProvider(grad_func))
         @test rate >= 0
         @test deriv == 0.0  # no HVP → zero derivative
     end
@@ -1413,13 +1414,13 @@ end
         end
 
         for flow in (BouncyParticle(2, 0.0), ZigZag(2))
-            rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, (grad, hvp), false)
+            rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), false)
             @test rate == 0.0
             @test deriv == 0.0
             @test hvp_calls[] == 0
 
             rate_cached, deriv_cached = PDMPSamplers.get_rate_and_deriv(
-                state, flow, (grad, hvp), false, [-1.0, -1.0])
+                state, flow, PDMPSamplers.GradHVPProvider(grad, hvp), false, [-1.0, -1.0])
             @test rate_cached == rate
             @test deriv_cached == deriv
             @test hvp_calls[] == 0
@@ -1434,7 +1435,7 @@ end
 
         refresh_flow = BouncyParticle(2, 1.0)
         rate_refresh, _ = PDMPSamplers.get_rate_and_deriv(
-            state, refresh_flow, (grad, hvp), true)
+            state, refresh_flow, PDMPSamplers.GradHVPProvider(grad, hvp), true)
         @test rate_refresh == 1.0
         @test hvp_calls[] == 1
     end
@@ -1462,7 +1463,7 @@ end
             neg_hvp!(target, out, x, v)
             out
         end
-        rate_exact, deriv_exact = PDMPSamplers.get_rate_and_deriv(state, flow, (grad_func, hvp_func))
+        rate_exact, deriv_exact = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func))
         @test rate_fd ≈ rate_exact
         @test isapprox(deriv_fd, deriv_exact; rtol=0.01)
     end
@@ -1890,7 +1891,7 @@ end
         end
 
         stats = PDMPSamplers.DevelStatisticCounter()
-        PDMPSamplers.construct_upper_bound_grad_and_hess!(pcb, state, flow, (grad_func, hvp_func);
+        PDMPSamplers.construct_upper_bound_grad_and_hess!(pcb, state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func);
             early_stop_threshold=0.001, stats=stats)
         # With a very low threshold, early stopping should trigger
         @test stats.grid_builds == 1
@@ -2036,7 +2037,7 @@ end
 
         stats = PDMPSamplers.DevelStatisticCounter()
         # With cached_y0 and cached_d0
-        PDMPSamplers.construct_upper_bound_grad_and_hess!(pcb, state, flow, (grad_func, hvp_func);
+        PDMPSamplers.construct_upper_bound_grad_and_hess!(pcb, state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func);
             cached_y0=1.0, cached_d0=0.5, stats=stats)
         @test pcb.y_vals[1] == 1.0
         @test pcb.d_vals[1] == 0.5

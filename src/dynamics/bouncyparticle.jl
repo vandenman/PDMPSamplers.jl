@@ -76,7 +76,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
 )
     x = state.ξ.x
     θ = state.ξ.θ
@@ -90,7 +90,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
     cached_gradient::AbstractVector,
 )
     θ = state.ξ.θ
@@ -133,18 +133,18 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    grad_and_nothing::Tuple{G,Nothing},
-) where {G}
-    ∇U = grad_and_nothing[1](state.ξ.x)
+    provider::GradientOnlyProvider,
+)
+    ∇U = provider.grad(state.ξ.x)
     return dot(∇U, state.ξ.θ), 0.0
 end
 
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    ::Tuple{G,Nothing},
+    ::GradientOnlyProvider,
     cached_gradient::AbstractVector,
-) where {G}
+)
     return dot(cached_gradient, state.ξ.θ), 0.0
 end
 
