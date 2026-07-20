@@ -2,13 +2,8 @@ import PrecompileTools
 
 PrecompileTools.@setup_workload begin
     d = 2
-    ∇f! = (out, x) -> (out .= x; out)
-    ∇²f! = (out, x, v) -> (out .= v; out)
-
-    model = PDMPModel(d, FullGradient(∇f!), ∇²f!)
     alg = ThinningStrategy(GlobalBounds(2.0, d))
-    x0 = ones(d)
-    ξ0 = SkeletonPoint(x0, [1.0, -1.0])
+    ξ0 = SkeletonPoint(ones(d), [1.0, -1.0])
 
     flow_bps = BouncyParticle(I(d), zeros(d))
 
@@ -39,12 +34,6 @@ PrecompileTools.@setup_workload begin
     chains = PDMPChains([trace], [StatisticCounter()])
 
     PrecompileTools.@compile_workload begin
-        precompile(pdmp_sample, (
-            typeof(ξ0), typeof(flow_bps), typeof(model), typeof(alg),
-            Float64, Float64))
-        precompile(pdmp_sample, (
-            typeof(x0), typeof(flow_bps), typeof(model), typeof(alg),
-            Float64, Float64))
         TraceManager(PDMPState(0.0, copy(ξ0)), flow_bps, alg, 0.0)
 
         initialize_velocity(flow_zz, d)
