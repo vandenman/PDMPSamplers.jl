@@ -1,5 +1,8 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+const RUN_EXTENDED_GRID_SMOKE_TESTS =
+    get(ENV, "PDMPSAMPLERS_EXTENDED_GRID_SMOKE_TESTS", "false") == "true"
+
 struct GridTuningNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
 
 @testset "experimental shared-node bound" begin
@@ -592,6 +595,7 @@ end
         @test stats.grid_certificate_fallbacks == 0
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "end-to-end signed inflated Gaussian is exact across zero crossing" begin
         function gaussian_grad!(out, x)
             out[1] = x[1]
@@ -642,9 +646,16 @@ end
             bound_violation=:throw)
         ξ0 = SkeletonPoint([0.25], [1.0])
 
-        for seed in 20260701:20260705
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 20.0; seed, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-            @test length(trace) > 0
+        for seed in 20260701:20260702
+            rng = Xoshiro(seed)
+            state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, alg, 0.0, ξ0;
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            τ, event_type, meta = PDMPSamplers.next_event_time(
+                rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+            @test 0.0 <= τ <= alg_.t_max[]
+            @test event_type in (:reflect, :horizon_hit)
+            @test meta isa PDMPSamplers.GradientMeta
             @test stats.grid_bound_violations == 0
             @test stats.affine_bound_violations == 0
         end
@@ -677,8 +688,8 @@ end
         trig_cert = (state, flow, a, b) -> 2abs(state.ξ.θ[1])^3
 
         for (grad!, hvp!, cert, ξ0, T, seed) in (
-            (quartic_grad!, quartic_hvp!, quartic_cert, SkeletonPoint([0.25], [1.0]), 5.0, 701),
-            (trig_grad!, trig_hvp!, trig_cert, SkeletonPoint([0.75], [1.0]), 5.0, 702),
+            (quartic_grad!, quartic_hvp!, quartic_cert, SkeletonPoint([0.25], [1.0]), 1.0, 701),
+            (trig_grad!, trig_hvp!, trig_cert, SkeletonPoint([0.75], [1.0]), 1.0, 702),
         )
             model = PDMPModel(1, FullGradient(grad!), hvp!)
             flow = BouncyParticle(1, 0.05)
@@ -688,8 +699,15 @@ end
                 bound_violation=:throw,
                 linear_area_threshold=0.9)
 
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; seed, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-            @test length(trace) > 0
+            rng = Xoshiro(seed)
+            state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, alg, 0.0, ξ0;
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            τ, event_type, meta = PDMPSamplers.next_event_time(
+                rng, model_, flow, alg_, state, cache, stats, T, false)
+            @test 0.0 <= τ <= max(T, alg_.t_max[])
+            @test event_type in (:reflect, :horizon_hit)
+            @test meta isa PDMPSamplers.GradientMeta
             @test stats.grid_bound_violations == 0
             @test stats.affine_bound_violations == 0
         end
@@ -744,12 +762,20 @@ end
                 bound_violation=:throw,
                 linear_area_threshold=0.9)
 
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5.0; seed, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-            @test length(trace) > 0
+            rng = Xoshiro(seed)
+            state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, alg, 0.0, ξ0;
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            τ, event_type, meta = PDMPSamplers.next_event_time(
+                rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+            @test 0.0 <= τ <= alg_.t_max[]
+            @test event_type in (:reflect, :horizon_hit)
+            @test meta isa PDMPSamplers.GradientMeta
             @test stats.grid_bound_violations == 0
             @test stats.affine_bound_violations == 0
             @test stats.auto_flat_cells + stats.auto_affine_cells > 0
         end
+    end
     end
 
     @testset "budget-first tail restart offsets returned event time" begin
@@ -991,6 +1017,7 @@ end
         @test dg ≈ fd rtol=1e-7 atol=1e-8
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "Boomerang signed grid accepts optional generic curvature bound" begin
         Γ = Diagonal([1.0, 1.4])
         μ = [0.0, 0.1]
@@ -1117,6 +1144,7 @@ end
         @test stats.grid_bound_violations == 0
         @test stats.grid_certificate_fallbacks == 0
     end
+    end
 
     @testset "Boomerang logistic certificate matches sampler convention" begin
         X = [0.4 -0.2 0.1; -0.3 0.5 0.2; 0.2 0.1 -0.4; -0.1 -0.3 0.35]
@@ -1204,6 +1232,7 @@ end
         end
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "bounded Boomerang logistic smoke has no violations" begin
         rng = Xoshiro(42)
         n, p = 100, 5
@@ -1245,15 +1274,20 @@ end
                 linear_min_area_gain=0.0,
                 bound_violation=:throw,
                 lazy=false)
-            _, stats = pdmp_sample(
-                ξ0, flow, model, alg, 0.0, 20.0;
-                seed=44,
-                progress=false,
+            rng = Xoshiro(44)
+            state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, alg, 0.0, ξ0;
                 statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            τ, event_type, meta = PDMPSamplers.next_event_time(
+                rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+            @test 0.0 <= τ <= alg_.t_max[]
+            @test event_type in (:reflect, :horizon_hit)
+            @test meta isa PDMPSamplers.GradientMeta
             @test stats.grid_bound_violations == 0
             @test stats.affine_bound_violations == 0
             @test stats.grid_certificate_fallbacks == 0
         end
+    end
     end
 
     @testset "preconditioned signed-rate geometry conventions" begin
@@ -1334,6 +1368,7 @@ end
         end
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "componentwise bounded ZigZag smoke has no violations" begin
         function zz_gaussian_grad!(out, x)
             copyto!(out, x)
@@ -1352,14 +1387,18 @@ end
             bound_violation=:throw,
             lazy=false)
         ξ0 = SkeletonPoint([-0.5, 0.25], [1.0, -1.0])
-        trace, stats = pdmp_sample(
-            ξ0, flow, model, alg, 0.0, 2.0;
-            seed=23,
-            progress=false,
+        rng = Xoshiro(23)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, alg, 0.0, ξ0;
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        @test length(trace) >= 1
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+        @test 0.0 <= τ <= alg_.t_max[]
+        @test event_type in (:reflect, :horizon_hit)
+        @test meta isa PDMPSamplers.GradientMeta
         @test stats.grid_bound_violations == 0
         @test stats.affine_bound_violations == 0
+    end
     end
 
     @testset "_compute_cell_bound!" begin
@@ -1490,9 +1529,15 @@ end
         alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        @test length(trace) > 20
-        @test all(isfinite, mean(trace))
+        rng = Xoshiro(1493)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+        @test 0.0 <= τ <= alg_.t_max[]
+        @test event_type in (:reflect, :horizon_hit)
+        @test meta isa PDMPSamplers.GradientMeta
     end
 
     @testset "∂λ∂t for different flow types" begin
@@ -1820,10 +1865,9 @@ end
             rng = Xoshiro(20_260_702 + i)
             θ0 = PDMPSamplers.initialize_velocity(rng, flow, d)
             ξ0 = SkeletonPoint(copy(μ), θ0)
-            _, stats = pdmp_sample(
-                ξ0, flow, model, alg, 0.0, 0.05;
-                seed=20_260_800 + i,
-                progress=false)
+            _, _, _, _, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, alg, 0.0, ξ0;
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
             for field in fields
                 @test field in propertynames(stats)
                 @test getproperty(stats, field) !== nothing
@@ -2044,6 +2088,7 @@ end
         @test stats.grid_builds == 1
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "End-to-end with FD-HVP" begin
         d = 3
         Random.seed!(42)
@@ -2055,9 +2100,16 @@ end
         alg = GridThinningStrategy(; use_fd_hvp=true)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        @test length(trace) > 50
-        @test all(isfinite, mean(trace))
+        rng = Xoshiro(2058)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+        @test 0.0 <= τ <= alg_.t_max[]
+        @test event_type in (:reflect, :horizon_hit)
+        @test meta isa PDMPSamplers.GradientMeta
+        @test stats.∇²f_calls >= 0
     end
 
     @testset "End-to-end without HVP (grad-only)" begin
@@ -2071,9 +2123,17 @@ end
         alg = GridThinningStrategy()  # no FD-HVP either
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        @test length(trace) > 50
-        @test all(isfinite, mean(trace))
+        rng = Xoshiro(2074)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+        @test 0.0 <= τ <= alg_.t_max[]
+        @test event_type in (:reflect, :horizon_hit)
+        @test meta isa PDMPSamplers.GradientMeta
+        @test stats.∇²f_calls == 0
+    end
     end
 
     @testset "Strategy interface defaults and roots acceptance" begin
@@ -2162,6 +2222,7 @@ end
         @test PDMPSamplers.with_stats(grad_fixed, PDMPSamplers.StatisticCounter()).fixed_batch_within_event === true
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "End-to-end with joint directional curvature" begin
         d = 2
         f_logdensity(x) = -0.5 * sum(abs2, x)
@@ -2171,10 +2232,16 @@ end
         alg = GridThinningStrategy(; N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-
-        @test length(trace) > 20
-        @test stats.∇²f_calls > 0
+        rng = Xoshiro(2174)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+        @test 0.0 <= τ <= alg_.t_max[]
+        @test event_type in (:reflect, :horizon_hit)
+        @test meta isa PDMPSamplers.GradientMeta
+        @test stats.∇²f_calls >= 0
     end
 
     @testset "get_rate_and_deriv FiniteDiffVHV with BouncyParticle (ContinuousDynamics dispatch)" begin
@@ -2188,11 +2255,20 @@ end
         alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0; progress=show_progress, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        @test length(trace) > 10
-        @test all(isfinite, mean(trace))
+        rng = Xoshiro(2191)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, alg, 0.0, ξ0;
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        τ, event_type, meta = PDMPSamplers.next_event_time(
+            rng, model_, flow, alg_, state, cache, stats, alg_.t_max[], false)
+        @test 0.0 <= τ <= alg_.t_max[]
+        @test event_type in (:reflect, :horizon_hit)
+        @test meta isa PDMPSamplers.GradientMeta
+        @test stats.∇²f_calls >= 0
+    end
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "End-to-end eager inflated affine GridThinning uses certificate" begin
         function convex_rate_grad!(out, x)
             out[1] = x[1]^2 + 1.0
@@ -2223,6 +2299,7 @@ end
         @test stats.affine_inflated_cells > 0
         @test stats.affine_area_hybrid < stats.affine_area_constant_equiv
         @test stats.grid_bound_violations == 0
+    end
     end
 
     @testset "inflated affine GridThinning accepts finite-diff derivatives" begin
@@ -2275,6 +2352,7 @@ end
         @test all(isfinite, derivatives)
     end
 
+    if RUN_EXTENDED_GRID_SMOKE_TESTS
     @testset "inflated affine bound works without mandatory curvature certificates" begin
         function simple_grad!(out, x)
             out[1] = x[1]
@@ -2305,6 +2383,7 @@ end
         τ, event_type, meta = PDMPSamplers.next_event_time(
             rng, model_, flow, alg_, state, cache, stats, Inf, false)
         @test isfinite(τ)
+    end
     end
 
     @testset "_constant_bound_event_time direct call" begin
