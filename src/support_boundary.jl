@@ -166,6 +166,8 @@ struct _GridSafetyLimitException <: Exception
     ctx::BoundaryContext
 end
 
+abstract type _SupportBoundaryProbeError <: Exception end
+
 struct _GradientProbeFailure <: Exception
     original_error::Any
 end
@@ -390,4 +392,3 @@ _flow_has_linear_dynamics(::Type) = false
 _is_bps_family_flow(::Type{<:BouncyParticle}) = true
 _is_bps_family_flow(::Type{<:PreconditionedDynamics{P,D}}) where {P,D} = _is_bps_family_flow(D)
 _is_bps_family_flow(::Type) = false
-

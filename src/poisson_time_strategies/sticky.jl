@@ -1213,7 +1213,9 @@ function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClo
     return _sample_static_model_prior_label(rng, indices, clock.model_prior_odds, active, stickable, k)
 end
 
-function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:Union{ExchangeableModelSizePrior,BetaBernoulliModelPriorOdds}}, ::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, can_stick::BitVector)
+function sample_label(rng::Random.AbstractRNG,
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:Union{ExchangeableModelSizePrior,BetaBernoulliModelPriorOdds}},
+        ::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, can_stick::BitVector)
     active, stickable, _, nU, _, _, _ = _exchangeable_linear_params(clock, state, can_stick)
     return _sample_uniform_inactive_stickable(rng, beta_indices(clock.slab_provider), active, stickable, nU)
 end
@@ -1795,12 +1797,15 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
 end
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
-        inner_alg_state::GridAdaptiveState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter, max_horizon::Float64)
-    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats, max_horizon, false, :sticky_horizon_hit)
+        inner_alg_state::GridAdaptiveState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        max_horizon::Float64, detect_boundaries::Bool=false)
+    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
+        max_horizon, false, :sticky_horizon_hit, detect_boundaries)
 end
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
-        inner_alg_state::PoissonTimeStrategy, state::StickyPDMPState, cache, stats::AbstractStatisticCounter, max_horizon::Float64)
+        inner_alg_state::PoissonTimeStrategy, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        max_horizon::Float64, detect_boundaries::Bool=false)
     τ, event_type, meta = next_event_time(rng, model, flow, inner_alg_state, state, cache, stats)
     if isfinite(max_horizon) && τ > max_horizon
         return max_horizon, :horizon_hit, EmptyMeta()
@@ -1808,7 +1813,9 @@ function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:G
     return τ, event_type, meta
 end
 
-function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::AggregateStickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter)
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+        alg::AggregateStickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        detect_boundaries::Bool=false)
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
 
@@ -1821,7 +1828,8 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         τ_refresh = rand_refresh_time(rng, flow)
         max_horizon = min(τ_sticky, τ_refresh)
         _inc_counter_sticky_inner_searches(stats)
-        τ_inner, event_type, meta = _bounded_inner_event_time(rng, model, flow, inner_alg_state, state, cache, stats, max_horizon)
+        τ_inner, event_type, meta = _bounded_inner_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
+            max_horizon, detect_boundaries)
 
         if τ_sticky <= τ_inner && τ_sticky <= τ_refresh
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
@@ -1845,7 +1853,9 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     end
 end
 
-function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter)
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+        alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        detect_boundaries::Bool=false)
 
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
@@ -1892,7 +1902,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
 
         _inc_counter_sticky_inner_searches(stats)
         τ, event_type, meta = _bounded_inner_event_time(
-            rng, model, flow, inner_alg_state, state, cache, stats, max_horizon)
+            rng, model, flow, inner_alg_state, state, cache, stats, max_horizon, detect_boundaries)
 
         if τ_sticky <= τ && τ_sticky <= τ_refresh # sticky event happens first
             _inc_counter_sticky_inner_wasted_by_sticky(stats)

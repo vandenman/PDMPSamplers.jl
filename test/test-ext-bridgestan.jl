@@ -55,6 +55,7 @@ else
             JSON.json(data_file, data_dict)
 
             model = PDMPModel(stan_file, data_file)
+            @test model.hvp === nothing
 
             alg = GridThinningStrategy()
 
@@ -157,7 +158,7 @@ else
                 unavailable = PDMPModel(d, FullGradient((out, x) -> copyto!(out, x)))
                 @test !PDMPSamplers._potential_available(unavailable)
                 @test_throws ArgumentError PDMPSamplers._potential(unavailable, x_test)
-                @test_throws ErrorException PDMPSamplers._potential(model_potential, fill(NaN, d))
+                @test_throws PDMPSamplers._SupportBoundaryProbeError PDMPSamplers._potential(model_potential, fill(NaN, d))
             end
 
             @testset "fast_log_density_hvp!" begin

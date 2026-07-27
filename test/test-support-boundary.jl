@@ -1,6 +1,8 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 using LinearAlgebra
 
+struct _TypedBoundaryProbeError <: PDMPSamplers._SupportBoundaryProbeError end
+
 @testset "Support-boundary handling" begin
 
     # ── Synthetic model with a boundary at x[1] >= 1.0 ──
@@ -302,14 +304,14 @@ using LinearAlgebra
         @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
-    @testset "_get_rate_and_deriv_or_throw treats BridgeStan-style zero-bracket failures as probe failures" begin
+    @testset "_get_rate_and_deriv_or_throw treats typed zero-bracket failures as probe failures" begin
         rng = PDMPSamplers.Random.Xoshiro(8)
-        function bridgestan_like_grad!(out, x)
-            x[1] == 1.0 && error("BridgeStan gradient failed (code -1)")
+        function typed_probe_failure_grad!(out, x)
+            x[1] == 1.0 && throw(_TypedBoundaryProbeError())
             out .= x
             return out
         end
-        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        model = PDMPModel(d_boundary, FullGradient(typed_probe_failure_grad!))
         flow = _make_boundary_flow()
         alg = _make_boundary_alg(; N=20, t_max=2.0)
         state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
@@ -333,19 +335,19 @@ using LinearAlgebra
         @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
-    @testset "_throw_grid_boundary_error treats BridgeStan-style positive-bracket failures as probe failures" begin
-        function bridgestan_like_grad!(out, x)
+    @testset "_throw_grid_boundary_error treats typed positive-bracket failures as probe failures" begin
+        function typed_probe_failure_grad!(out, x)
             out .= x
             return out
         end
-        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        model = PDMPModel(d_boundary, FullGradient(typed_probe_failure_grad!))
         flow = _make_boundary_flow()
         original_state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
         current_state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
 
         err = try
             PDMPSamplers._throw_grid_boundary_error(
-                current_state, original_state, flow, model, ErrorException("BridgeStan gradient failed (code -1)");
+                current_state, original_state, flow, model, _TypedBoundaryProbeError();
                 t_valid=0.25, t_invalid=1.0,
             )
             nothing

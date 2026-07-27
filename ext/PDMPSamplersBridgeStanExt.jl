@@ -3,12 +3,28 @@ module PDMPSamplersBridgeStanExt
 using PDMPSamplers
 using BridgeStan
 using Base.Libc.Libdl: dlsym, dlpath
-import PDMPSamplers: PDMPModel, FullGradient, _last_gradient_potential, _potential_available, _potential
+import PDMPSamplers: PDMPModel, FullGradient, _SupportBoundaryProbeError, _last_gradient_potential, _potential_available, _potential
 
 # ── FastBridgeStanModel ──────────────────────────────────────────────────────
 # Eliminates per-call overhead from BridgeStan: caches dlsym function pointers
 # and pre-allocates Ref{Float64}/Ref{Cstring} buffers that are reused across
 # millions of gradient/HVP evaluations.
+
+struct BridgeStanCallError <: _SupportBoundaryProbeError
+    operation::Symbol
+    code::Cint
+    message::Cstring
+end
+
+_bridgestan_error_message(err::Base.RefValue{Cstring}) =
+    isassigned(err) && err[] != C_NULL ? err[] : Cstring(C_NULL)
+
+function Base.showerror(io::IO, err::BridgeStanCallError)
+    print(io, "BridgeStan ", err.operation, " failed (code ", err.code, ")")
+    err.message == C_NULL && return
+    msg = unsafe_string(err.message)
+    isempty(msg) || print(io, ": ", msg)
+end
 
 struct FastBridgeStanModel
     # all the pointers are "owned" by the StanModel, so we keep it here to avoid it from going out of scope
@@ -44,7 +60,7 @@ function fast_potential(m::FastBridgeStanModel, q::Vector{Float64})
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan log density failed (code $rc)") # COV_EXCL_LINE
+        throw(BridgeStanCallError(:log_density, rc, _bridgestan_error_message(m.err))) # COV_EXCL_LINE
     end
     return -m.potential_lp[]
 end
@@ -66,7 +82,7 @@ function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, 
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan gradient failed (code $rc)") # COV_EXCL_LINE
+        throw(BridgeStanCallError(:gradient, rc, _bridgestan_error_message(m.err))) # COV_EXCL_LINE
     end
     return out
 end
@@ -81,7 +97,7 @@ function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Ve
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan HVP failed (code $rc)") # COV_EXCL_LINE
+        throw(BridgeStanCallError(:hvp, rc, _bridgestan_error_message(m.err))) # COV_EXCL_LINE
     end
     return out
 end
@@ -120,7 +136,7 @@ PDMPSamplers._copy_callable(h::BridgeStanHVP) = copy(h)
 # ── PDMPModel constructors ───────────────────────────────────────────────────
 
 """
-    PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
+    PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=false)
 
 Construct a `PDMPModel` from a BridgeStan StanModel.
 
@@ -131,10 +147,9 @@ Uses `FastBridgeStanModel` internally to cache function pointers and pre-allocat
 buffers, eliminating per-call dlsym/allocation overhead.
 
 When `hvp=false` (default), directional curvature is computed via scalar finite
-differences (`FiniteDiffVHV`), which reuses the base gradient from the rate computation
-and adds only one extra gradient call per grid point. When `hvp=true`, Stan's compiled
-Hessian-vector product is used instead, giving exact curvature at the cost of a full
-d-vector HVP per grid point (2-3x a gradient call).
+differences (`FiniteDiffVHV`), which reuses the base gradient from the rate
+computation and adds only one extra gradient call per grid point. When `hvp=true`,
+Stan's compiled Hessian-vector product is used instead.
 
 # Arguments
 - `sm::BridgeStan.StanModel`: A compiled Stan model

@@ -32,6 +32,17 @@ _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
     flow::ContinuousDynamics,
+    alg::Union{StickyLoopState,AggregateStickyLoopState},
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryHandling,
+) = next_event_time(rng, model, flow, alg, state, cache, stats, true)
+
+_next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
     alg::GridAdaptiveState,
     state::AbstractPDMPState,
     cache::NamedTuple,
@@ -253,7 +264,7 @@ _supports_line_search_truncated_refresh(::ContinuousDynamics) = false
 _supports_line_search_truncated_refresh(::BouncyParticle) = true
 _supports_line_search_truncated_refresh(flow::PreconditionedDynamics) = _supports_line_search_truncated_refresh(flow.dynamics)
 _supports_line_search_truncated_refresh_state(::AbstractPDMPState, flow::ContinuousDynamics) = _supports_line_search_truncated_refresh(flow)
-_supports_line_search_truncated_refresh_state(::StickyPDMPState, ::ContinuousDynamics) = false
+_supports_line_search_truncated_refresh_state(::StickyPDMPState, flow::ContinuousDynamics) = _supports_line_search_truncated_refresh(flow)
 _supports_capped_boundary_search(::PoissonTimeStrategy) = false
 _supports_capped_boundary_search(::GridAdaptiveState) = true
 
