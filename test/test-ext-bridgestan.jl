@@ -150,9 +150,9 @@ else
                 @test PDMPSamplers._potential(counted_model, x_test) ≈ gradient_potential
                 @test stats.potential_calls == 1
                 @test stats.∇f_calls == 0
-                @test stats.grid_endpoint_gradient_calls == 0
+                @test PDMPSamplers._get_counter_grid_endpoint_gradient_calls(stats) == 0
                 @test stats.fd_curvature_gradient_calls == 0
-                @test stats.grid_acceptance_gradient_calls == 0
+                @test PDMPSamplers._get_counter_grid_acceptance_gradient_calls(stats) == 0
 
                 unavailable = PDMPModel(d, FullGradient((out, x) -> copyto!(out, x)))
                 @test !PDMPSamplers._potential_available(unavailable)

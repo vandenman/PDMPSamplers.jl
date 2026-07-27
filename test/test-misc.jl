@@ -172,7 +172,7 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
     end
 
     @testset "Gradient purpose counters" begin
-        stats = PDMPSamplers.StatisticCounter()
+        stats = PDMPSamplers.DevelStatisticCounter()
         x = [1.0, 2.0]
         out = zeros(2)
 

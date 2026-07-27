@@ -8,9 +8,9 @@ The code below is a llm-generated metaprogrammed drop-in replacement for
 the hand-written hot-garbage counter plumbing that used to be there.
 
 They are very useful for debugging and performance analysis.
-But most users don't need them, so the current design is that
-they are parametric so that end-users won't even notice they exist,
-assuming Julia compiles away the no-op methods.
+The default `StatisticCounter` keeps user-facing counts. Expensive grid/lazy/
+affine/componentwise diagnostics live in `DevelStatisticCounter` for research
+and performance work.
 
 
 Public API preserved:
@@ -364,6 +364,29 @@ end
     )
 end
 
+@counter_struct mutable struct RunSummaryCounter <: AbstractStatisticCounter
+    warmup_events::Int
+    main_events::Int
+    warmup_elapsed_time::Float64
+    main_elapsed_time::Float64
+    elapsed_time::Float64
+    stop_reason::Symbol
+end
+
+@counter_ops RunSummaryCounter begin
+    incval(
+        warmup_events,
+        main_events,
+        warmup_elapsed_time,
+        main_elapsed_time,
+    )
+
+    set(
+        elapsed_time,
+        stop_reason,
+    )
+end
+
 @counter_struct mutable struct GradientCallCounter <: AbstractStatisticCounter
     ∇f_calls::Int
     ∇²f_calls::Int
@@ -542,6 +565,7 @@ end
         grid_budget_tail_restarts,
         grid_points_evaluated,
         grid_endpoint_derivative_points_loaded,
+        grid_resets_from_dynamics_adaptation,
     )
 end
 
@@ -785,8 +809,6 @@ end
 
 @counter_ops PhaseSummaryCounter begin
     incval(
-        warmup_events,
-        main_events,
         warmup_gradient_calls,
         main_gradient_calls,
         warmup_hessian_calls,
@@ -823,13 +845,6 @@ end
         main_grid_points_evaluated,
         warmup_grid_endpoint_derivative_points_loaded,
         main_grid_endpoint_derivative_points_loaded,
-        warmup_elapsed_time,
-        main_elapsed_time,
-    )
-
-    set(
-        elapsed_time,
-        stop_reason,
     )
 end
 
@@ -852,6 +867,8 @@ end
     )
 
     get_sum(
+        lazy_fallback_low_tightness,
+        lazy_fallback_bound_violation,
         lazy_proposal_attempts,
         lazy_proposal_rejections,
     )
@@ -895,10 +912,7 @@ end
     BasicEventCounter,
     SupportBoundaryCounter,
     GradientCallCounter,
-    GridThinningCounter,
-    PhaseSummaryCounter,
-    LazyBoundCounter,
-    BoomerangInterferenceCounter,
+    RunSummaryCounter,
 )
 
 @counter_bundle(
@@ -906,6 +920,7 @@ end
     BasicEventCounter,
     SupportBoundaryCounter,
     GradientCallCounter,
+    RunSummaryCounter,
     GridThinningCounter,
     ConstantBoundCounter,
     StickyStatsCounter,
