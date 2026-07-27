@@ -446,6 +446,65 @@ function _run_phase_with_boundary_policy!(
     end
 end
 
+function _run_phase_for_policy!(
+    rng::Random.AbstractRNG,
+    criterion::StoppingCriterion,
+    state::AbstractPDMPState,
+    model_::PDMPModel,
+    flow::ContinuousDynamics,
+    alg_::PoissonTimeStrategy,
+    cache::NamedTuple,
+    trace_manager::TraceManager,
+    stats::AbstractStatisticCounter,
+    health::HealthMonitor,
+    phase::Symbol,
+    adapter::AbstractAdapter,
+    progress::Bool,
+    prg,
+    tstop::Base.RefValue{Float64},
+    T::Float64,
+    progress_stops::Int,
+    boundary_policy::NoBoundaryHandling,
+    original_model::PDMPModel,
+    support_boundary_options::SupportBoundaryOptions,
+)
+    return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats,
+        health, phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy)
+end
+
+function _run_phase_for_policy!(
+    rng::Random.AbstractRNG,
+    criterion::StoppingCriterion,
+    state::AbstractPDMPState,
+    model_::PDMPModel,
+    flow::ContinuousDynamics,
+    alg_::PoissonTimeStrategy,
+    cache::NamedTuple,
+    trace_manager::TraceManager,
+    stats::AbstractStatisticCounter,
+    health::HealthMonitor,
+    phase::Symbol,
+    adapter::AbstractAdapter,
+    progress::Bool,
+    prg,
+    tstop::Base.RefValue{Float64},
+    T::Float64,
+    progress_stops::Int,
+    boundary_policy::BoundaryHandling,
+    original_model::PDMPModel,
+    support_boundary_options::SupportBoundaryOptions,
+)
+    return _run_phase_with_boundary_policy!(rng, criterion, state, model_, flow, alg_, cache,
+        trace_manager, stats, health, phase, adapter, progress, prg, tstop, T, progress_stops,
+        boundary_policy, original_model, support_boundary_options)
+end
+
+_phase_criterion(::Nothing, T::Real) = _CommonPhaseCriterion(; T)
+_phase_criterion(c::FixedTimeCriterion, ::Real) = _CommonPhaseCriterion(; T=c.T)
+_phase_criterion(c::EventCountCriterion, ::Real) =
+    _CommonPhaseCriterion(; max_events=c.max_events, event_source=c)
+_phase_criterion(c::StoppingCriterion, ::Real) = c
+
 function _pdmp_sample_single(
     rng::Random.AbstractRNG,
     ξ₀::SkeletonPoint, flow::FL, model::PDMPModel,
@@ -492,8 +551,8 @@ function _pdmp_sample_single(
     health = HealthMonitor()
     adapter = adapter isa NoAdaptation ? default_adapter(flow, model_.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
 
-    warmup_criterion = isnothing(warmup_stop) ? FixedTimeCriterion(t_warmup_abs) : warmup_stop
-    stop_criterion = isnothing(stop) ? FixedTimeCriterion(T) : stop
+    warmup_criterion = _phase_criterion(warmup_stop, t_warmup_abs)
+    stop_criterion = _phase_criterion(stop, T)
     boundary_policy = _boundary_policy(support_boundary_options)
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
@@ -507,14 +566,16 @@ function _pdmp_sample_single(
     end
 
     T_float = Float64(T)
-    _run_phase_with_boundary_policy!(rng, warmup_criterion, state, model_, flow, alg_, cache,
-        trace_manager, stats, health, :warmup, adapter, progress, prg, tstop, T_float,
-        progress_stops, boundary_policy, original_model, support_boundary_options)
+    if !(isnothing(warmup_stop) && t_warmup_abs <= t₀)
+        _run_phase_for_policy!(rng, warmup_criterion, state, model_, flow, alg_, cache,
+            trace_manager, stats, health, :warmup, adapter, progress, prg, tstop, T_float,
+            progress_stops, boundary_policy, original_model, support_boundary_options)
+    end
 
     finish_warmup!(alg_, stats, flow)
     _maybe_activate_constant_bound!(alg_, stats)
 
-    _run_phase_with_boundary_policy!(rng, stop_criterion, state, model_, flow, alg_, cache,
+    _run_phase_for_policy!(rng, stop_criterion, state, model_, flow, alg_, cache,
         trace_manager, stats, health, :main, adapter, progress, prg, tstop, T_float,
         progress_stops, boundary_policy, original_model, support_boundary_options)
 

@@ -1,58 +1,21 @@
-import PrecompileTools
+# Internal helper callables used by generated precompile signatures.
+# They keep src/precompile_statements.jl independent of test-local closures.
+function _precompile_neg_gradient!(out::AbstractVector, x::AbstractVector)
+    copyto!(out, x)
+    return out
+end
 
-PrecompileTools.@setup_workload begin
-    d = 2
-    alg = ThinningStrategy(GlobalBounds(2.0, d))
-    ξ0 = SkeletonPoint(ones(d), [1.0, -1.0])
+function _precompile_neg_hvp!(out::AbstractVector, x::AbstractVector, v::AbstractVector)
+    copyto!(out, v)
+    return out
+end
 
-    flow_bps = BouncyParticle(I(d), zeros(d))
+function _precompile_model(d::Integer)
+    return PDMPModel(Int(d), FullGradient(_precompile_neg_gradient!), _precompile_neg_hvp!)
+end
 
-    # Compile common flow constructors without paying to run every flow/metric pair.
-    flow_zz = ZigZag(I(d), zeros(d))
-    flow_boom = Boomerang(I(d), zeros(d))
-    flow_zz_diag = ZigZag(Diagonal(ones(d)), zeros(d))
-    flow_boom_diag = Boomerang(Diagonal(ones(d)), zeros(d))
-    flow_bps_diag = BouncyParticle(Diagonal(ones(d)), zeros(d))
-    flow_aboom = AdaptiveBoomerang(d)
-    flow_pzz = PreconditionedZigZag(d)
-    flow_pbps = PreconditionedBPS(d)
-
-    trace = PDMPTrace([
-        PDMPEvent(0.0, [0.0, 0.0], [1.0, -1.0]),
-        PDMPEvent(0.2, [0.2, -0.2], [-1.0, -1.0]),
-        PDMPEvent(0.4, [0.0, -0.4], [-1.0, 1.0]),
-        PDMPEvent(0.6, [-0.2, -0.2], [1.0, 1.0]),
-        PDMPEvent(0.8, [0.0, 0.0], [1.0, -1.0]),
-        PDMPEvent(1.0, [0.2, -0.2], [-1.0, -1.0]),
-        PDMPEvent(1.2, [0.0, -0.4], [-1.0, 1.0]),
-        PDMPEvent(1.4, [-0.2, -0.2], [1.0, 1.0]),
-        PDMPEvent(1.6, [0.0, 0.0], [1.0, -1.0]),
-        PDMPEvent(1.8, [0.2, -0.2], [-1.0, -1.0]),
-        PDMPEvent(2.0, [0.0, -0.4], [-1.0, 1.0]),
-        PDMPEvent(2.2, [-0.2, -0.2], [1.0, 1.0]),
-    ], flow_bps)
-    chains = PDMPChains([trace], [StatisticCounter()])
-
-    PrecompileTools.@compile_workload begin
-        TraceManager(PDMPState(0.0, copy(ξ0)), flow_bps, alg, 0.0)
-
-        initialize_velocity(flow_zz, d)
-        initialize_velocity(flow_boom, d)
-        initialize_velocity(flow_zz_diag, d)
-        initialize_velocity(flow_boom_diag, d)
-        initialize_velocity(flow_bps_diag, d)
-        initialize_velocity(flow_aboom, d)
-        initialize_velocity(flow_pzz, d)
-        initialize_velocity(flow_pbps, d)
-
-        mean(chains); var(chains); std(chains); cov(chains); cor(chains)
-        quantile(chains, 0.5; coordinate=1); median(chains; coordinate=1)
-        cdf(chains, 0.0; coordinate=1)
-        moments = _trace_moments(trace)
-        var(trace, moments.mean); cov(trace, moments.mean)
-        Matrix(PDMPDiscretize(trace, 0.2))
-
-        stop_after(events=10)
-        stop_after(events=10, T=1.0)
-    end
+const _PRECOMPILE_STATEMENTS_PATH = joinpath(@__DIR__, "precompile_statements.jl")
+if get(ENV, "PDMPSAMPLERS_DISABLE_GENERATED_PRECOMPILE", "false") != "true" &&
+        isfile(_PRECOMPILE_STATEMENTS_PATH)
+    include(_PRECOMPILE_STATEMENTS_PATH)
 end

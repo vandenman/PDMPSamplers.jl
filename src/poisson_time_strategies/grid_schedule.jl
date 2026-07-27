@@ -4,7 +4,14 @@ finish_warmup!(alg::PoissonTimeStrategy, stats::AbstractStatisticCounter, ::Cont
 
 _record_final_grid_state!(::PoissonTimeStrategy, ::AbstractStatisticCounter) = nothing
 
-function _record_final_grid_state!(alg::GridAdaptiveState, stats::AbstractStatisticCounter)
+# These grid lifecycle hooks compile very large method instances because
+# GridAdaptiveState carries the full provider stack. They are cold, or called
+# only periodically, so avoiding specialization reduces TTFX without a measured
+# runtime benefit from per-provider specialization here.
+function _record_final_grid_state!(
+    @nospecialize(alg::GridAdaptiveState),
+    @nospecialize(stats::AbstractStatisticCounter),
+)
     _set_counter_grid_final_N(stats, alg.N[])
     _set_counter_grid_final_tmax(stats, alg.t_max[])
     _set_counter_grid_final_h(stats, alg.t_max[] / alg.N[])
@@ -12,7 +19,7 @@ function _record_final_grid_state!(alg::GridAdaptiveState, stats::AbstractStatis
     return nothing
 end
 
-function finish_warmup!(alg::GridAdaptiveState, ::AbstractStatisticCounter)
+function finish_warmup!(@nospecialize(alg::GridAdaptiveState), ::AbstractStatisticCounter)
     alg.curvature_bound isa WarmupCurvatureBound &&
         _finish_warmup_curvature_bound!(alg.curvature_bound)
     return nothing
@@ -78,7 +85,11 @@ function _maybe_tune_grid_after_warmup!(alg::GridAdaptiveState, stats::AbstractS
     return nothing
 end
 
-function finish_warmup!(alg::GridAdaptiveState, stats::AbstractStatisticCounter, flow::ContinuousDynamics)
+function finish_warmup!(
+    @nospecialize(alg::GridAdaptiveState),
+    @nospecialize(stats::AbstractStatisticCounter),
+    @nospecialize(flow::ContinuousDynamics),
+)
     finish_warmup!(alg, stats)
     _maybe_tune_grid_after_warmup!(alg, stats, flow)
     return nothing
@@ -177,7 +188,10 @@ _shrink_t_max_on_rejection!(::GridAdaptiveState, ::PiecewiseConstantBound, ::Flo
 
 _reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
 
-function _maybe_activate_constant_bound!(alg::GridAdaptiveState, stats::AbstractStatisticCounter)
+function _maybe_activate_constant_bound!(
+    @nospecialize(alg::GridAdaptiveState),
+    @nospecialize(stats::AbstractStatisticCounter),
+)
     alg.post_warmup_simplify || return nothing
     isfinite(alg.constant_bound_rate[]) && return nothing
     total_events = _get_counter_reflections_accepted(stats) + _get_counter_refreshment_events(stats)

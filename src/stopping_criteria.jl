@@ -63,6 +63,57 @@ end
 
 stop_reason(::EventCountCriterion) = :reached_event_budget
 
+# Internal phase-local criterion used for the common built-in stopping modes.
+# This keeps `_run_phase!` specialized on one concrete criterion type for
+# FixedTimeCriterion/EventCountCriterion cases, reducing compile variants
+# without introducing dynamic dispatch in the event loop.
+mutable struct _CommonPhaseCriterion <: StoppingCriterion
+    const T::Float64
+    const max_events::Int
+    const check_time::Bool
+    const check_events::Bool
+    const event_source::Union{Nothing,EventCountCriterion}
+    baseline::Int
+    reason::Symbol
+end
+
+function _CommonPhaseCriterion(;
+    T::Real=Inf,
+    max_events::Integer=typemax(Int),
+    check_time::Bool=isfinite(T),
+    check_events::Bool=max_events < typemax(Int),
+    event_source::Union{Nothing,EventCountCriterion}=nothing,
+)
+    return _CommonPhaseCriterion(
+        Float64(T), Int(max_events), check_time, check_events, event_source, 0, :none)
+end
+
+function initialize!(c::_CommonPhaseCriterion, state, trace_manager, stats)
+    c.reason = :none
+    if c.check_events
+        c.baseline = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
+        c.event_source !== nothing && (c.event_source.baseline = c.baseline)
+    end
+    return nothing
+end
+
+function is_satisfied(c::_CommonPhaseCriterion, state, trace_manager, stats)
+    if c.check_time && state.t[] >= c.T
+        c.reason = :reached_time
+        return true
+    end
+    if c.check_events
+        total = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
+        if (total - c.baseline) >= c.max_events
+            c.reason = :reached_event_budget
+            return true
+        end
+    end
+    return false
+end
+
+stop_reason(c::_CommonPhaseCriterion) = c.reason
+
 """
     WallTimeCriterion(seconds)
 
