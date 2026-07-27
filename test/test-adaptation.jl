@@ -379,10 +379,18 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
 
         m = mean(trace)
-        @test maximum(abs.(m .- μ_true)) ≤ 3.1
+        lrp = flow.Γ::PDMPSamplers.LowRankPrecision
+        @test length(trace) > 1000
+        @test all(isfinite, m)
+        @test maximum(abs.(m .- μ_true)) ≤ 1.0
+        @test maximum(abs.(flow.μ .- μ_true)) ≤ 1.5
+        @test all(isfinite, lrp.Λ)
+        @test all(lrp.Λ .> 0)
+        @test all(isfinite, lrp.D)
+        @test all(lrp.D .> 0)
     end
 
     @testset "SequenceAdapter adapt!" begin
