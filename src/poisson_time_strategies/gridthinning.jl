@@ -327,12 +327,6 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     state_cache = copy(state)
     state_cache2 = copy(state)
     grad_provider = GradientProvider(state_cache.ξ.θ, flow, model.grad, cache)
-    fd_grad_provider = grad_provider
-    grad_hvp_provider = GradHVPProvider(grad_provider, model.hvp)
-    vhv_provider = VHVProvider(grad_provider, model.vhv, similar(state.ξ.x))
-    fd_vhv_provider = FiniteDiffVHV(fd_grad_provider, similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x), stats)
-    event_provider = _initial_grid_event_provider(strat.curvature_backend, model, flow,
-        grad_hvp_provider, vhv_provider, fd_vhv_provider)
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         PiecewiseAffineBound(2N_base),
@@ -365,10 +359,6 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         Ref(NaN),
         Ref(false),
         grad_provider,
-        grad_hvp_provider,
-        vhv_provider,
-        fd_vhv_provider,
-        event_provider,
         strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
@@ -383,7 +373,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD,EP} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
@@ -415,10 +405,6 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,GH,VP,FD,EP} <
     cached_rate_derivative::Base.RefValue{Float64}
     has_cached_rate_derivative::Base.RefValue{Bool}
     grad_provider::P
-    grad_hvp_provider::GH
-    vhv_provider::VP
-    fd_vhv_provider::FD
-    event_provider::EP
     bound::Symbol
     curvature_bound
     bound_violation::Symbol

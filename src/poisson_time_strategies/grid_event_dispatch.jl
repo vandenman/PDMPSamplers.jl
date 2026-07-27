@@ -1,40 +1,22 @@
-function _make_grad_provider(grad_func, model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState)
+_grid_hvp_provider(alg::GridAdaptiveState, model::PDMPModel) = GradHVPProvider(alg.grad_provider, model.hvp)
+_grid_vhv_provider(alg::GridAdaptiveState, model::PDMPModel) = VHVProvider(alg.grad_provider, model.vhv, alg.fd_w_buf)
+_grid_fd_provider(alg::GridAdaptiveState, stats) = FiniteDiffVHV(alg.grad_provider, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf, stats)
+
+function _grid_event_provider(model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState, stats)
     backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
-    backend === :finite_difference && return alg.fd_vhv_provider
+    backend === :finite_difference && return _grid_fd_provider(alg, stats)
     joint_func = model.joint
     if joint_func !== nothing && _joint_compatible(flow)
         return joint_func
     end
     vhv_func = model.vhv
     if vhv_func !== nothing
-        return alg.vhv_provider
+        return _grid_vhv_provider(alg, model)
     end
     hvp_func = model.hvp
     hvp_func === nothing && throw(ArgumentError(
         "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
-    return alg.grad_hvp_provider
-end
-
-function _initial_grid_event_provider(
-    backend::Symbol,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    grad_hvp_provider,
-    vhv_provider,
-    fd_vhv_provider,
-)
-    selected = _selected_curvature_backend(backend, model, flow)
-    selected === :finite_difference && return fd_vhv_provider
-    joint_func = model.joint
-    if joint_func !== nothing && _joint_compatible(flow)
-        return joint_func
-    end
-    vhv_func = model.vhv
-    vhv_func !== nothing && return vhv_provider
-    hvp_func = model.hvp
-    hvp_func === nothing && throw(ArgumentError(
-        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
-    return grad_hvp_provider
+    return _grid_hvp_provider(alg, model)
 end
 
 function _next_event_time_with_provider!(
@@ -57,41 +39,6 @@ function _next_event_time_with_provider!(
     end
     return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-end
-
-function _next_event_time_with_selected_provider!(
-    rng::Random.AbstractRNG,
-    model::PDMPModel{<:GlobalGradientStrategy},
-    flow::FL,
-    alg::GridAdaptiveState,
-    state::AbstractPDMPState,
-    cache,
-    stats::AbstractStatisticCounter,
-    max_horizon::Float64,
-    include_refresh::Bool,
-    max_horizon_event::Symbol,
-    probe_failure_handler::GridBoundaryProbe,
-)::GridEvent where {FL<:ContinuousDynamics}
-    backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
-    if backend === :finite_difference
-        return _next_event_time_with_provider!(rng, alg.fd_vhv_provider, model, flow, alg, state,
-            cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
-    joint_func = model.joint
-    if joint_func !== nothing && _joint_compatible(flow)
-        return _next_event_time_with_provider!(rng, joint_func, model, flow, alg, state,
-            cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
-    vhv_func = model.vhv
-    if vhv_func !== nothing
-        return _next_event_time_with_provider!(rng, alg.vhv_provider, model, flow, alg, state,
-            cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
-    hvp_func = model.hvp
-    hvp_func === nothing && throw(ArgumentError(
-        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
-    return _next_event_time_with_provider!(rng, alg.grad_hvp_provider, model, flow, alg, state,
-        cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
 @inline function _has_exact_curvature_provider(model::PDMPModel, flow::ContinuousDynamics)
@@ -139,8 +86,8 @@ function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<
     state_ = alg.state_cache
     copyto!(state_, state)
 
-    return _next_event_time_with_provider!(rng, alg.event_provider, model, flow, alg, state, cache, stats,
-        max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+    provider = _grid_event_provider(model, flow, alg, stats)
+    return _next_event_time_with_provider!(rng, provider, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
 function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState, flow::ContinuousDynamics, provider)

@@ -283,7 +283,7 @@ function _vv_observe_derivative!(out::AbstractVector, alg::VectorVariationAdapti
     alg.t_single[1] = t
     values, derivatives = _rate_derivative_scratch!(
         alg.fallback.rate_value_buf, alg.fallback.rate_derivative_buf, length(out), 1)
-    provider = _make_grad_provider(alg.fallback.grad_provider, model, flow, alg.fallback)
+    provider = _grid_event_provider(model, flow, alg.fallback, stats)
     _fill_rate_derivatives!(
         values, derivatives, provider, state, flow, alg.t_single, 1, alg.state_cache2)
     @inbounds for i in eachindex(out)

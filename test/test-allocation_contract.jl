@@ -31,9 +31,9 @@ end
 
 @testset "Hot-loop allocation contract" begin
     @testset "Boomerang rate derivatives" begin
-        state, model, alg, cache, stats = allocation_contract_setup(Boomerang(4))
-        provider = alg.grad_hvp_provider
-        flow = provider.grad.flow
+        flow = Boomerang(4)
+        state, model, alg, cache, stats = allocation_contract_setup(flow)
+        provider = PDMPSamplers._grid_event_provider(model, flow, alg, stats)
         for _ in 1:5
             allocation_contract_rate(state, flow, provider)
             allocation_contract_grid_rate(state, flow, provider)

@@ -50,14 +50,12 @@ function _check_event_sane(case::ThinningCase, rng, state, model, alg, cache, st
     return τ, event_type, meta
 end
 
-function _dense_rate_bound_check(case::ThinningCase, state, alg, stats)
+function _dense_rate_bound_check(case::ThinningCase, model, state, alg, stats)
     hasproperty(alg, :pcb) || return nothing
     alg.bound in (:flat, :linear, :auto) || return nothing
-    modes = PDMPSamplers._grid_bound_modes(alg, state, case.flow, alg.event_provider)
-    PDMPSamplers._build_grid_bound_prefix!(
-        alg.pcb, state, case.flow, alg.event_provider, alg,
-        stats, alg.state_cache, case.horizon, Inf,
-        PDMPSamplers.NoGridBoundaryProbe(), modes)
+    provider = PDMPSamplers._grid_event_provider(model, case.flow, alg, stats)
+    modes = PDMPSamplers._grid_bound_modes(alg, state, case.flow, provider)
+    PDMPSamplers._build_grid_bound_prefix!(alg.pcb, state, case.flow, provider, alg, stats, alg.state_cache, case.horizon, Inf, PDMPSamplers.NoGridBoundaryProbe(), modes)
     isempty(alg.pcb.Λ_vals) && return nothing
     t_stop = min(case.horizon, alg.pcb.t_grid[end])
     t_stop > 0 || return nothing
@@ -75,8 +73,8 @@ end
 function _validate_strategy(case::ThinningCase, strategy; seed::Integer)
     rng, state, model, alg, cache, stats = _initial_thinning_state(case, strategy, seed)
     _check_event_sane(case, rng, state, model, alg, cache, stats)
-    _, bound_state, _, bound_alg, _, _ = _initial_thinning_state(case, strategy, seed + 10_000)
-    _dense_rate_bound_check(case, bound_state, bound_alg, stats)
+    _, bound_state, bound_model, bound_alg, _, _ = _initial_thinning_state(case, strategy, seed + 10_000)
+    _dense_rate_bound_check(case, bound_model, bound_state, bound_alg, stats)
     return stats
 end
 

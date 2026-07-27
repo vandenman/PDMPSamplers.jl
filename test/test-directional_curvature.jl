@@ -216,8 +216,7 @@ end
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         rng = Random.Xoshiro(2026)
         state, model_, alg_, cache, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
-        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model_.grad, cache)
-        provider = PDMPSamplers._make_grad_provider(grad_func, model_, flow, alg_)
+        provider = PDMPSamplers._grid_event_provider(model_, flow, alg_, nothing)
         @test provider isa PDMPSamplers.WithStatsJoint
     end
 end

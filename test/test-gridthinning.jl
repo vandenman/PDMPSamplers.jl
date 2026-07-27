@@ -2340,13 +2340,14 @@ end
         ξ0 = SkeletonPoint([0.25], [1.0])
         rng = Xoshiro(20260713)
 
-        state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        state, model_, alg_, _, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
         values = Matrix{Float64}(undef, 1, 3)
         derivatives = similar(values)
         t_grid = [0.0, 0.25, 0.5]
+        provider = PDMPSamplers._grid_event_provider(model_, flow, alg_, stats)
 
         PDMPSamplers.rate_derivatives_for_grid!(
-            values, derivatives, alg_.fd_vhv_provider, state, flow, t_grid, length(t_grid))
+            values, derivatives, provider, state, flow, t_grid, length(t_grid))
 
         @test all(isfinite, values)
         @test all(isfinite, derivatives)

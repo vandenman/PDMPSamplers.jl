@@ -125,9 +125,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
 
     shared_node = alg.bound === :shared_node
     _can_use_value_quadratic_grid(flow, alg.curvature_bound) ||
-        return _next_event_time_lazy!(rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
-            model, flow, alg, state, cache, stats, max_horizon, include_refresh,
-            max_horizon_event, probe_failure_handler)
+        return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 
     state_ = alg.state_cache
     state2_ = alg.state_cache2
@@ -201,10 +199,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
             alg.curvature_bound
         else
             value = _evaluate_curvature_bound(alg.curvature_bound, state, flow, t_left, t_right, stats)
-            value === nothing && return _next_event_time_lazy!(
-                rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
-                model, flow, alg, state, cache, stats, max_horizon, include_refresh,
-                max_horizon_event, probe_failure_handler)
+            value === nothing && return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
             _maybe_probe_warmup_curvature_bound!(
                 alg.curvature_bound, probe_failure_handler, state2_, state, flow,
                 alg.grad_provider, t_left, t_right, Float64(y_left), Float64(y_right), stats)
@@ -300,18 +295,12 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
                     alg.has_cached_gradient[] = false
                     alg.has_cached_rate_derivative[] = false
                     _shrink_grid_after_bound_violation!(alg, stats)
-                    return _next_event_time_lazy!(
-                        rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
-                        model, flow, alg, state, cache, stats, max_horizon, include_refresh,
-                        max_horizon_event, probe_failure_handler)
+                    return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
                 end
                 _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 alg.has_cached_gradient[] = false
                 alg.has_cached_rate_derivative[] = false
-                return _next_event_time_lazy!(
-                    rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
-                    model, flow, alg, state, cache, stats, max_horizon, include_refresh,
-                    max_horizon_event, probe_failure_handler)
+                return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
             end
 
             if rand(rng) * lb_proposal <= l_actual
@@ -341,10 +330,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
                 alg.has_cached_rate_derivative[] = false
                 _increase_grid_N!(alg)
                 recompute_time_grid!(alg)
-                return _next_event_time_lazy!(
-                    rng, _make_grad_provider(alg.grad_provider, model, flow, alg),
-                    model, flow, alg, state, cache, stats, max_horizon, include_refresh,
-                    max_horizon_event, probe_failure_handler)
+                return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
             end
 
             cumulative_area += lb_proposal * (τ_proposal - t_left)

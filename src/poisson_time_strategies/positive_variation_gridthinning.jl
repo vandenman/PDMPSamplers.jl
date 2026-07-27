@@ -1033,7 +1033,7 @@ function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
         return 0.0, horizon_event, default_return
     end
 
-    provider = _make_grad_provider(alg.fallback.grad_provider, model, flow, alg.fallback)
+    provider = _grid_event_provider(model, flow, alg.fallback, stats)
     state_left = alg.state_cache
     state_prop = alg.state_cache2
     copyto!(state_left, state)
