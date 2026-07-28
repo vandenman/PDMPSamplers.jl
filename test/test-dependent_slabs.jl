@@ -179,6 +179,12 @@ end
         expected_indep[indices[[1, 3]]] .= @. 2π * κ[[1, 3]]^2 * x[indices[[1, 3]]]
         @test indep_out ≈ expected_indep
         @test conditional_logdensity_zero(indep, x, active, 2) ≈ log(κ[2])
+        indep_block = fill(NaN, length(indices))
+        active_prior_grad!(indep, indep_block, x, active)
+        expected_indep_block = zeros(length(indices))
+        expected_indep_block[[1, 3]] .= @. 2π * κ[[1, 3]]^2 * x[indices[[1, 3]]]
+        @test indep_block ≈ expected_indep_block
+        @test_throws DimensionMismatch active_prior_grad!(indep, fill(NaN, 4), x, active)
 
         logscale = IndependentZeroMeanLogscaleGaussianSlab(indices, [1, 1, 3], log.([2.0, 3.0, 4.0]))
         logscale_x = [0.1, 1.3, -0.2, -0.1, 0.8]
@@ -194,6 +200,15 @@ end
             expected_logscale[logscale.logscale_indices[j]] += 1 - β^2 * inv_s2
         end
         @test logscale_out ≈ expected_logscale
+        logscale_block = fill(NaN, length(indices))
+        active_prior_grad!(logscale, logscale_block, logscale_x, logscale_active)
+        expected_logscale_block = zeros(length(indices))
+        for j in (1, 2)
+            log_s = logscale.log_base_scales[j] + logscale_x[logscale.logscale_indices[j]]
+            expected_logscale_block[j] = logscale_x[indices[j]] / exp(2log_s)
+        end
+        @test logscale_block ≈ expected_logscale_block
+        @test_throws DimensionMismatch active_prior_grad!(logscale, fill(NaN, 4), logscale_x, logscale_active)
         @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
               -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
         @test_throws ArgumentError IndependentZeroMeanLogscaleGaussianSlab([1, 2], [2, 3], zeros(2))
@@ -239,6 +254,12 @@ end
         nuisance_out = fill(NaN, 2)
         nuisance_target(nuisance_out, [3.0, 4.0])
         @test nuisance_out ≈ [0.0, 8.0]
+
+        strategy_target = DependentSlabTarget(d, FullGradient((out, x) -> copyto!(out, 2 .* x)), prior_grad!, slab, odds)
+        strategy_out = zeros(d)
+        strategy_x = [1.0, -2.0, 3.0]
+        strategy_target(strategy_out, strategy_x)
+        @test strategy_out ≈ [3.0, -6.0, 6.0]
     end
 
     @testset "Arbitrary slab target baseline" begin
@@ -389,12 +410,33 @@ end
         @test slab_cache_key(exch, x, active) == active
         @test slab_cache_key(exch, x, active) !== active
         @test slab_cache_key(zero_exch, x, active) == active
+        indep = IndependentZeroMeanGaussianSlab([0.4, 0.5, 0.6, 0.7], indices)
+        x_with_scales = vcat(x, [0.1, -0.2])
+        logscale = IndependentZeroMeanLogscaleGaussianSlab(indices, [5, 5, 6, 6], log.([1.0, 1.5, 2.0, 2.5]))
+        global_logscale = GlobalLogscaleExchangeableGaussianSlab(indices, 5, u, v; mean=μ, logscale_offset=0.2)
+        @test slab_cache_style(indep) isa FixedCovarianceCache
+        @test slab_cache_style(logscale) isa NoSlabCache
+        @test slab_cache_style(global_logscale) isa NoSlabCache
+        @test slab_cache_key(indep, x, active) == active
+        @test slab_cache_key(indep, x, active) !== active
+        @test slab_cache_key(logscale, x, active) === nothing
+        @test slab_cache_key(global_logscale, x, active) === nothing
 
         exch_mean = fill(NaN, 4)
         exch_cov = fill(NaN, 4, 4)
         @test gaussian_slab!(exch, exch_mean, exch_cov, x) === nothing
         @test exch_mean == fill(μ, 4)
         @test exch_cov ≈ dense_cov
+        indep_mean = fill(NaN, 4)
+        indep_cov = fill(NaN, 4, 4)
+        @test gaussian_slab!(indep, indep_mean, indep_cov, x) === nothing
+        @test indep_mean == zeros(4)
+        @test diag(indep_cov) ≈ inv.(indep.precision)
+        logscale_mean = fill(NaN, 4)
+        logscale_cov = fill(NaN, 4, 4)
+        @test gaussian_slab!(logscale, logscale_mean, logscale_cov, x_with_scales) === nothing
+        @test logscale_mean == zeros(4)
+        @test diag(logscale_cov) ≈ exp.(2 .* (logscale.log_base_scales .+ x_with_scales[logscale.logscale_indices]))
 
         zero_mean = fill(NaN, 4)
         zero_cov = fill(NaN, 4, 4)
@@ -404,10 +446,19 @@ end
 
         exch_copy = copy(exch)
         zero_copy = copy(zero_exch)
+        indep_copy = copy(indep)
+        logscale_copy = copy(logscale)
         @test beta_indices(exch_copy) == indices
         @test beta_indices(exch_copy) !== beta_indices(exch)
         @test beta_indices(zero_copy) == indices
         @test beta_indices(zero_copy) !== beta_indices(zero_exch)
+        @test beta_indices(indep_copy) == indices
+        @test beta_indices(indep_copy) !== beta_indices(indep)
+        @test indep_copy.kappa == indep.kappa
+        @test indep_copy.kappa !== indep.kappa
+        @test beta_indices(logscale_copy) == indices
+        @test logscale_copy.logscale_indices == logscale.logscale_indices
+        @test logscale_copy.logscale_indices !== logscale.logscale_indices
 
         x_same_sum = [0.5, 0.0, 0.1, 0.0]
         x_other_same_sum = [0.2, 0.0, 0.4, 0.0]
@@ -644,11 +695,18 @@ end
         @test PDMPSamplers.sample_label(MersenneTwister(302), clock, flow, state, 0.6, can_stick) ==
               PDMPSamplers.sample_label(MersenneTwister(302), clock, flow, state_at, can_stick)
         @test default_aggregate_unstick_clock(provider, odds) isa ExponentialSumAggregateClock
+        clock_copy = copy(clock)
+        @test clock_copy !== clock
+        @test clock_copy.slab_provider !== clock.slab_provider
+        @test clock_copy.model_prior_odds !== clock.model_prior_odds
+        @test clock_copy.rtol == clock.rtol
+        @test clock_copy.atol == clock.atol
     end
 
     @testset "Global logscale exchangeable segment capability" begin
         provider = GlobalLogscaleExchangeableGaussianSlab(1:3, 4, 1.2, 0.3; mean=0.0, logscale_offset=0.1)
         odds = BernoulliModelPriorOdds(fill(0.5, 3))
+        @test default_aggregate_unstick_clock(provider, odds) isa ChebyshevResidualAggregateClock
         flow = ZigZag(4)
         state = StickyPDMPState(
             Ref(0.0),
@@ -699,6 +757,13 @@ end
         summed = SummedRateClock(provider, odds; rtol=1e-8, atol=1e-10)
         cheb = ChebyshevResidualAggregateClock(provider, odds; order=8, max_cells=4, residual_budget=0.0)
         fourier = FourierResidualAggregateClock(provider, odds; order=8, cells=4, residual_budget=0.0)
+        fourier_copy = copy(fourier)
+        @test fourier_copy !== fourier
+        @test fourier_copy.slab_provider !== fourier.slab_provider
+        @test fourier_copy.model_prior_odds !== fourier.model_prior_odds
+        @test fourier_copy.order == fourier.order
+        @test fourier_copy.cells == fourier.cells
+        @test default_aggregate_unstick_clock(provider, odds) isa SummedRateClock
         flow = ZigZag(2)
         state = StickyPDMPState(
             Ref(0.0),

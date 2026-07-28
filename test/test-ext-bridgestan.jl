@@ -159,6 +159,15 @@ else
                 @test !PDMPSamplers._potential_available(unavailable)
                 @test_throws ArgumentError PDMPSamplers._potential(unavailable, x_test)
                 @test_throws PDMPSamplers._SupportBoundaryProbeError PDMPSamplers._potential(model_potential, fill(NaN, d))
+                err = try
+                    PDMPSamplers._potential(model_potential, fill(NaN, d))
+                    nothing
+                catch err
+                    err
+                end
+                msg = sprint(showerror, err)
+                @test occursin("BridgeStan log_density failed", msg)
+                @test occursin("code -1", msg)
             end
 
             @testset "fast_log_density_hvp!" begin

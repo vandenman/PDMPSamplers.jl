@@ -322,6 +322,40 @@ end
 
         state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
         flow = BouncyParticle(1, 0.0)
+        rng = MersenneTwister(31)
+        model = PDMPModel(1, FullGradient((out, x) -> copyto!(out, x)))
+        ξ0 = SkeletonPoint([0.0], [1.0])
+        _, _, alg_, cache, stats_msg = PDMPSamplers.initialize_state(rng, flow, model, strat, 0.0, ξ0)
+        alg_empty = deepcopy(alg_)
+        empty!(alg_empty.pcb.t_grid)
+        msg_empty = PDMPSamplers._grid_bound_violation_message(
+            alg_empty, stats_msg, state, flow, 0.25, 0.5, 1.0, 0.0, 0.2, 0.0, false)
+        @test occursin("cell_index=0", msg_empty)
+        @test occursin("ratio=Inf", msg_empty)
+
+        alg_.pcb.t_grid .= [0.0, 0.5, 1.0, 1.5]
+        alg_.pcb.Λ_vals .= [2.0, 3.0, 4.0]
+        alg_.pcb.y_vals .= [1.0, 1.5, 2.0, 2.5]
+        alg_.pcb.d_vals .= [0.0, 0.25, 0.5, 0.75]
+        alg_.affine_bound.t_breaks[1:3] .= [0.0, 0.4, 1.0]
+        alg_.affine_bound.y_left[1:2] .= [1.0, 1.2]
+        alg_.affine_bound.slopes[1:2] .= [0.5, 0.75]
+        alg_.affine_bound.n_segments = 2
+        msg_linear = PDMPSamplers._grid_bound_violation_message(
+            alg_, stats_msg, state, flow, 1.0, 0.5, 1.0, 2.0, 0.2, 0.0, true)
+        @test occursin("cell_index=3", msg_linear)
+        @test occursin("segment_index=2", msg_linear)
+        @test occursin("segment_slope=0.75", msg_linear)
+
+        @test all(isnan, PDMPSamplers._metric_scale_extrema(flow))
+        @test PDMPSamplers._metric_scale_extrema(PreconditionedZigZag(3; scale=[0.5, 2.0, 1.0])) == (0.5, 2.0)
+        dense_bps = DensePreconditionedBPS(2)
+        dense_bps.metric.L .= [2.0 0.0; 0.1 3.0]
+        @test PDMPSamplers._metric_scale_extrema(dense_bps) == (2.0, 3.0)
+        dense_zz = DensePreconditionedZigZag(2)
+        dense_zz.metric.L .= [4.0 0.0; 0.2 1.5]
+        @test PDMPSamplers._metric_scale_extrema(dense_zz) == (1.5, 4.0)
+
         t_grid = [0.0, 0.5, 1.0]
         stats = PDMPSamplers.DevelStatisticCounter()
         L_none = PDMPSamplers._channel_curvature_matrix(nothing, state, flow, t_grid, 2, 2, stats)

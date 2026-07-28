@@ -6,6 +6,17 @@ import ForwardDiff
 
 struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
 
+mutable struct ActiveSetRecorder
+    free::BitVector
+    calls::Int
+end
+ActiveSetRecorder(n::Integer) = ActiveSetRecorder(falses(n), 0)
+function (r::ActiveSetRecorder)(out, x)
+    copyto!(out, x)
+    return out
+end
+PDMPSamplers.set_active_set!(r::ActiveSetRecorder, free::BitVector) = (r.free .= free; r.calls += 1; nothing)
+
 @testset "Miscellaneous" begin
 
     @testset "HVP sign for FullGradient path" begin
@@ -225,6 +236,45 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         @test stats.main_prior_gradient_calls == stats.prior_gradient_calls
         @test stats.main_fd_curvature_gradient_calls == stats.fd_curvature_gradient_calls
         @test stats.main_exact_curvature_calls == stats.∇²f_calls
+    end
+
+    @testset "Active-set propagation through wrappers" begin
+        free = BitVector([true, false, true])
+
+        fixed_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(Base.Fix2((x, rec) -> rec, fixed_rec), free)
+        @test fixed_rec.free == free
+        @test fixed_rec.calls == 1
+
+        full_rec = ActiveSetRecorder(3)
+        coord_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(FullGradient(full_rec), free)
+        PDMPSamplers.set_active_set!(CoordinateWiseGradient(coord_rec), free)
+        @test full_rec.free == free
+        @test coord_rec.free == free
+
+        stoch_rec = ActiveSetRecorder(3)
+        full_sub_rec = ActiveSetRecorder(3)
+        sub = SubsampledGradient(stoch_rec, n -> nothing, tr -> nothing, FullGradient(full_sub_rec), 1, 0, false, 0.25)
+        PDMPSamplers.set_active_set!(sub, free)
+        @test stoch_rec.free == free
+        @test full_sub_rec.free == free
+
+        stats = PDMPSamplers.StatisticCounter()
+        wrapped_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(PDMPSamplers.with_stats(wrapped_rec, stats), free)
+        PDMPSamplers.set_active_set!(PDMPSamplers.WithFDCurvatureStats(wrapped_rec, stats), free)
+        @test wrapped_rec.calls == 2
+
+        vhv_rec = ActiveSetRecorder(3)
+        joint_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(PDMPSamplers.WithStatsVHV(vhv_rec, stats), free)
+        PDMPSamplers.set_active_set!(PDMPSamplers.WithStatsJoint(joint_rec, stats), free)
+        @test vhv_rec.free == free
+        @test joint_rec.free == free
+
+        unavailable = PDMPModel(3, FullGradient((out, x) -> copyto!(out, x)))
+        @test !PDMPSamplers._potential_available(unavailable)
     end
 
     @testset "FiniteDiffVHV counts only shifted curvature gradients" begin

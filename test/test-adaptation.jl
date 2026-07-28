@@ -293,6 +293,23 @@
         @test ad_lr.scheme == :lowrank
     end
 
+    @testset "RefreshRateAdapter skips empty evaluation windows" begin
+        flow = AdaptiveBoomerang(2; scheme=:diagonal, λref=0.5)
+        ad = PDMPSamplers.RefreshRateAdapter(1.0, 0.0)
+        state = PDMPState(1.0, SkeletonPoint(zeros(2), ones(2)))
+        stats = PDMPSamplers.StatisticCounter()
+
+        PDMPSamplers.adapt!(Random.default_rng(), ad, state, flow, nothing, nothing; stats)
+
+        @test flow.λref == 0.5
+        @test ad.prev_total_evals == 0
+        @test ad.prev_refresh_events == 0
+        @test ad.prev_pdmp_time == 1.0
+        @test ad.last_update == 1.0
+        @test ad.no_updates_done == 1
+        @test ad.did_update == false
+    end
+
     @testset "BoomerangAdapter construction" begin
         d = 4
         ad = PDMPSamplers.BoomerangAdapter(2.0, 1.0, d; scheme=:fullrank)
