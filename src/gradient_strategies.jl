@@ -59,7 +59,7 @@ SubsampledGradient(f::F1, resample_indices!::F2, update_anchor!::F3, full::FullG
                    nsub::Int, no_anchor_updates::Int, use_full_gradient_for_reflections::Bool,
                    resample_dt::Real) where {F1,F2,F3,F4} =
     SubsampledGradient(f, resample_indices!, update_anchor!, full, nsub, no_anchor_updates,
-                       use_full_gradient_for_reflections, Float64(resample_dt), false)
+                       use_full_gradient_for_reflections, resample_dt, false)
 
 # temporary backwards compatibility constructor for now
 # SubsampledGradient(f::F1, resample_indices!::F2, nsub::Int) where {F1, F2} =

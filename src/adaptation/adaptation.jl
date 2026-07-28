@@ -405,14 +405,6 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     end
 
     dt = t - ws.prev_t
-    if !ispositive(dt)
-        ws.prev_x .= x
-        ws.prev_theta .= theta
-        fill!(ws.prev_free, true)
-        ws.prev_t = t
-        return ws
-    end
-
     mu = flow.μ
     ws.total_time += dt
     _boom_raw_S1!(ws.sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
@@ -441,14 +433,6 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
     end
 
     dt = t - ws.prev_t
-    if !ispositive(dt)
-        ws.prev_x .= x
-        ws.prev_theta .= theta
-        ws.prev_free .= free
-        ws.prev_t = t
-        return ws
-    end
-
     mu = flow.μ
     all_free = all(ws.prev_free)
     all_free || _ensure_free_moments!(ws)
@@ -557,11 +541,6 @@ end
 
 function _stats_cov_inner!(C::AbstractMatrix, sum_x::Vector{Float64}, sum_xy::Matrix{Float64}, T::Float64)
     d = size(C, 1)
-    if !ispositive(T)
-        fill!(C, 0.0)
-        @inbounds for i in 1:d; C[i, i] = 1.0; end
-        return C
-    end
     @inbounds for j in 1:d
         μj = sum_x[j] / T
         for i in j:d

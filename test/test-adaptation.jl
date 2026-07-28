@@ -308,6 +308,10 @@
         d = 3
 
         ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
+        flow = AdaptiveBoomerang(d; scheme=:fullrank)
+        θ0 = zeros(d)
+        PDMPSamplers.welford_update!(ws, ones(d), θ0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, 2 .* ones(d), θ0, 1.0, flow)
         μ = zeros(d)
         C = zeros(d, d)
         for _ in 1:5

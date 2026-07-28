@@ -120,11 +120,11 @@ function Base.show(io::IO, chains::PDMPChains)
     n_events = [length(chains.traces[i]) for i in 1:nc]
     print(io, "PDMPChains with $nc chain$(isone(nc) ? "" : "s") ($(join(n_events, ", ")) events)")
 
-    total_lazy_low_tightness = sum(_get_counter_lazy_fallback_low_tightness(stat) for stat in chains.stats)
-    total_lazy_bound_violation = sum(_get_counter_lazy_fallback_bound_violation(stat) for stat in chains.stats)
-    total_lazy_attempts = sum(_get_counter_lazy_proposal_attempts(stat) for stat in chains.stats)
-    total_lazy_rejections = sum(_get_counter_lazy_proposal_rejections(stat) for stat in chains.stats)
-    total_grid_resets = sum(_get_counter_grid_resets_from_dynamics_adaptation(stat) for stat in chains.stats)
+    total_lazy_low_tightness = sum(_get_counter_lazy_fallback_low_tightness, chains.stats)
+    total_lazy_bound_violation = sum(_get_counter_lazy_fallback_bound_violation, chains.stats)
+    total_lazy_attempts = sum(_get_counter_lazy_proposal_attempts, chains.stats)
+    total_lazy_rejections = sum(_get_counter_lazy_proposal_rejections, chains.stats)
+    total_grid_resets = sum(_get_counter_grid_resets_from_dynamics_adaptation, chains.stats)
 
     if total_lazy_low_tightness > 0 || total_lazy_bound_violation > 0 || total_lazy_attempts > 0 || total_grid_resets > 0
         print(io,

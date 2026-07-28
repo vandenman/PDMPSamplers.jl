@@ -451,8 +451,6 @@ Write the Gaussian slab mean and covariance, in beta-block order, into
 providers may compute state-dependent hyperparameters.
 """
 function gaussian_slab!(provider::DenseGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
-    length(mean_out) == length(provider.mean) || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $(length(provider.mean))"))
-    size(cov_out) == size(provider.cov) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected $(size(provider.cov))"))
     copyto!(mean_out, provider.mean)
     copyto!(cov_out, provider.cov)
     return nothing
@@ -460,8 +458,6 @@ end
 
 function gaussian_slab!(provider::ExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     m = length(provider.beta_indices)
-    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
-    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
     fill!(mean_out, provider.mean)
     fill!(cov_out, provider.v)
     @inbounds for i in 1:m
@@ -472,8 +468,6 @@ end
 
 function gaussian_slab!(provider::ZeroMeanExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     m = length(provider.beta_indices)
-    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
-    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
     fill!(mean_out, 0.0)
     fill!(cov_out, provider.v)
     @inbounds for i in 1:m
@@ -484,8 +478,6 @@ end
 
 function gaussian_slab!(provider::IndependentZeroMeanGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     m = length(provider.beta_indices)
-    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
-    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
     fill!(mean_out, 0.0)
     fill!(cov_out, 0.0)
     @inbounds for j in 1:m
@@ -496,8 +488,6 @@ end
 
 function gaussian_slab!(provider::IndependentZeroMeanLogscaleGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     m = length(provider.beta_indices)
-    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
-    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
     fill!(mean_out, 0.0)
     fill!(cov_out, 0.0)
     @inbounds for j in 1:m
@@ -509,8 +499,6 @@ end
 
 function gaussian_slab!(provider::GlobalLogscaleExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     m = length(provider.beta_indices)
-    length(mean_out) == m || throw(DimensionMismatch("mean_out has length $(length(mean_out)), expected $m"))
-    size(cov_out) == (m, m) || throw(DimensionMismatch("cov_out has size $(size(cov_out)), expected ($m, $m)"))
     scale2 = exp(2 * (provider.logscale_offset + x[provider.logscale_index]))
     fill!(mean_out, provider.mean)
     fill!(cov_out, scale2 * provider.v)

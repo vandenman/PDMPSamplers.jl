@@ -395,8 +395,6 @@ end
         @test gaussian_slab!(exch, exch_mean, exch_cov, x) === nothing
         @test exch_mean == fill(μ, 4)
         @test exch_cov ≈ dense_cov
-        @test_throws DimensionMismatch gaussian_slab!(exch, fill(NaN, 3), exch_cov, x)
-        @test_throws DimensionMismatch gaussian_slab!(exch, exch_mean, fill(NaN, 3, 3), x)
 
         zero_mean = fill(NaN, 4)
         zero_cov = fill(NaN, 4, 4)
