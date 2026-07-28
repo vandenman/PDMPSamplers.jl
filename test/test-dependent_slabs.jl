@@ -4,6 +4,10 @@ function _active_prior_grad_alloc(provider, out, x, active)
     return @allocated active_prior_grad!(provider, out, x, active)
 end
 
+function _conditional_logdensity_zero_alloc(provider, x, active, j)
+    return @allocated conditional_logdensity_zero(provider, x, active, j)
+end
+
 function _linear_gaussian_rate_oracle(provider, odds, flow, state, τ, can_stick)
     indices = beta_indices(provider)
     mean, cov = gaussian_slab(provider, state.ξ.x)
@@ -110,6 +114,8 @@ end
         cond_var = cov[2, 2] - dot(cov_jA, cov_AA \ cov[[1, 3], 2])
         @test conditional_logdensity_zero(provider, x, active, 2) ≈
               logpdf(Normal(cond_mean, sqrt(cond_var)), 0.0)
+        _conditional_logdensity_zero_alloc(provider, x, active, 2)
+        @test _conditional_logdensity_zero_alloc(provider, x, active, 2) == 0
         @test conditional_density_zero(provider, x, active, 2) ≈
               pdf(Normal(cond_mean, sqrt(cond_var)), 0.0)
         @test_throws ArgumentError conditional_logdensity_zero(provider, x, active, 1)

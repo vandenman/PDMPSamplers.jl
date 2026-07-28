@@ -8,6 +8,7 @@ using DataStructures: PriorityQueue, dequeue_pair!, enqueue!
 import PDMats
 import SpecialFunctions
 import LogExpFunctions
+using IrrationalConstants: log2π
 
 import FillArrays
 
