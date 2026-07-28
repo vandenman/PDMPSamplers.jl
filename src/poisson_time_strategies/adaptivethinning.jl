@@ -1,9 +1,19 @@
+"""
+    AdaptiveThinningStrategy
+
+EXPERIMENTAL, intentionally unexported and still in development.
+"""
 struct AdaptiveThinningStrategy{T<:BoundStrategy} <: PoissonTimeStrategy
     acceptance_target::Float64
     c::T
 end
 AdaptiveThinningStrategy(c::BoundStrategy) = AdaptiveThinningStrategy(0.65, c)
 
+"""
+    AdaptiveBounds
+
+EXPERIMENTAL, intentionally unexported and still in development.
+"""
 struct AdaptiveBounds <: BoundStrategy
     c::Vector{Float64}
     adaptation_rate::Float64

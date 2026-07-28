@@ -1,6 +1,8 @@
 """
     RootsPoissonTimeStrategy <: PoissonTimeStrategy
 
+EXPERIMENTAL, intentionally unexported and still in development.
+
 A Poisson time strategy that computes the next event time using root finding.
 Samples R ~ Exp(1) and solves ∫₀^τ λ(x(s), v) ds = R for τ using numerical integration and root finding.
 

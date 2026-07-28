@@ -1,4 +1,8 @@
-# should accept a function with some signature that returns a time t?
+"""
+    ExactStrategy
+
+EXPERIMENTAL, intentionally unexported and still in development.
+"""
 struct ExactStrategy{T} <: PoissonTimeStrategy
     get_next_event_time::T # Function to compute the next event time
 end

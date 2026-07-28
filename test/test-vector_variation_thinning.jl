@@ -9,7 +9,7 @@
 
         model = PDMPModel(1, FullGradient(gaussian_grad!))
         flow = ZigZag(1)
-        alg = VectorVariationThinningStrategy(;
+        alg = PDMPSamplers.VectorVariationThinningStrategy(;
             N=4,
             N_min=1,
             t_max=2.0,
@@ -79,7 +79,7 @@
 
         model = PDMPModel(1, FullGradient(bowed_grad!))
         flow = ZigZag(1)
-        alg = VectorVariationThinningStrategy(;
+        alg = PDMPSamplers.VectorVariationThinningStrategy(;
             N=1,
             N_min=1,
             t_max=1.0,

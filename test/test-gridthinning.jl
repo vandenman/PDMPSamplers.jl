@@ -19,9 +19,7 @@ struct GridTuningNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
     @test hidden_peak_bound == 0.0
     @test sinpi(0.5)^2 > hidden_peak_bound
 
-    strategy = GridThinningStrategy(; bound=:shared_node, curvature_bound=2.0)
-    @test strategy.bound === :shared_node
-    @test strategy.bound_violation === :throw
+    @test_throws ArgumentError GridThinningStrategy(; bound=:shared_node, curvature_bound=2.0)
 end
 
 import DifferentiationInterface as DI

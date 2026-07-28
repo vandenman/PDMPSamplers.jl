@@ -114,7 +114,7 @@ end
     end
 
     @testset "VectorVariationThinningStrategy" begin
-        strategy = VectorVariationThinningStrategy(;
+        strategy = PDMPSamplers.VectorVariationThinningStrategy(;
             N=3, N_min=1, t_max=0.35, validation_rtol=0.0, validation_atol=1e-10,
             fallback=GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
                 lazy=false, bound=:flat, bound_violation=:throw))
@@ -123,7 +123,7 @@ end
     end
 
     @testset "PositiveVariationGridThinningStrategy" begin
-        strategy = PositiveVariationGridThinningStrategy(;
+        strategy = PDMPSamplers.PositiveVariationGridThinningStrategy(;
             N=3, N_min=1, t_max=0.25, validation_rtol=0.0, validation_atol=1e-10,
             fallback=GridThinningStrategy(; N=3, N_min=1, t_max=0.25,
                 lazy=false, bound=:flat, curvature_bound=0.0, bound_violation=:throw))

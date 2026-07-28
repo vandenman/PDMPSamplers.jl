@@ -1,6 +1,8 @@
 """
     PositiveVariationGridThinningStrategy(; kwargs...)
 
+EXPERIMENTAL, intentionally unexported and still in development.
+
 Automatic positive-variation event search for Boomerang dynamics.
 
 This is an experimental GridThinning variant.  The default mode uses the

@@ -14,10 +14,7 @@ step-size/truncation error even when the underlying gradients are exact.
 `curvature_backend=:finite_difference`.
 
 Preferred user-facing bounds are `:constant`, `:flat`, `:linear`, `:auto`,
-and `:value_quadratic`. The explicit experimental `:shared_node` mode uses
-corrected signed rates at consecutive nodes, quadratic interpolation, and
-empirical secant-disagreement inflation. It is a numerical clock, not a
-certified thinning envelope. Passing neither `bound` keyword keeps the historical
+and `:value_quadratic`. Passing neither `bound` keyword keeps the historical
 constant GridThinning behavior used by downstream packages.
 
 For `bound=:value_quadratic`, `curvature_bound` is a certified upper bound on
@@ -187,7 +184,6 @@ function _normalize_grid_bound(bound::Symbol)
     bound === :flat && return :flat
     bound === :linear && return :linear
     bound === :value_quadratic && return :value_quadratic
-    bound === :shared_node && return :shared_node
     bound === :auto && return :auto
     bound === :sticky_auto && return :sticky_auto
     throw(ArgumentError("unknown GridThinning bound $(bound)"))

@@ -1,6 +1,8 @@
 """
     VectorVariationThinningStrategy(; kwargs...)
 
+EXPERIMENTAL, intentionally unexported and still in development.
+
 Experimental ZigZag/PreconditionedZigZag event search that uses the full
 signed channel vector returned by each gradient evaluation.  This first
 implementation uses linear channel interpolation with midpoint refinement and

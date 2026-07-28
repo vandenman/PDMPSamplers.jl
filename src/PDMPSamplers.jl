@@ -238,19 +238,14 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
-    PositiveVariationGridThinningStrategy,
-    VectorVariationThinningStrategy,
     # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
-    RootsPoissonTimeStrategy,
     Sticky,
     AggregateSticky,
-    ExactStrategy,
     # StickyLoopState,
 
     # Bound strategies
     GlobalBounds,
     LocalBounds,
-    AdaptiveBounds,
 
 
     # Main interface
