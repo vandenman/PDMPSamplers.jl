@@ -180,7 +180,10 @@ function set_active_set!(model::PDMPModel, free::BitVector)
     return nothing
 end
 
-_last_gradient_potential(::PDMPModel) = nothing
+_last_gradient_potential(::Any) = nothing
+_last_gradient_potential(model::PDMPModel) = _last_gradient_potential(model.grad)
+_last_gradient_potential(grad::FullGradient) = _last_gradient_potential(grad.f)
+_last_gradient_potential(ws::WithStats) = _last_gradient_potential(ws.f)
 
 _potential_available(::Any) = false
 _potential_available(model::PDMPModel) = _potential_available(model.grad)

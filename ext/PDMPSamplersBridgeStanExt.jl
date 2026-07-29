@@ -116,8 +116,7 @@ Base.copy(g::BridgeStanGradient) = BridgeStanGradient(copy(g.model))
 PDMPSamplers._copy_callable(g::BridgeStanGradient) = copy(g)
 _potential_available(::BridgeStanGradient) = true
 _potential(g::BridgeStanGradient, x::Vector{Float64}) = fast_potential(g.model, x)
-_last_gradient_potential(model::PDMPModel{<:FullGradient{<:BridgeStanGradient}}) =
-    -model.grad.f.model.lp[]
+_last_gradient_potential(g::BridgeStanGradient) = -g.model.lp[]
 
 struct BridgeStanHVP{M<:FastBridgeStanModel,V<:Vector{Float64}} <: Function
     model::M

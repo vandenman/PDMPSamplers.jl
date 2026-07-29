@@ -1100,6 +1100,10 @@ end
         @test defective_internal.aggregate_unstick_time == Inf
         PDMPSamplers.update_all_unfreeze_times!(MersenneTwister(133), defective_internal, defective_state2, ZigZag(2))
         @test defective_internal.aggregate_unstick_time == Inf
+        defective_trace, defective_stats = pdmp_sample(defective_ξ, ZigZag(2), defective_model, defective_alg, 0.0, 1.0; progress=false)
+        @test isfinite(last_event_time(defective_trace))
+        @test length(defective_trace) == 1
+        @test defective_stats.stop_reason == :reached_time
 
         boomerang = Boomerang(Diagonal([4.0, 1.0]), zeros(d), 0.0)
         _, _, boomerang_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(126), boomerang, model, alg, 0.0, ξ)
@@ -1208,14 +1212,28 @@ end
         @test isfinite(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(134), dense_bps_state, dense_bps, 1))
 
         precond_boomerang = PreconditionedDynamics(DiagonalPreconditioner([2.0, 0.5]), boomerang)
+        precond_boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]), zeros(d))
         @test PDMPSamplers.unstick_rate_constant(precond_boomerang, 1) ≈ sqrt(2 / π)
+        μ_precond_boomerang, σ_precond_boomerang = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(precond_boomerang, precond_boomerang_state, 1)
+        @test μ_precond_boomerang ≈ 0.0
+        @test σ_precond_boomerang^2 ≈ 1.0
         identity_boomerang = PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), boomerang)
         identity_params = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(identity_boomerang, inactive_state, 1)
         boomerang_params = PDMPSamplers._boomerang_boundary_velocity_params(boomerang, inactive_state, 1)
         @test identity_params[1] ≈ boomerang_params[1]
         @test identity_params[2] ≈ boomerang_params[2]
-        precond_boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]), zeros(d))
         @test isfinite(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(135), precond_boomerang_state, precond_boomerang, 1))
+
+        dense_preconditioner = PDMPSamplers.DensePreconditioner(d)
+        dense_preconditioner.L .= [1.1 0.0; 0.4 0.7]
+        dense_preconditioner.Linv .= inv(LowerTriangular(dense_preconditioner.L))
+        dense_preconditioned_boomerang = PreconditionedDynamics(dense_preconditioner, dense_boomerang)
+        Σ_preconditioned_boomerang = dense_preconditioner.L * Σ_dense * dense_preconditioner.L'
+        dense_preconditioned_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]), zeros(d))
+        μ_dense_preconditioned, σ_dense_preconditioned = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(dense_preconditioned_boomerang, dense_preconditioned_state, 1)
+        @test μ_dense_preconditioned ≈ Σ_preconditioned_boomerang[1, 2] / Σ_preconditioned_boomerang[2, 2] * dense_preconditioned_state.ξ.θ[2]
+        @test σ_dense_preconditioned^2 ≈ Σ_preconditioned_boomerang[1, 1] - Σ_preconditioned_boomerang[1, 2]^2 / Σ_preconditioned_boomerang[2, 2]
+        @test PDMPSamplers.unstick_rate_constant(dense_preconditioned_boomerang, 1) ≈ sqrt(2 / π) * sqrt(Σ_preconditioned_boomerang[1, 1])
 
         dense_zz = DensePreconditionedZigZag(d)
         non_grid_alg = AggregateSticky(ThinningStrategy(GlobalBounds(1.0, d)), clock, trues(d))

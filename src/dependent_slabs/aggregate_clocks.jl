@@ -571,6 +571,32 @@ function aggregate_lograte(
     return Float64(log_Cv) + lse
 end
 
+function _sample_from_logweights(rng::Random.AbstractRNG, indices::AbstractVector{Int}, logweights::AbstractVector{Float64})
+    maxv = maximum(logweights)
+    maxv == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
+    if maxv == Inf
+        candidates = Int[]
+        @inbounds for j in eachindex(indices)
+            logweights[j] == Inf && push!(candidates, indices[j])
+        end
+        return rand(rng, candidates)
+    end
+    total = 0.0
+    @inbounds for j in eachindex(indices)
+        total += isfinite(logweights[j]) ? exp(logweights[j] - maxv) : 0.0
+    end
+    draw = rand(rng) * total
+    last_candidate = 0
+    @inbounds for j in eachindex(indices)
+        if isfinite(logweights[j])
+            last_candidate = j
+            draw -= exp(logweights[j] - maxv)
+            draw <= 0 && return indices[j]
+        end
+    end
+    return indices[last_candidate]
+end
+
 """
     sample_unstick_label(rng, provider, model_prior, x, active_beta, stickable_beta)
 
@@ -587,19 +613,7 @@ function sample_unstick_label(
 )
     weights = Vector{Float64}(undef, length(beta_indices(provider)))
     boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
-    maxv = maximum(weights)
-    maxv == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
-    if maxv == Inf
-        candidates = Int[]
-        indices = beta_indices(provider)
-        @inbounds for j in eachindex(weights)
-            weights[j] == Inf && push!(candidates, indices[j])
-        end
-        return rand(rng, candidates)
-    end
-    probs = exp.(weights .- maxv)
-    j_beta = sample(rng, eachindex(probs), Weights(probs))
-    return beta_indices(provider)[j_beta]
+    return _sample_from_logweights(rng, beta_indices(provider), weights)
 end
 
 function sample_unstick_label(

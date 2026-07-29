@@ -50,6 +50,13 @@ _next_event_time_for_step(
     ::BoundaryHandling,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats, Inf, true, :horizon_hit, true)
 
+function _cap_event_time_for_step(τ::Real, event_type::Symbol, meta, max_horizon::Real)
+    if isfinite(max_horizon) && τ > max_horizon
+        return Float64(max_horizon), :horizon_hit, EmptyMeta()
+    end
+    return τ, event_type, meta
+end
+
 # The default hot path deliberately has no support-boundary try/catch or option
 # plumbing; boundary recovery is handled by the typed BoundaryHandling method.
 function _step!(
@@ -62,9 +69,11 @@ function _step!(
     stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ::NoBoundaryHandling,
-    phase::Symbol
+    phase::Symbol,
+    max_horizon::Real=Inf,
 ) where {FL<:ContinuousDynamics}
     τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling())
+    τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
     @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
     needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats, phase)
@@ -83,11 +92,13 @@ function _step!(
     stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     boundary_policy::BoundaryHandling,
-    phase::Symbol
+    phase::Symbol,
+    max_horizon::Real=Inf,
 ) where {FL<:ContinuousDynamics}
     support_boundary_options = boundary_policy.opts
     try
         τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy)
+        τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
 
         @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 

@@ -17,6 +17,12 @@ function (r::ActiveSetRecorder)(out, x)
 end
 PDMPSamplers.set_active_set!(r::ActiveSetRecorder, free::BitVector) = (r.free .= free; r.calls += 1; nothing)
 
+struct LastGradientPotentialProbe <: Function
+    value::Float64
+end
+(probe::LastGradientPotentialProbe)(out, x) = copyto!(out, x)
+PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe.value
+
 @testset "Miscellaneous" begin
 
     @testset "HVP sign for FullGradient path" begin
@@ -275,6 +281,13 @@ PDMPSamplers.set_active_set!(r::ActiveSetRecorder, free::BitVector) = (r.free .=
 
         unavailable = PDMPModel(3, FullGradient((out, x) -> copyto!(out, x)))
         @test !PDMPSamplers._potential_available(unavailable)
+    end
+
+    @testset "last gradient potential unwraps stats wrappers" begin
+        model = PDMPModel(2, FullGradient(LastGradientPotentialProbe(3.25)))
+        stats_model = PDMPSamplers.with_stats(model, PDMPSamplers.StatisticCounter())
+        @test PDMPSamplers._last_gradient_potential(model) == 3.25
+        @test PDMPSamplers._last_gradient_potential(stats_model) == 3.25
     end
 
     @testset "FiniteDiffVHV counts only shifted curvature gradients" begin

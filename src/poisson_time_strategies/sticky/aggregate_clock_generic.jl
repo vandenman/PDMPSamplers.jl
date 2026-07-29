@@ -11,32 +11,6 @@ end
 
 _positive_logweight(logw::Real) = logw > -Inf
 
-function _sample_from_logweights(rng::Random.AbstractRNG, indices::AbstractVector{Int}, logweights::AbstractVector{Float64})
-    maxv = maximum(logweights)
-    maxv == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
-    if maxv == Inf
-        candidates = Int[]
-        @inbounds for j in eachindex(indices)
-            logweights[j] == Inf && push!(candidates, indices[j])
-        end
-        return rand(rng, candidates)
-    end
-    total = 0.0
-    @inbounds for j in eachindex(indices)
-        total += isfinite(logweights[j]) ? exp(logweights[j] - maxv) : 0.0
-    end
-    draw = rand(rng) * total
-    last_candidate = 0
-    @inbounds for j in eachindex(indices)
-        if isfinite(logweights[j])
-            last_candidate = j
-            draw -= exp(logweights[j] - maxv)
-            draw <= 0 && return indices[j]
-        end
-    end
-    return indices[last_candidate]
-end
-
 function _has_inactive_stickable_beta(clock::AbstractAggregateUnstickClock, state::StickyPDMPState, can_stick::BitVector)
     for i in beta_indices(clock.slab_provider)
         if can_stick[i] && !state.free[i]

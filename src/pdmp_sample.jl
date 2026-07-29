@@ -347,7 +347,7 @@ function _run_phase!(
             return nothing
         end
 
-        event_type = _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager, boundary_policy, phase)
+        event_type = _step!(rng, state, model_, flow, alg_, cache, stats, trace_manager, boundary_policy, phase, _step_horizon(criterion, state))
         update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, model_.grad, trace_manager; phase, stats)
@@ -504,6 +504,10 @@ _phase_criterion(c::FixedTimeCriterion, ::Real) = _CommonPhaseCriterion(; T=c.T)
 _phase_criterion(c::EventCountCriterion, ::Real) =
     _CommonPhaseCriterion(; max_events=c.max_events, event_source=c)
 _phase_criterion(c::StoppingCriterion, ::Real) = c
+
+_step_horizon(::StoppingCriterion, state) = Inf
+_step_horizon(c::FixedTimeCriterion, state) = max(0.0, c.T - state.t[])
+_step_horizon(c::_CommonPhaseCriterion, state) = c.check_time ? max(0.0, c.T - state.t[]) : Inf
 
 function _pdmp_sample_single(
     rng::Random.AbstractRNG,

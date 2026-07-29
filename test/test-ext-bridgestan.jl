@@ -148,6 +148,7 @@ else
 
                 stats = PDMPSamplers.StatisticCounter()
                 counted_model = PDMPSamplers.with_stats(model_potential, stats)
+                @test PDMPSamplers._last_gradient_potential(counted_model) ≈ gradient_potential
                 @test PDMPSamplers._potential(counted_model, x_test) ≈ gradient_potential
                 @test stats.potential_calls == 1
                 @test stats.∇f_calls == 0

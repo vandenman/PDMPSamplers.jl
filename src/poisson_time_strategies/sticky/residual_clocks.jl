@@ -322,15 +322,18 @@ function _build_scalar_residual_envelope(clock::ChebyshevResidualAggregateClock,
     return _ChebyshevResidualEnvelope(seg, coeffs, power, heap, edges, prefix, max(0.0, Hbar_T))
 end
 
-function _residual_cell_index(env::_ChebyshevResidualEnvelope, t::Real)
+_residual_horizon(env::_ChebyshevResidualEnvelope) = env.segment.horizon
+_residual_horizon(env::_FourierResidualEnvelope) = env.horizon
+
+function _residual_cell_index(env, t::Real)
     tf = Float64(t)
     tf <= 0 && return 1
-    tf >= env.segment.horizon && return length(env.cells)
+    tf >= _residual_horizon(env) && return length(env.cells)
     return clamp(searchsortedlast(env.edges, tf), 1, length(env.cells))
 end
 
-function _residual_primitive(env::_ChebyshevResidualEnvelope, t::Real)
-    tf = clamp(Float64(t), 0.0, env.segment.horizon)
+function _residual_primitive(env, t::Real)
+    tf = clamp(Float64(t), 0.0, _residual_horizon(env))
     idx = _residual_cell_index(env, tf)
     return env.residual_prefix[idx] + env.cells[idx].R * (tf - env.cells[idx].lo)
 end
@@ -618,25 +621,12 @@ function _fourier_primitive(env::_FourierResidualEnvelope, t::Real)
     return total
 end
 
-function _fourier_residual_cell_index(env::_FourierResidualEnvelope, t::Real)
-    tf = Float64(t)
-    tf <= 0 && return 1
-    tf >= env.horizon && return length(env.cells)
-    return clamp(searchsortedlast(env.edges, tf), 1, length(env.cells))
-end
-
-function _fourier_residual_primitive(env::_FourierResidualEnvelope, t::Real)
-    tf = clamp(Float64(t), 0.0, env.horizon)
-    idx = _fourier_residual_cell_index(env, tf)
-    return env.residual_prefix[idx] + env.cells[idx].R * (tf - env.cells[idx].lo)
-end
-
 function _fourier_envelope_hazard(env::_FourierResidualEnvelope, t::Real)
-    return _fourier_primitive(env, t) + _fourier_residual_primitive(env, t)
+    return _fourier_primitive(env, t) + _residual_primitive(env, t)
 end
 
 function _fourier_envelope_rate(env::_FourierResidualEnvelope, t::Real)
-    idx = _fourier_residual_cell_index(env, t)
+    idx = _residual_cell_index(env, t)
     return _fourier_eval(env.a0, env.a, env.b, t, env.horizon) + env.cells[idx].R
 end
 
