@@ -1,20 +1,21 @@
 """
-    AbstractModelPriorOdds
+    AbstractModelPrior
 
-Interface for model-prior odds used by dependent slab clocks. Subtypes implement
-`log_model_add_odds(prior, active, j)`, the log prior odds for adding inactive
-beta coordinate `j` to the active model encoded by `active`.
+Interface for model priors used by dependent slab clocks. Subtypes implement
+`log_model_add_odds(prior, active, j)`, the log prior odds implied by the model
+prior when adding inactive beta coordinate `j` to the active model encoded by
+`active`.
 """
-abstract type AbstractModelPriorOdds end
+abstract type AbstractModelPrior end
 
 """
-    AbstractSlabBoundary
+    AbstractSlabPrior
 
 Interface for active-face slab boundary providers. A boundary provider supplies
 the beta coordinate map, active-face negative gradients, and boundary densities
 at zero for inactive coordinates.
 """
-abstract type AbstractSlabBoundary end
+abstract type AbstractSlabPrior end
 
 """
     AbstractUnstickClock
@@ -46,19 +47,12 @@ linear-flow segment; state-dependent callback providers should use `NoSlabCache`
 abstract type AbstractSlabCacheStyle end
 
 """
-    AbstractCertifiedResidualCapability
-    NoCertifiedResidualCapability
+    ScalarLogscaleGaussianLineSegment
 
-Trait objects for providers that can support certified residual proposal
-envelopes. `NoCertifiedResidualCapability` means the provider has not supplied
-enough structure or validated bounds for a Chebyshev/Fourier residual clock.
+Trajectory parameters used by the structured scalar residual clock for
+globally scaled exchangeable Gaussian slabs under linear flows.
 """
-abstract type AbstractCertifiedResidualCapability end
-
-struct NoCertifiedResidualCapability <: AbstractCertifiedResidualCapability end
-struct FloatingPointScalarResidualCapability <: AbstractCertifiedResidualCapability end
-
-struct ScalarLogscaleGaussianLineSegment <: AbstractCertifiedResidualCapability
+struct ScalarLogscaleGaussianLineSegment
     a::Float64
     b::Float64
     s0::Float64

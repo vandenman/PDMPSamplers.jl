@@ -6,7 +6,7 @@ Gaussian slab providers define a beta-block Gaussian slab through
 `gaussian_slab!`. Exchangeable subtypes use the covariance form
 `u * I + v * ones(p, p)`.
 """
-abstract type AbstractGaussianSlabProvider <: AbstractSlabBoundary end
+abstract type AbstractGaussianSlabProvider <: AbstractSlabPrior end
 
 """
     AbstractExchangeableGaussianSlab
@@ -160,7 +160,7 @@ end
 
 Exchangeable Gaussian slab with covariance
 `exp(2 * (logscale_offset + x[logscale_index])) * (u0 I + v0 11')`.
-This provider is structured for future scalar residual certificates.
+This provider has structured scalar residual-clock support for linear flows.
 """
 struct GlobalLogscaleExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
     beta_indices::Vector{Int}
@@ -216,7 +216,7 @@ Return a cache trait for `provider`. Fixed Gaussian providers return
 `FixedCovarianceCache`; state-dependent and arbitrary callback boundaries return
 `NoSlabCache` by default.
 """
-slab_cache_style(::AbstractSlabBoundary) = NoSlabCache()
+slab_cache_style(::AbstractSlabPrior) = NoSlabCache()
 
 """
     slab_cache_key(provider, x, active_beta)
@@ -224,7 +224,7 @@ slab_cache_style(::AbstractSlabBoundary) = NoSlabCache()
 Return a cache key for active-face quantities, or `nothing` when the provider
 does not support active-set-only caching.
 """
-slab_cache_key(::AbstractSlabBoundary, ::AbstractVector, ::BitVector) = nothing
+slab_cache_key(::AbstractSlabPrior, ::AbstractVector, ::BitVector) = nothing
 slab_cache_style(::DenseGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::AbstractExchangeableGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::IndependentZeroMeanGaussianSlab) = FixedCovarianceCache()
@@ -235,17 +235,6 @@ slab_cache_key(::AbstractExchangeableGaussianSlab, ::AbstractVector, active_beta
 slab_cache_key(::IndependentZeroMeanGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
 slab_cache_key(::IndependentZeroMeanLogscaleGaussianSlab, ::AbstractVector, ::BitVector) = nothing
 slab_cache_key(::GlobalLogscaleExchangeableGaussianSlab, ::AbstractVector, ::BitVector) = nothing
-
-"""
-    certified_residual_capability(provider, flow)
-
-Return a provider/flow-specific capability object for certified residual
-proposal envelopes, or `NoCertifiedResidualCapability()` when the provider is
-opaque or unsupported. A real capability must include the validated structural
-information needed to prove envelope domination over a trajectory segment; point
-evaluations from callbacks are not sufficient.
-"""
-certified_residual_capability(::AbstractSlabBoundary, ::Any) = NoCertifiedResidualCapability()
 
 """
     scalar_logscale_gaussian_line_segment(provider, model_prior, flow, state, can_stick, horizon)
@@ -342,7 +331,7 @@ active_beta)` writes the negative-gradient contribution for the active slab
 prior. `log_q_zero!(x, active_beta, j)` returns the log boundary density for
 adding inactive beta coordinate `j`.
 """
-struct ArbitrarySlabBoundary{I<:AbstractVector{Int},G,Q} <: AbstractSlabBoundary
+struct ArbitrarySlabBoundary{I<:AbstractVector{Int},G,Q} <: AbstractSlabPrior
     beta_indices::I
     active_prior_neggrad!::G
     log_q_zero!::Q

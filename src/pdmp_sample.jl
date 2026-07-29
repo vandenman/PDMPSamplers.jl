@@ -381,7 +381,7 @@ function _handle_dynamics_adaptation!(
     _reset_inner_grid!(alg_)
     _inc_counter_grid_resets_from_dynamics_adaptation(stats)
 
-    alg_ isa StickyLoopState && update_all_stick_times!(rng, alg_, state, flow)
+    alg_ isa Union{StickyLoopState,AggregateStickyLoopState} && update_all_stick_times!(rng, alg_, state, flow)
 
     return nothing
 end
