@@ -25,6 +25,16 @@ stickable beta coordinates by calling the provider's boundary densities and the
 model prior. This is the flexible arbitrary-prior baseline; it may allocate
 and uses numerical quadrature/root finding for inhomogeneous clocks.
 """
+mutable struct SummedRateClockCache
+    active_beta::BitVector
+    stickable_beta::BitVector
+    log_weights::Vector{Float64}
+end
+
+function SummedRateClockCache(m::Integer)
+    return SummedRateClockCache(BitVector(undef, m), BitVector(undef, m), Vector{Float64}(undef, m))
+end
+
 struct SummedRateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,T<:Real} <: AbstractAggregateUnstickClock
     slab_provider::P
     model_prior::O
@@ -32,6 +42,7 @@ struct SummedRateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,T<:Real} <: Ab
     atol::T
     initial_bracket::T
     bracket_multiplier::T
+    cache::SummedRateClockCache
 end
 
 """
@@ -156,12 +167,13 @@ Optimized aggregate unstick clock for fixed-covariance Gaussian slabs under
 linear flows. The provider must have `FixedCovarianceCache`; state-dependent
 Gaussian callbacks should use `SummedRateClock`.
 """
-struct LinearGaussianAggregateClock{P<:AbstractGaussianSlabProvider,O<:AbstractModelPrior,T<:Real} <: AbstractAggregateUnstickClock
+struct LinearGaussianAggregateClock{P<:AbstractGaussianSlabProvider,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
     slab_provider::P
     model_prior::O
     rtol::T
     atol::T
     cache::LinearGaussianAggregateCache
+    fallback::S
 end
 
 mutable struct ExponentialSumAggregateCache
@@ -184,12 +196,13 @@ Exact aggregate clock for independent zero-mean Gaussian slabs whose log
 standard deviations are affine along linear-flow trajectories. The aggregate
 rate has the form `sum_j c_j * exp(-r_j * t)`.
 """
-struct ExponentialSumAggregateClock{P<:IndependentZeroMeanLogscaleGaussianSlab,O<:AbstractModelPrior,T<:Real} <: AbstractAggregateUnstickClock
+struct ExponentialSumAggregateClock{P<:IndependentZeroMeanLogscaleGaussianSlab,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
     slab_provider::P
     model_prior::O
     rtol::T
     atol::T
     cache::ExponentialSumAggregateCache
+    fallback::S
 end
 
 function _check_model_prior_length(model_prior::AbstractModelPrior, slab_provider::AbstractSlabPrior)
@@ -210,7 +223,8 @@ function LinearGaussianAggregateClock(
     slab_cache_style(slab_provider) isa FixedCovarianceCache ||
         throw(ArgumentError("LinearGaussianAggregateClock requires a fixed-covariance slab provider; use SummedRateClock for state-dependent Gaussian callbacks"))
     _check_model_prior_length(model_prior, slab_provider)
-    return LinearGaussianAggregateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), LinearGaussianAggregateCache(length(beta_indices(slab_provider))))
+    fallback = SummedRateClock(slab_provider, model_prior; rtol, atol)
+    return LinearGaussianAggregateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), LinearGaussianAggregateCache(length(beta_indices(slab_provider))), fallback)
 end
 
 function ExponentialSumAggregateClock(
@@ -222,7 +236,8 @@ function ExponentialSumAggregateClock(
     rtol > 0 || throw(ArgumentError("rtol must be positive"))
     atol >= 0 || throw(ArgumentError("atol must be non-negative"))
     _check_model_prior_length(model_prior, slab_provider)
-    return ExponentialSumAggregateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), ExponentialSumAggregateCache(length(beta_indices(slab_provider))))
+    fallback = SummedRateClock(slab_provider, model_prior; rtol, atol)
+    return ExponentialSumAggregateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), ExponentialSumAggregateCache(length(beta_indices(slab_provider))), fallback)
 end
 
 Base.copy(clock::LinearGaussianAggregateClock) = LinearGaussianAggregateClock(
@@ -261,7 +276,7 @@ function SummedRateClock(
     initial_bracket > 0 || throw(ArgumentError("initial_bracket must be positive"))
     bracket_multiplier > 1 || throw(ArgumentError("bracket_multiplier must be greater than 1"))
     _check_model_prior_length(model_prior, slab_provider)
-    return SummedRateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), Float64(initial_bracket), Float64(bracket_multiplier))
+    return SummedRateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), Float64(initial_bracket), Float64(bracket_multiplier), SummedRateClockCache(length(beta_indices(slab_provider))))
 end
 
 Base.copy(clock::SummedRateClock) = SummedRateClock(
@@ -361,8 +376,12 @@ function thinning_diagnostics(clock::Union{ChebyshevResidualAggregateClock,Fouri
 end
 
 function _active_beta_from_free(provider::AbstractSlabPrior, free::BitVector)
+    active_beta = BitVector(undef, length(beta_indices(provider)))
+    return _active_beta_from_free!(active_beta, provider, free)
+end
+
+function _active_beta_from_free!(active_beta::BitVector, provider::AbstractSlabPrior, free::BitVector)
     indices = beta_indices(provider)
-    active_beta = BitVector(undef, length(indices))
     @inbounds for k in eachindex(indices)
         active_beta[k] = free[indices[k]]
     end
@@ -370,8 +389,12 @@ function _active_beta_from_free(provider::AbstractSlabPrior, free::BitVector)
 end
 
 function _stickable_beta_from_can_stick(provider::AbstractSlabPrior, can_stick::BitVector)
+    stickable_beta = BitVector(undef, length(beta_indices(provider)))
+    return _stickable_beta_from_can_stick!(stickable_beta, provider, can_stick)
+end
+
+function _stickable_beta_from_can_stick!(stickable_beta::BitVector, provider::AbstractSlabPrior, can_stick::BitVector)
     indices = beta_indices(provider)
-    stickable_beta = BitVector(undef, length(indices))
     @inbounds for k in eachindex(indices)
         stickable_beta[k] = can_stick[indices[k]]
     end
@@ -565,6 +588,18 @@ function aggregate_lograte(
     stickable_beta::BitVector,
 )
     weights = Vector{Float64}(undef, length(beta_indices(provider)))
+    return aggregate_lograte!(weights, provider, model_prior, log_Cv, x, active_beta, stickable_beta)
+end
+
+function aggregate_lograte!(
+    weights::AbstractVector{Float64},
+    provider::AbstractSlabPrior,
+    model_prior::AbstractModelPrior,
+    log_Cv::Real,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
     boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
     lse = LogExpFunctions.logsumexp(weights)
     lse == -Inf && return -Inf
@@ -575,11 +610,15 @@ function _sample_from_logweights(rng::Random.AbstractRNG, indices::AbstractVecto
     maxv = maximum(logweights)
     maxv == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
     if maxv == Inf
-        candidates = Int[]
+        count = 0
+        choice = 0
         @inbounds for j in eachindex(indices)
-            logweights[j] == Inf && push!(candidates, indices[j])
+            if logweights[j] == Inf
+                count += 1
+                rand(rng, 1:count) == 1 && (choice = indices[j])
+            end
         end
-        return rand(rng, candidates)
+        return choice
     end
     total = 0.0
     @inbounds for j in eachindex(indices)

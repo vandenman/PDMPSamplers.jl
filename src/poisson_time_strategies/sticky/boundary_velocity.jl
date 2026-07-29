@@ -68,15 +68,22 @@ function _rand_abs_tilted_normal(rng::Random.AbstractRNG, μ::Real, σ::Real)
 end
 
 function _conditional_boundary_velocity_params(cov_entry, state::StickyPDMPState, i::Integer, context::AbstractString)
-    active = findall(j -> state.free[j] && j != i, eachindex(state.free))
     σ2 = cov_entry(i, i)
     ispositive(σ2) || throw(ArgumentError("$context boundary velocity variance must be positive, got $σ2"))
-    isempty(active) && return 0.0, sqrt(σ2)
+    scratch = _ensure_boundary_scratch!(state.boundary_scratch, length(state.free))
+    active = scratch.active
+    k = 0
+    @inbounds for j in eachindex(state.free)
+        if state.free[j] && j != i
+            k += 1
+            active[k] = j
+        end
+    end
+    iszero(k) && return 0.0, sqrt(σ2)
 
-    k = length(active)
-    ΣAA = Matrix{Float64}(undef, k, k)
-    ΣiA = Vector{Float64}(undef, k)
-    θA = Vector{Float64}(undef, k)
+    ΣAA = scratch.ΣAA
+    ΣiA = scratch.ΣiA
+    θA = scratch.θA
     @inbounds for a in 1:k
         ia = active[a]
         ΣiA[a] = cov_entry(i, ia)
@@ -85,11 +92,16 @@ function _conditional_boundary_velocity_params(cov_entry, state::StickyPDMPState
             ΣAA[a, b] = cov_entry(ia, active[b])
         end
     end
-    F = cholesky(Symmetric(ΣAA); check=true)
-    solved_θ = F \ θA
-    solved_cross = F \ ΣiA
-    μ = dot(ΣiA, solved_θ)
-    σ2_cond = σ2 - dot(ΣiA, solved_cross)
+    F = cholesky!(Symmetric(view(ΣAA, 1:k, 1:k)); check=true)
+    solved_θ = view(scratch.solved_θ, 1:k)
+    solved_cross = view(scratch.solved_cross, 1:k)
+    copyto!(solved_θ, view(θA, 1:k))
+    copyto!(solved_cross, view(ΣiA, 1:k))
+    ldiv!(F, solved_θ)
+    ldiv!(F, solved_cross)
+    ΣiA_view = view(ΣiA, 1:k)
+    μ = dot(ΣiA_view, solved_θ)
+    σ2_cond = σ2 - dot(ΣiA_view, solved_cross)
     ispositive(σ2_cond) || throw(ArgumentError("$context conditional boundary velocity variance must be positive, got $σ2_cond"))
     return μ, sqrt(σ2_cond)
 end

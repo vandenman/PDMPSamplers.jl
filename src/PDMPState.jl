@@ -28,14 +28,42 @@ struct PDMPState{T<:SkeletonPoint, U<:Real} <: AbstractPDMPState
 end
 PDMPState(t::Real, ξ::SkeletonPoint) = PDMPState(Ref(float(t)), ξ)
 
+mutable struct BoundaryVelocityScratch
+    active::Vector{Int}
+    ΣAA::Matrix{Float64}
+    ΣiA::Vector{Float64}
+    θA::Vector{Float64}
+    solved_θ::Vector{Float64}
+    solved_cross::Vector{Float64}
+end
+
+function BoundaryVelocityScratch(d::Integer)
+    return BoundaryVelocityScratch(Vector{Int}(undef, d), Matrix{Float64}(undef, d, d), Vector{Float64}(undef, d), Vector{Float64}(undef, d), Vector{Float64}(undef, d), Vector{Float64}(undef, d))
+end
+BoundaryVelocityScratch() = BoundaryVelocityScratch(0)
+
+function _ensure_boundary_scratch!(s::BoundaryVelocityScratch, d::Integer)
+    length(s.active) >= d && return s
+    resize!(s.active, d)
+    s.ΣAA = Matrix{Float64}(undef, d, d)
+    resize!(s.ΣiA, d)
+    resize!(s.θA, d)
+    resize!(s.solved_θ, d)
+    resize!(s.solved_cross, d)
+    return s
+end
+
 struct StickyPDMPState{T<:SkeletonPoint, U<:Real} <: AbstractPDMPState
     t::Base.RefValue{U}
     ξ::T
     free::BitVector
     old_velocity::Vector{Float64} # Old velocity at the time of freezing
+    boundary_scratch::BoundaryVelocityScratch
 end
 StickyPDMPState(t::Real, args...) = StickyPDMPState(Ref(float(t)), args...)
 StickyPDMPState(t::Base.RefValue{<:Real}, ξ::SkeletonPoint) = StickyPDMPState(t, ξ, .!(iszero.(ξ.x) .&& iszero.(ξ.θ)), similar(ξ.θ))
+StickyPDMPState(t::Base.RefValue{<:Real}, ξ::SkeletonPoint, free::BitVector, old_velocity::Vector{Float64}) =
+    StickyPDMPState(t, ξ, free, old_velocity, BoundaryVelocityScratch())
 
 substate(state::StickyPDMPState) = PDMPState(state.t, SkeletonPoint(view(state.ξ.x, state.free), view(state.ξ.θ, state.free)))
 
@@ -43,7 +71,7 @@ substate(state::StickyPDMPState) = PDMPState(state.t, SkeletonPoint(view(state.�
 subflow(flow::ContinuousDynamics, ::BitVector) = flow
 
 Base.copy(state::PDMPState) = PDMPState(Ref(state.t[]), copy(state.ξ))
-Base.copy(state::StickyPDMPState) = StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free), copy(state.old_velocity))
+Base.copy(state::StickyPDMPState) = StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free), copy(state.old_velocity), state.boundary_scratch)
 
 function Base.copyto!(dest::PDMPState, src::PDMPState)
     dest.t[] = src.t[]

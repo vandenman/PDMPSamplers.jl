@@ -6,7 +6,8 @@ end
 
 function _clock_active_and_stickable(clock::SummedRateClock, state::StickyPDMPState, can_stick::BitVector)
     provider = clock.slab_provider
-    return _active_beta_from_free(provider, state.free), _stickable_beta_from_can_stick(provider, can_stick)
+    cache = clock.cache
+    return _active_beta_from_free!(cache.active_beta, provider, state.free), _stickable_beta_from_can_stick!(cache.stickable_beta, provider, can_stick)
 end
 
 _positive_logweight(logw::Real) = logw > -Inf
@@ -44,15 +45,15 @@ over inactive stickable beta coordinates.
 function rate(clock::SummedRateClock, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     τ < 0 && throw(ArgumentError("τ must be non-negative"))
     state_at = iszero(τ) ? state : _clock_state_at(state, flow, τ)
+    cache = clock.cache
     if !_uses_coordinate_velocity_constants(flow)
         active_beta, stickable_beta = _clock_active_and_stickable(clock, state_at, can_stick)
-        lograte = aggregate_lograte(clock.slab_provider, clock.model_prior, log(unstick_rate_constant(flow, 1)), state_at.ξ.x, active_beta, stickable_beta)
+        lograte = aggregate_lograte!(cache.log_weights, clock.slab_provider, clock.model_prior, log(unstick_rate_constant(flow, 1)), state_at.ξ.x, active_beta, stickable_beta)
         lograte == -Inf && return 0.0
         lograte == Inf && return Inf
         return exp(lograte)
     end
-    weights = Vector{Float64}(undef, length(beta_indices(clock.slab_provider)))
-    lograte = LogExpFunctions.logsumexp(_boundary_logweights_with_velocity!(weights, clock, flow, state_at, can_stick))
+    lograte = LogExpFunctions.logsumexp(_boundary_logweights_with_velocity!(cache.log_weights, clock, flow, state_at, can_stick))
     lograte == -Inf && return 0.0
     lograte == Inf && return Inf
     return exp(lograte)
@@ -111,17 +112,18 @@ Sample the coordinate label for an aggregate unstick event, either at `state` or
 at elapsed time `τ` from `state`.
 """
 function sample_label(rng::Random.AbstractRNG, clock::SummedRateClock, flow::ContinuousDynamics, state::StickyPDMPState, can_stick::BitVector)
+    cache = clock.cache
     if !_uses_coordinate_velocity_constants(flow)
         active_beta, stickable_beta = _clock_active_and_stickable(clock, state, can_stick)
-        return sample_unstick_label(rng, clock.slab_provider, clock.model_prior, state.ξ.x, active_beta, stickable_beta)
+        boundary_logweights!(cache.log_weights, clock.slab_provider, clock.model_prior, state.ξ.x, active_beta, stickable_beta)
+        return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
     end
-    weights = Vector{Float64}(undef, length(beta_indices(clock.slab_provider)))
-    _boundary_logweights_with_velocity!(weights, clock, flow, state, can_stick)
-    return _sample_from_logweights(rng, beta_indices(clock.slab_provider), weights)
+    _boundary_logweights_with_velocity!(cache.log_weights, clock, flow, state, can_stick)
+    return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
 end
 
 _fallback_clock(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}) = clock.fallback
-_summed_fallback_clock(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}) = SummedRateClock(clock.slab_provider, clock.model_prior; rtol=clock.rtol, atol=clock.atol)
+_summed_fallback_clock(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}) = clock.fallback
 
 rate(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
     rate(_fallback_clock(clock), flow, state, τ, can_stick)
