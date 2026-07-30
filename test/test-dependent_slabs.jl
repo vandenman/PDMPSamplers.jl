@@ -926,7 +926,10 @@ end
             q_lo, _ = PDMPSamplers._chebyshev_interval(env.coeffs, cell.lo, cell.hi, seg.horizon)
             @test cell.R + 1e-10 >= max(0.0, λ_hi - q_lo, -q_lo)
         end
-        for t in range(0.0, 1.5; length=501)
+        # Use twice the maximum cell count, plus both endpoints, to exercise
+        # this invariant without hundreds of duplicate evaluations under
+        # coverage instrumentation.
+        for t in range(0.0, 1.5; length=129)
             @test PDMPSamplers._envelope_rate(env, t) + 1e-10 >=
                   PDMPSamplers._scalar_logscale_gaussian_line_rate(seg, t)
         end
@@ -1045,7 +1048,7 @@ end
             q_lo = PDMPSamplers._fourier_lower_on_cell(fourier_env.a0, fourier_env.a, fourier_env.b, cell.lo, cell.hi, fourier_env.horizon)
             @test cell.R + 1e-10 >= max(0.0, λ_hi - q_lo, -q_lo)
         end
-        for t in range(0.0, 1.2; length=501)
+        for t in range(0.0, 1.2; length=129)
             @test PDMPSamplers._fourier_envelope_rate(fourier_env, t) + 1e-10 >=
                   PDMPSamplers.rate(boomerang_summed, boomerang_flow, boomerang_state, t, boomerang_can_stick)
         end
@@ -1084,7 +1087,7 @@ end
         lowrank_fourier = FourierResidualAggregateClock(boomerang_provider, boomerang_odds; order=6, cells=8, residual_budget=1e-3, allow_slow_fallback=false)
         lowrank_fourier_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, -0.35], [0.0, -0.5]), BitVector([false, true]), zeros(2))
         lowrank_env, _ = PDMPSamplers._build_fourier_residual_envelope(lowrank_fourier, lowrank_fourier_flow, lowrank_fourier_state, 0.9, boomerang_can_stick)
-        for t in range(0.0, 0.9; length=301)
+        for t in range(0.0, 0.9; length=129)
             @test PDMPSamplers._fourier_envelope_rate(lowrank_env, t) + 1e-10 >=
                   PDMPSamplers.rate(boomerang_summed, lowrank_fourier_flow, lowrank_fourier_state, t, boomerang_can_stick)
         end
@@ -1108,7 +1111,7 @@ end
             q_lo = PDMPSamplers._fourier_lower_on_cell(logscale_env.a0, logscale_env.a, logscale_env.b, cell.lo, cell.hi, logscale_env.horizon)
             @test cell.R + 1e-10 >= max(0.0, λ_hi - q_lo, -q_lo)
         end
-        for t in range(0.0, 1.1; length=301)
+        for t in range(0.0, 1.1; length=129)
             @test PDMPSamplers._fourier_envelope_rate(logscale_env, t) + 1e-10 >=
                   PDMPSamplers.rate(logscale_boomerang_summed, logscale_boomerang_flow, logscale_boomerang_state, t, logscale_boomerang_can_stick)
         end

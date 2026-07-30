@@ -65,14 +65,8 @@ struct VectorVariationAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,F<:Gr
     α⁻::Float64
     safety_limit::Int
     N_min::Int
-    max_refinement_depth::Int
     validation_rtol::Float64
     validation_atol::Float64
-    min_cell_width::Float64
-    max_skip_width::Float64
-    use_derivative_hermite::Bool
-    derivative_hermite_on_demand::Bool
-    derivative_hermite_trigger_scale::Float64
     state_cache::S
     state_cache2::S
     empty_∇ϕx::V
@@ -81,11 +75,7 @@ struct VectorVariationAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,F<:Gr
     cached_U::Base.RefValue{Float64}
     signed_left::V
     signed_right::V
-    signed_mid::V
     signed_candidate::V
-    signed_stack::Vector{V}
-    derivative_stack::Vector{V}
-    t_single::Vector{Float64}
     fallback::F
 end
 
@@ -98,24 +88,11 @@ function _to_internal(strat::VectorVariationThinningStrategy, rng::Random.Abstra
     state_cache2 = copy(state)
     return VectorVariationAdaptiveState(
         Ref(strat.N), Ref(strat.t_max), strat.α⁺, strat.α⁻, strat.safety_limit,
-        min_grid_cells(flow, strat.N_min, strat.N), strat.max_refinement_depth,
-        strat.validation_rtol, strat.validation_atol, strat.min_cell_width, strat.max_skip_width,
-        strat.use_derivative_hermite, strat.derivative_hermite_on_demand,
-        strat.derivative_hermite_trigger_scale,
+        min_grid_cells(flow, strat.N_min, strat.N),
+        strat.validation_rtol, strat.validation_atol,
         state_cache, state_cache2, similar(state.ξ.x, 0), similar(state.ξ.x), Ref(false),
-        Ref(NaN), similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x),
-        [similar(state.ξ.x) for _ in 1:(2 * (strat.max_refinement_depth + 2))],
-        [similar(state.ξ.x) for _ in 1:(3 * (strat.max_refinement_depth + 2))],
-        zeros(Float64, 1),
+        Ref(NaN), similar(state.ξ.x), similar(state.ξ.x), similar(state.ξ.x),
         fallback)
-end
-
-@inline function _vv_depth_buffer(alg::VectorVariationAdaptiveState, depth::Int, slot::Int)
-    return alg.signed_stack[2 * depth + slot]
-end
-
-@inline function _vv_derivative_buffer(alg::VectorVariationAdaptiveState, depth::Int, slot::Int)
-    return alg.derivative_stack[3 * depth + slot]
 end
 
 accept_reflection_event(::Random.AbstractRNG, ::VectorVariationAdaptiveState, args...) = true
@@ -181,133 +158,6 @@ function _vv_linear_positive_value(fa::AbstractVector, fb::AbstractVector, h::Fl
     return total
 end
 
-function _vv_linear_abs_area(fa::AbstractVector, fb::AbstractVector, h::Float64)
-    h <= 0.0 && return 0.0
-    total = 0.0
-    @inbounds for i in eachindex(fa, fb)
-        total += _linear_positive_area(Float64(fa[i]), Float64(fb[i]), h)
-        total += _linear_positive_area(-Float64(fa[i]), -Float64(fb[i]), h)
-    end
-    return total
-end
-
-function _vv_cell_area(fa::AbstractVector, Ua::Float64, fb::AbstractVector, Ub::Float64, h::Float64)
-    linear_positive_area = _vv_linear_positive_area(fa, fb, h)
-    if isfinite(Ua) && isfinite(Ub)
-        potential_area = 0.5 * (Ub - Ua + _vv_linear_abs_area(fa, fb, h))
-        return max(potential_area, 0.0)
-    end
-    return linear_positive_area
-end
-
-@inline function _vv_cubic_hermite_value(f0::Float64, df0::Float64, f1::Float64, df1::Float64,
-    h::Float64, t::Float64)
-    s = t / h
-    h00 = evalpoly(s, (1.0, 0.0, -3.0, 2.0))
-    h10 = evalpoly(s, (0.0, 1.0, -2.0, 1.0))
-    h01 = evalpoly(s, (0.0, 0.0, 3.0, -2.0))
-    h11 = evalpoly(s, (0.0, 0.0, -1.0, 1.0))
-    return h00 * f0 + h10 * h * df0 + h01 * f1 + h11 * h * df1
-end
-
-function _vv_hermite_positive_area(fa::AbstractVector, dfa::AbstractVector,
-    fb::AbstractVector, dfb::AbstractVector, h::Float64)
-
-    h <= 0.0 && return 0.0
-    # Eight-point Gauss-Legendre on [0, h]. This is an approximation used only
-    # in the experimental derivative-Hermite mode.
-    x1 = 0.019855071751231884
-    x2 = 0.10166676129318664
-    x3 = 0.2372337950418355
-    x4 = 0.4082826787521751
-    w1 = 0.05061426814518813
-    w2 = 0.11119051722668724
-    w3 = 0.15685332293894364
-    w4 = 0.18134189168918099
-    total = 0.0
-    @inbounds for i in eachindex(fa, dfa, fb, dfb)
-        f0 = Float64(fa[i])
-        g0 = Float64(dfa[i])
-        f1 = Float64(fb[i])
-        g1 = Float64(dfb[i])
-        v = 0.0
-        v += w1 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * x1))
-        v += w2 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * x2))
-        v += w3 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * x3))
-        v += w4 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * x4))
-        v += w4 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * (1.0 - x4)))
-        v += w3 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * (1.0 - x3)))
-        v += w2 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * (1.0 - x2)))
-        v += w1 * pos(_vv_cubic_hermite_value(f0, g0, f1, g1, h, h * (1.0 - x1)))
-        total += h * v
-    end
-    return total
-end
-
-function _vv_hermite_positive_area_time(fa::AbstractVector, dfa::AbstractVector,
-    fb::AbstractVector, dfb::AbstractVector, h::Float64, area::Float64)
-
-    area <= 0.0 && return 0.0
-    total = _vv_hermite_positive_area(fa, dfa, fb, dfb, h)
-    area >= total && return h
-    lo = 0.0
-    hi = h
-    for _ in 1:40
-        mid = 0.5 * (lo + hi)
-        amid = _vv_hermite_positive_area(fa, dfa, fb, dfb, mid)
-        if amid < area
-            lo = mid
-        else
-            hi = mid
-        end
-    end
-    return 0.5 * (lo + hi)
-end
-
-function _vv_maybe_hermite_area!(alg::VectorVariationAdaptiveState,
-    model::PDMPModel, flow::ContinuousDynamics, state::AbstractPDMPState, cache,
-    stats::AbstractStatisticCounter, fa::AbstractVector, Ua::Float64,
-    fb::AbstractVector, Ub::Float64, h::Float64, a::Float64, b::Float64,
-    depth::Int, force::Bool)
-
-    force || return _vv_cell_area(fa, Ua, fb, Ub, h), false
-    dfa = _vv_derivative_buffer(alg, depth, 1)
-    dfb = _vv_derivative_buffer(alg, depth, 2)
-    _vv_observe_derivative!(dfa, alg, model, flow, state, cache, stats, a)
-    _vv_observe_derivative!(dfb, alg, model, flow, state, cache, stats, b)
-    return _vv_hermite_positive_area(fa, dfa, fb, dfb, h), true
-end
-
-function _vv_observe_derivative!(out::AbstractVector, alg::VectorVariationAdaptiveState,
-    model::PDMPModel, flow::ContinuousDynamics, state::AbstractPDMPState, cache,
-    stats::AbstractStatisticCounter, t::Float64)
-
-    alg.t_single[1] = t
-    values, derivatives = _rate_derivative_scratch!(
-        alg.fallback.rate_value_buf, alg.fallback.rate_derivative_buf, length(out), 1)
-    provider = _grid_event_provider(model, flow, alg.fallback, stats)
-    _fill_rate_derivatives!(
-        values, derivatives, provider, state, flow, alg.t_single, 1, alg.state_cache2)
-    @inbounds for i in eachindex(out)
-        out[i] = derivatives[i, 1]
-    end
-    return out
-end
-
-@inline function _vv_derivative_hermite_on_demand(alg::VectorVariationAdaptiveState)
-    return alg.derivative_hermite_on_demand && !alg.use_derivative_hermite
-end
-
-@inline function _vv_should_try_derivative_on_demand(
-    alg::VectorVariationAdaptiveState, threshold::Float64, area::Float64,
-    child_area::Float64, tol::Float64)
-
-    _vv_derivative_hermite_on_demand(alg) || return false
-    margin = alg.derivative_hermite_trigger_scale * max(tol, alg.validation_atol)
-    envelope = max(area, child_area)
-    return threshold <= envelope + margin || abs(child_area - area) > margin
-end
-
 function _vv_linear_positive_area_time(fa::AbstractVector, fb::AbstractVector, h::Float64, area::Float64)
     area <= 0.0 && return 0.0
     total = _vv_linear_positive_area(fa, fb, h)
@@ -347,23 +197,6 @@ function _vv_observe_endpoint!(out::AbstractVector, alg::VectorVariationAdaptive
     return Float64(t), U === nothing ? NaN : Float64(U)
 end
 
-function _vv_observe_probe!(out::AbstractVector, alg::VectorVariationAdaptiveState,
-    model::PDMPModel, flow::ContinuousDynamics, state::AbstractPDMPState, cache,
-    stats::AbstractStatisticCounter, t::Float64, probe_failure_handler::GridBoundaryProbe)
-
-    state_t = alg.state_cache2
-    copyto!(state_t, state)
-    t != 0.0 && move_forward_time!(state_t, t, flow)
-    _inc_counter_grid_endpoint_evaluations(stats)
-    _inc_counter_grid_endpoint_gradient_calls(stats)
-    grad = _compute_grid_gradient_or_throw!(
-        state_t, state, flow, model, cache, max(0.0, prevfloat(t)), t, probe_failure_handler)
-    _inc_counter_grid_points_evaluated(stats, 1)
-    _vv_signed_channels!(out, state_t, grad, flow, cache)
-    U = _last_gradient_potential(model)
-    return Float64(t), U === nothing ? NaN : Float64(U)
-end
-
 function _vv_observe_candidate!(out::AbstractVector, alg::VectorVariationAdaptiveState,
     model::PDMPModel, flow::ContinuousDynamics, state::AbstractPDMPState, cache,
     stats::AbstractStatisticCounter, t::Float64, probe_failure_handler::GridBoundaryProbe)
@@ -378,132 +211,6 @@ function _vv_observe_candidate!(out::AbstractVector, alg::VectorVariationAdaptiv
     _vv_signed_channels!(out, state_t, grad, flow, cache)
     U = _last_gradient_potential(model)
     return Float64(t), U === nothing ? NaN : Float64(U), grad
-end
-
-struct _VVAccept{G}
-    τ::Float64
-    gradient::G
-end
-struct _VVSkip
-    area::Float64
-end
-struct _VVFallback end
-
-function _vv_resolve_cell!(rng::Random.AbstractRNG, alg::VectorVariationAdaptiveState,
-    model::PDMPModel, flow::ContinuousDynamics, state::AbstractPDMPState, cache,
-    stats::AbstractStatisticCounter, a::Float64, fa::AbstractVector, Ua::Float64,
-    b::Float64, fb::AbstractVector, Ub::Float64, threshold::Float64, depth::Int,
-    probe_failure_handler::GridBoundaryProbe)
-
-    _inc_counter_positive_variation_cells(stats)
-    h = b - a
-    h <= alg.min_cell_width && return _VVFallback()
-    area, using_hermite = _vv_maybe_hermite_area!(
-        alg, model, flow, state, cache, stats, fa, Ua, fb, Ub, h, a, b, depth,
-        alg.use_derivative_hermite)
-    tol = _vv_tol(alg, max(abs(threshold), area))
-
-    if depth < alg.max_refinement_depth && h > 2alg.min_cell_width
-        mid = 0.5 * (a + b)
-        _, Um = _vv_observe_probe!(alg.signed_mid, alg, model, flow, state, cache, stats, mid, probe_failure_handler)
-        fm = _vv_depth_buffer(alg, depth, 1)
-        copyto!(fm, alg.signed_mid)
-        left_area = _vv_cell_area(fa, Ua, fm, Um, mid - a)
-        right_area = _vv_cell_area(fm, Um, fb, Ub, b - mid)
-        child_area = left_area + right_area
-        child_tol = _vv_tol(alg, max(abs(threshold), area, child_area))
-        if _vv_should_try_derivative_on_demand(alg, threshold, area, child_area, child_tol)
-            using_hermite = true
-            dfa = _vv_derivative_buffer(alg, depth, 1)
-            dfb = _vv_derivative_buffer(alg, depth, 2)
-            dfm = _vv_derivative_buffer(alg, depth, 3)
-            _vv_observe_derivative!(dfa, alg, model, flow, state, cache, stats, a)
-            _vv_observe_derivative!(dfm, alg, model, flow, state, cache, stats, mid)
-            _vv_observe_derivative!(dfb, alg, model, flow, state, cache, stats, b)
-            area = _vv_hermite_positive_area(fa, dfa, fb, dfb, h)
-            left_area = _vv_hermite_positive_area(fa, dfa, fm, dfm, mid - a)
-            right_area = _vv_hermite_positive_area(fm, dfm, fb, dfb, b - mid)
-            child_area = left_area + right_area
-            child_tol = _vv_tol(alg, max(abs(threshold), area, child_area))
-        elseif using_hermite
-            dfa = _vv_derivative_buffer(alg, depth, 1)
-            dfb = _vv_derivative_buffer(alg, depth, 2)
-            dfm = _vv_derivative_buffer(alg, depth, 3)
-            _vv_observe_derivative!(dfm, alg, model, flow, state, cache, stats, mid)
-            left_area = _vv_hermite_positive_area(fa, dfa, fm, dfm, mid - a)
-            right_area = _vv_hermite_positive_area(fm, dfm, fb, dfb, b - mid)
-            child_area = left_area + right_area
-            child_tol = _vv_tol(alg, max(abs(threshold), area, child_area))
-        end
-        if h > alg.max_skip_width || abs(child_area - area) > child_tol
-            _inc_counter_positive_variation_refinements(stats)
-            left_result = _vv_resolve_cell!(rng, alg, model, flow, state, cache, stats,
-                a, fa, Ua, mid, fm, Um, threshold, depth + 1, probe_failure_handler)
-            if left_result isa _VVAccept || left_result isa _VVFallback
-                return left_result
-            end
-            remaining = threshold - left_result.area
-            if remaining <= _vv_tol(alg, threshold)
-                _, _, grad_mid = _vv_observe_candidate!(
-                    alg.signed_candidate, alg, model, flow, state, cache, stats, mid, probe_failure_handler)
-                copyto!(alg.cached_gradient, grad_mid)
-                alg.cached_U[] = Um
-                alg.has_cached_gradient[] = true
-                _inc_counter_positive_variation_accepts(stats)
-                return _VVAccept(mid, alg.cached_gradient)
-            end
-            return _vv_resolve_cell!(rng, alg, model, flow, state, cache, stats,
-                mid, fm, Um, b, fb, Ub, remaining, depth + 1, probe_failure_handler)
-        end
-        area = child_area
-        tol = child_tol
-    end
-
-    if area + tol < threshold
-        _inc_counter_positive_variation_skipped_cells(stats, 1)
-        return _VVSkip(area)
-    end
-    area <= tol && return _VVSkip(0.0)
-
-    τ = a + _vv_linear_positive_area_time(fa, fb, h, threshold)
-    τ = clamp(τ, nextfloat(a), prevfloat(b))
-    _, Uτ, gradτ = _vv_observe_candidate!(
-        alg.signed_candidate, alg, model, flow, state, cache, stats, τ, probe_failure_handler)
-    fτ = alg.signed_candidate
-    left_area = _vv_cell_area(fa, Ua, fτ, Uτ, τ - a)
-    right_area = _vv_cell_area(fτ, Uτ, fb, Ub, b - τ)
-    if using_hermite
-        dfa = _vv_derivative_buffer(alg, depth, 1)
-        dfb = _vv_derivative_buffer(alg, depth, 2)
-        dfτ = _vv_derivative_buffer(alg, depth, 3)
-        _vv_observe_derivative!(dfτ, alg, model, flow, state, cache, stats, τ)
-        left_area = _vv_hermite_positive_area(fa, dfa, fτ, dfτ, τ - a)
-        right_area = _vv_hermite_positive_area(fτ, dfτ, fb, dfb, b - τ)
-    end
-    child_area = left_area + right_area
-    child_tol = _vv_tol(alg, max(abs(threshold), area, child_area))
-
-    if abs(left_area - threshold) <= child_tol && sum(pos, fτ) >= -child_tol
-        copyto!(alg.cached_gradient, gradτ)
-        alg.cached_U[] = Uτ
-        alg.has_cached_gradient[] = true
-        _inc_counter_positive_variation_accepts(stats)
-        return _VVAccept(τ, alg.cached_gradient)
-    end
-    if depth >= alg.max_refinement_depth || abs(child_area - area) > max(10.0 * child_tol, 0.5 * max(area, child_area, 1.0))
-        _inc_counter_positive_variation_fallbacks(stats)
-        return _VVFallback()
-    end
-
-    _inc_counter_positive_variation_refinements(stats)
-    fτ_copy = _vv_depth_buffer(alg, depth, 2)
-    copyto!(fτ_copy, fτ)
-    if left_area + child_tol >= threshold
-        return _vv_resolve_cell!(rng, alg, model, flow, state, cache, stats,
-            a, fa, Ua, τ, fτ_copy, Uτ, threshold, depth + 1, probe_failure_handler)
-    end
-    return _vv_resolve_cell!(rng, alg, model, flow, state, cache, stats,
-        τ, fτ_copy, Uτ, b, fb, Ub, threshold - left_area, depth + 1, probe_failure_handler)
 end
 
 function _vv_fallback!(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy},

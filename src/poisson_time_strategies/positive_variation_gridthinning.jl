@@ -1006,7 +1006,7 @@ function _pv_resolve_cell!(rng::Random.AbstractRNG, alg::PositiveVariationGridAd
 end
 
 function _pv_fallback!(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy},
-    flow::AnyBoomerang, alg::PositiveVariationGridAdaptiveState, state::AbstractPDMPState,
+    flow::ContinuousDynamics, alg::PositiveVariationGridAdaptiveState, state::AbstractPDMPState,
     cache, stats::AbstractStatisticCounter, max_horizon::Float64, include_refresh::Bool,
     max_horizon_event::Symbol, probe_failure_handler::GridBoundaryProbe)
 
