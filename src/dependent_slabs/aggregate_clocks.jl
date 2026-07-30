@@ -9,6 +9,8 @@ active_prior_neggrad!(provider::AbstractGaussianSlabProvider, out::AbstractVecto
     active_prior_grad!(provider, out, x, active_beta)
 
 function active_prior_neggrad!(provider::ArbitrarySlabBoundary, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    length(out) == length(x) ||
+        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
     provider.active_prior_neggrad!(out, x, active_beta)
     return out
 end

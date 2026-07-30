@@ -76,7 +76,9 @@ function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
         x0j = trace.positions[j, i]
         θ0j = trace.velocities[j, i]
         τ = trace.times[i+1] - trace.times[i]
-        if base isa AnyBoomerang
+        if trace.free_masks !== nothing && !trace.free_masks[j, i]
+            total_below += x0j ≤ q ? τ : 0.0
+        elseif base isa AnyBoomerang
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q, base.μ[j])
         else
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q)
@@ -122,7 +124,9 @@ function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
         xj = trace.positions[j, k]
         lo = min(lo, xj)
         hi = max(hi, xj)
-        if is_boom
+        segment_is_free = k < length(trace) &&
+                          (trace.free_masks === nothing || trace.free_masks[j, k])
+        if is_boom && segment_is_free
             R = hypot(xj - base.μ[j], trace.velocities[j, k])
             lo = min(lo, base.μ[j] - R)
             hi = max(hi, base.μ[j] + R)
@@ -405,8 +409,12 @@ function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer
     if base isa AnyBoomerang
         lo, hi = _trace_coordinate_bounds(trace, coordinate)
         segments, total_time, μj = _precompute_boomerang_segments(trace, coordinate)
-        f(q) = _cdf_boomerang_precomputed(trace.flow, segments, total_time, μj, q) - p
-        return Roots.find_zero(f, (lo, hi), Roots.Bisection())
+        return _invert_monotone_cdf(
+            q -> _cdf_boomerang_precomputed(trace.flow, segments, total_time, μj, q),
+            lo,
+            hi,
+            p,
+        )
     end
     total_time, dc, pm = _collect_sweep_events(trace, coordinate)
     return _quantile_linear_sweep(total_time, dc, pm, [p * total_time])[1]
@@ -415,7 +423,7 @@ end
 """
     _precompute_boomerang_segments(trace, j) -> (segments, total_time, μj)
 
-Cache the per-segment data `(x0j, θ0j, τ)` needed by `_cdf_boomerang_precomputed`
+Cache the per-segment data `(x0j, θ0j, τ, free)` needed by `_cdf_boomerang_precomputed`
 for coordinate `j`. Precomputing avoids re-parsing the trace on every bisection step,
 reducing the O(N) CDF cost to a tight loop over a plain `Vector{NTuple}`.
 """
@@ -427,12 +435,13 @@ function _precompute_boomerang_segments(trace::PDMPTrace, j::Integer)
     base = _underlying_flow(trace.flow)
     μj = Float64(base.μ[j])
     n = length(trace)
-    segments = Vector{NTuple{3, Float64}}(undef, n - 1)
+    segments = Vector{Tuple{Float64, Float64, Float64, Bool}}(undef, n - 1)
     @inbounds for i in 1:n-1
         segments[i] = (
             Float64(trace.positions[j, i]),
             Float64(trace.velocities[j, i]),
             Float64(trace.times[i+1] - trace.times[i]),
+            trace.free_masks === nothing || trace.free_masks[j, i],
         )
     end
     total_time = Float64(trace.times[end] - trace.times[1])
@@ -450,17 +459,36 @@ has no analytic inverse — hence this function is called repeatedly by bisectio
 """
 function _cdf_boomerang_precomputed(
     flow::ContinuousDynamics,
-    segments::Vector{NTuple{3, Float64}},
+    segments::Vector{Tuple{Float64, Float64, Float64, Bool}},
     total_time::Float64,
     μj::Float64,
     q::Float64,
 )
     base = _underlying_flow(flow)
     total_below = 0.0
-    @inbounds for (x0j, θ0j, τ) in segments
-        total_below += _time_below_segment(base, x0j, θ0j, τ, q, μj)
+    @inbounds for (x0j, θ0j, τ, free) in segments
+        total_below += free ?
+            _time_below_segment(base, x0j, θ0j, τ, q, μj) :
+            (x0j ≤ q ? τ : 0.0)
     end
     return total_below / total_time
+end
+
+function _invert_monotone_cdf(cdf_fn, lo::Real, hi::Real, p::Real)
+    lo == hi && return Float64(lo)
+    left, right = Float64(lo), Float64(hi)
+    # Invert by the generalized-quantile definition inf{x: F(x) ≥ p}. Unlike
+    # root finding, this remains valid when sticky segments introduce atoms.
+    for _ in 1:100
+        mid = left + (right - left) / 2
+        if cdf_fn(mid) < p
+            left = mid
+        else
+            right = mid
+        end
+        right - left ≤ 8eps(max(abs(left), abs(right), 1.0)) && break
+    end
+    return right
 end
 
 """
@@ -481,8 +509,12 @@ function _quantile_boomerang_vector(trace::PDMPTrace, p::AbstractVector{<:Real},
 
     current_lo = lo
     for idx in order
-        f(q) = _cdf_boomerang_precomputed(flow, segments, total_time, μj, q) - p[idx]
-        qi = Roots.find_zero(f, (current_lo, hi), Roots.Bisection())
+        qi = _invert_monotone_cdf(
+            q -> _cdf_boomerang_precomputed(flow, segments, total_time, μj, q),
+            current_lo,
+            hi,
+            p[idx],
+        )
         results[idx] = qi
         current_lo = qi
     end
@@ -1063,7 +1095,113 @@ function _integrate(trace::FactorizedTrace, ::typeof(inclusion_probs))
     return integral / total_time
 end
 
-function _integrate(trace::AbstractPDMPTrace, f, args...)
+function _integrate_masked_boomerang_segment!(
+    integral,
+    f,
+    flow::ContinuousDynamics,
+    x0,
+    x1,
+    θ0,
+    t0,
+    t1,
+    free,
+    args...,
+)
+    base = _underlying_flow(flow)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    s2 = sin(2dt)
+
+    if f === Statistics.mean
+        @inbounds for i in eachindex(x0)
+            if free[i]
+                if base isa MutableBoomerang
+                    integral[i] += (x0[i] + x1[i]) * dt / 2
+                else
+                    integral[i] += (x0[i] - base.μ[i]) * s +
+                                   θ0[i] * (1 - c) + base.μ[i] * dt
+                end
+            else
+                integral[i] += x0[i] * dt
+            end
+        end
+    elseif f === inclusion_probs
+        @inbounds for i in eachindex(x0)
+            free[i] && (integral[i] += dt)
+        end
+    elseif f === Statistics.var
+        μ_est = only(args)
+        @inbounds for i in eachindex(x0)
+            if free[i]
+                a = x0[i] - base.μ[i]
+                b = θ0[i]
+                c0 = base.μ[i] - μ_est[i]
+                integral[i] += (a^2 * (dt / 2 + s2 / 4) +
+                                b^2 * (dt / 2 - s2 / 4) +
+                                c0^2 * dt + a * b * s^2 +
+                                2a * c0 * s + 2b * c0 * (1 - c))
+            else
+                integral[i] += (x0[i] - μ_est[i])^2 * dt
+            end
+        end
+    elseif f === Statistics.cov
+        μ_est = only(args)
+        d = length(x0)
+        @inbounds for j in 1:d, i in j:d
+            aᵢ = free[i] ? x0[i] - base.μ[i] : 0.0
+            bᵢ = free[i] ? θ0[i] : 0.0
+            cᵢ = (free[i] ? base.μ[i] : x0[i]) - μ_est[i]
+            aⱼ = free[j] ? x0[j] - base.μ[j] : 0.0
+            bⱼ = free[j] ? θ0[j] : 0.0
+            cⱼ = (free[j] ? base.μ[j] : x0[j]) - μ_est[j]
+            val = (aᵢ * aⱼ * (dt / 2 + s2 / 4) +
+                   bᵢ * bⱼ * (dt / 2 - s2 / 4) +
+                   (aᵢ * bⱼ + aⱼ * bᵢ) * s^2 / 2 +
+                   cᵢ * cⱼ * dt +
+                   (aᵢ * cⱼ + aⱼ * cᵢ) * s +
+                   (bᵢ * cⱼ + bⱼ * cᵢ) * (1 - c))
+            integral[i, j] += val
+            i != j && (integral[j, i] += val)
+        end
+    else
+        throw(ArgumentError("unsupported masked Boomerang statistic $f"))
+    end
+    return integral
+end
+
+function _integrate_masked_boomerang(trace::PDMPTrace, f, args...)
+    n = length(trace)
+    n < 2 && error("Cannot compute statistics on a trace with fewer than 2 events")
+    d = size(trace.positions, 1)
+    integral = f === Statistics.cov ? zeros(d, d) : zeros(d)
+    @inbounds for k in 1:n-1
+        _integrate_masked_boomerang_segment!(
+            integral,
+            f,
+            trace.flow,
+            view(trace.positions, :, k),
+            view(trace.positions, :, k + 1),
+            view(trace.velocities, :, k),
+            trace.times[k],
+            trace.times[k + 1],
+            view(trace.free_masks, :, k),
+            args...,
+        )
+    end
+    total_time = trace.times[end] - trace.times[1]
+    return integral / total_time
+end
+
+function _integrate(trace::PDMPTrace, f, args...)
+    if trace.free_masks !== nothing && _underlying_flow(trace.flow) isa AnyBoomerang
+        return _integrate_masked_boomerang(trace, f, args...)
+    end
+    return _integrate_unmasked(trace, f, args...)
+end
+
+_integrate(trace::AbstractPDMPTrace, f, args...) = _integrate_unmasked(trace, f, args...)
+
+function _integrate_unmasked(trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
 
@@ -1118,7 +1256,18 @@ function _integrate(trace::AbstractPDMPTrace, f, args...)
     return integral / total_time
 end
 
-function _integrate!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...)
+function _integrate!(out::AbstractVector, trace::PDMPTrace, f, args...)
+    if trace.free_masks !== nothing && _underlying_flow(trace.flow) isa AnyBoomerang
+        copyto!(out, _integrate_masked_boomerang(trace, f, args...))
+        return out
+    end
+    return _integrate_unmasked!(out, trace, f, args...)
+end
+
+_integrate!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...) =
+    _integrate_unmasked!(out, trace, f, args...)
+
+function _integrate_unmasked!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
 

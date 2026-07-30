@@ -104,6 +104,14 @@
 
             @test all(iszero, samples[:, 1])
             @test any(!iszero, samples[:, 2])
+            @test mean(trace)[1] == 0.0
+            @test var(trace)[1] == 0.0
+            @test all(iszero, cov(trace)[1, :])
+            @test all(iszero, cov(trace)[:, 1])
+            @test PDMPSamplers.cdf(trace, 0.0; coordinate=1) == 1.0
+            @test quantile(trace, 0.25; coordinate=1) == 0.0
+            @test quantile(trace, [0.25, 0.5, 0.75]; coordinate=1) == zeros(3)
+            @test inclusion_probs(trace)[1] == 0.0
 
             ordinary = PDMPTrace([
                 PDMPEvent(0.0, [0.0, 1.0], [0.0, 0.5]),

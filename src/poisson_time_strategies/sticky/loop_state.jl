@@ -28,11 +28,33 @@ accept_reflection_event(alg::AggregateStickyLoopState, args...) = accept_reflect
 _is_sticky_loop_state(::StickyLoopState) = true
 _is_sticky_loop_state(::AggregateStickyLoopState) = true
 
-function _enforce_nonstickable_coordinates_free!(state::StickyPDMPState, can_stick::AbstractVector{Bool})
+function _enforce_nonstickable_coordinates_free!(
+    rng::Random.AbstractRNG,
+    state::StickyPDMPState,
+    flow::ContinuousDynamics,
+    can_stick::AbstractVector{Bool},
+)
     length(can_stick) == length(state.free) ||
         throw(DimensionMismatch("can_stick length $(length(can_stick)) does not match dimension $(length(state.free))"))
+    forced = findall(i -> !can_stick[i] && !state.free[i], eachindex(state.free))
+    isempty(forced) && return state
+
+    velocity = initialize_velocity(rng, flow, length(state.free))
+    attempts = 1
+    while any(i -> iszero(velocity[i]), forced)
+        attempts += 1
+        attempts <= 100 ||
+            throw(ArgumentError("could not draw nonzero initial velocities for non-stickable coordinates $forced"))
+        velocity = initialize_velocity(rng, flow, length(state.free))
+    end
     @inbounds for i in eachindex(state.free, can_stick)
-        can_stick[i] || (state.free[i] = true)
+        if !can_stick[i]
+            if !state.free[i]
+                state.ξ.θ[i] = velocity[i]
+                state.old_velocity[i] = 0.0
+            end
+            state.free[i] = true
+        end
     end
     return state
 end
@@ -41,7 +63,7 @@ end
 function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
 
     d = length(state.ξ)
-    state isa StickyPDMPState && _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
+    state isa StickyPDMPState && _enforce_nonstickable_coordinates_free!(rng, state, flow, strat.can_stick)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()
@@ -74,7 +96,7 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
         throw(ArgumentError("AggregateSticky does not support this flow; dense-preconditioned ZigZag needs a separate coordinate boundary velocity law"))
     d = length(state.ξ)
     length(strat.can_stick) == d || throw(DimensionMismatch("can_stick length $(length(strat.can_stick)) does not match dimension $d"))
-    _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
+    _enforce_nonstickable_coordinates_free!(rng, state, flow, strat.can_stick)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()

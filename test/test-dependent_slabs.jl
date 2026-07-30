@@ -181,16 +181,23 @@ end
         @test_throws DimensionMismatch active_prior_grad!(provider, out, x, BitVector([true, false]))
 
         out_block = fill(NaN, length(indices))
-        active_prior_grad!(provider, out_block, x, active)
-        expected_block = zeros(length(indices))
-        expected_block[A] .= expected_active
-        @test out_block ≈ expected_block
+        @test_throws DimensionMismatch active_prior_grad!(provider, out_block, x, active)
 
         @test_throws DimensionMismatch active_prior_grad!(provider, fill(NaN, 4), x, active)
 
         all_active = trues(3)
-        active_prior_grad!(provider, out_block, x, all_active)
-        @test out_block ≈ cov \ (x[indices] - mean)
+        active_prior_grad!(provider, out, x, all_active)
+        expected_all = zeros(length(x))
+        expected_all[indices] .= cov \ (x[indices] - mean)
+        @test out ≈ expected_all
+
+        # When the state and beta block have equal lengths, the output still
+        # follows full-state layout rather than the provider's beta ordering.
+        permuted = DenseGaussianSlab(zeros(3), Matrix(I, 3, 3), [3, 1, 2])
+        permuted_x = [10.0, 20.0, 30.0]
+        permuted_out = zeros(3)
+        active_prior_grad!(permuted, permuted_out, permuted_x, trues(3))
+        @test permuted_out == permuted_x
 
         empty_out = fill(NaN, length(x))
         active_prior_grad!(provider, empty_out, x, falses(3))
@@ -215,10 +222,7 @@ end
         @test indep_out ≈ expected_indep
         @test conditional_logdensity_zero(indep, x, active, 2) ≈ log(κ[2])
         indep_block = fill(NaN, length(indices))
-        active_prior_grad!(indep, indep_block, x, active)
-        expected_indep_block = zeros(length(indices))
-        expected_indep_block[[1, 3]] .= @. 2π * κ[[1, 3]]^2 * x[indices[[1, 3]]]
-        @test indep_block ≈ expected_indep_block
+        @test_throws DimensionMismatch active_prior_grad!(indep, indep_block, x, active)
         @test_throws DimensionMismatch active_prior_grad!(indep, fill(NaN, 4), x, active)
 
         logscale = IndependentZeroMeanLogscaleGaussianSlab(indices, [1, 1, 3], log.([2.0, 3.0, 4.0]))
@@ -236,13 +240,7 @@ end
         end
         @test logscale_out ≈ expected_logscale
         logscale_block = fill(NaN, length(indices))
-        active_prior_grad!(logscale, logscale_block, logscale_x, logscale_active)
-        expected_logscale_block = zeros(length(indices))
-        for j in (1, 2)
-            log_s = logscale.log_base_scales[j] + logscale_x[logscale.logscale_indices[j]]
-            expected_logscale_block[j] = logscale_x[indices[j]] / exp(2log_s)
-        end
-        @test logscale_block ≈ expected_logscale_block
+        @test_throws DimensionMismatch active_prior_grad!(logscale, logscale_block, logscale_x, logscale_active)
         @test_throws DimensionMismatch active_prior_grad!(logscale, fill(NaN, 4), logscale_x, logscale_active)
         @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
               -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
@@ -410,11 +408,17 @@ end
 
         cb_grad = CallbackGaussianSlab(indices;
             mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
-            active_prior_grad! = (out, x, active) -> (out .= active .* x[indices]; out),
+            active_prior_grad! = (out, x, active) -> begin
+                fill!(out, 0.0)
+                out[indices] .= active .* x[indices]
+                out
+            end,
         )
-        cb_out = fill(NaN, 4)
+        cb_out = fill(NaN, length(x))
         @test active_prior_grad!(cb_grad, cb_out, x, active) === cb_out
-        @test cb_out ≈ active .* x[indices]
+        expected_cb = zeros(length(x))
+        expected_cb[indices] .= active .* x[indices]
+        @test cb_out ≈ expected_cb
         cb_no_grad = CallbackGaussianSlab(indices;
             mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
         )

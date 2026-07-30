@@ -160,6 +160,16 @@
         rng = Random.Xoshiro(8765)
         state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
 
+        frozen_nonstickable = SkeletonPoint([1.0, 0.0, 2.0, 0.0], [1.0, 0.0, -1.0, 0.0])
+        restored, _, _, _, _ = PDMPSamplers.initialize_state(
+            Random.Xoshiro(8766), flow, model, alg, 0.0, frozen_nonstickable)
+        @test restored.free == trues(d)
+        @test !iszero(restored.ξ.θ[2])
+        @test !iszero(restored.ξ.θ[4])
+        PDMPSamplers.move_forward_time!(restored, 1.0, flow)
+        @test !iszero(restored.ξ.x[2])
+        @test !iszero(restored.ξ.x[4])
+
         state.free .= true
         state.ξ.x .= [1.0, -1.0, 2.0, 3.0]
         state.ξ.θ .= [1.0, 1.0, 1.0, 1.0]
