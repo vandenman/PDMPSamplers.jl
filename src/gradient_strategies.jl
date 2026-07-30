@@ -136,9 +136,6 @@ set_active_set!(ws::WithFDCurvatureStats, free::BitVector) = set_active_set!(ws.
 
 # Gradient computation interface
 
-_sync_active_set!(state::AbstractPDMPState, gradient_strategy::GradientStrategy) = nothing
-_sync_active_set!(state::StickyPDMPState, gradient_strategy::GradientStrategy) = set_active_set!(gradient_strategy, state.free)
-
 set_active_set!(strategy::FullGradient, free::BitVector) = set_active_set!(strategy.f, free)
 function set_active_set!(strategy::SubsampledGradient, free::BitVector)
     set_active_set!(strategy.f, free)
@@ -149,7 +146,6 @@ set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_
 
 # Main entry point: compute gradient from state
 function compute_gradient!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
-    _sync_active_set!(state, gradient_strategy)
     ∇ϕx = compute_gradient!(gradient_strategy, state.ξ.x, cache.∇ϕx)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
     return ∇ϕx
@@ -164,7 +160,6 @@ end
 
 # For reflection events with subsampled gradients, may use full gradient
 function compute_gradient_for_reflection!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
-    _sync_active_set!(state, gradient_strategy)
     ∇ϕx = compute_gradient_for_reflection!(gradient_strategy, state.ξ.x, cache.∇ϕx)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
     return ∇ϕx

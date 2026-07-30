@@ -46,8 +46,8 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()
 
-    internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
     state isa StickyPDMPState && set_active_set!(model, state.free)
+    internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
 
     # old_velocity = copy(state.ξ.θ)
     # # zero is problematic because the unfreeze time divides by abs(θf[i]), so divide by zero
@@ -78,10 +78,10 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()
+    set_active_set!(model, state.free)
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
     internal_alg_ isa GridAdaptiveState ||
         throw(ArgumentError("AggregateSticky requires an inner strategy with bounded event search; use GridThinningStrategy for now"))
-    set_active_set!(model, state.free)
     alg = AggregateStickyLoopState(internal_alg_, copy(strat.clock), copy(strat.can_stick), sticky_times, stickable_indices, sticky_pq, Inf, similar(state.ξ.x, 0))
     update_all_stick_times!(rng, alg, state, flow)
     any(isnan, alg.sticky_times) && error("sticky_times contains NaN: $(alg.sticky_times)")

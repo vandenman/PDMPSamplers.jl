@@ -250,7 +250,7 @@ end
         @test_throws ArgumentError GlobalLogscaleExchangeableGaussianSlab([1, 2], 2, 1.0, 0.1)
     end
 
-    @testset "DependentSlabTarget and active-set synchronization" begin
+    @testset "DependentSlabTarget active-set synchronization at state transitions" begin
         d = 3
         posterior_grad!(out, x) = (fill!(out, 0.0); out)
         prior_grad!(out, x) = (fill!(out, 0.0); out)
@@ -264,11 +264,13 @@ end
         state = StickyPDMPState(Ref(0.0), SkeletonPoint(copy(x), copy(θ)), BitVector([true, false, true]), zeros(d))
         cache = (; ∇ϕx=zeros(d))
 
+        set_active_set!(model, state.free)
         grad = compute_gradient!(state, model.grad, flow, cache)
         @test grad ≈ [3.0, 0.0, 0.0]
         @test target.free == state.free
 
         state.free .= BitVector([false, true, true])
+        set_active_set!(model, state.free)
         grad2 = PDMPSamplers.compute_gradient_for_reflection!(state, model.grad, flow, cache)
         @test grad2 ≈ [0.0, -2.0, 0.0]
         @test target.free == state.free
@@ -1234,6 +1236,23 @@ end
         @test μ_dense_preconditioned ≈ Σ_preconditioned_boomerang[1, 2] / Σ_preconditioned_boomerang[2, 2] * dense_preconditioned_state.ξ.θ[2]
         @test σ_dense_preconditioned^2 ≈ Σ_preconditioned_boomerang[1, 1] - Σ_preconditioned_boomerang[1, 2]^2 / Σ_preconditioned_boomerang[2, 2]
         @test PDMPSamplers.unstick_rate_constant(dense_preconditioned_boomerang, 1) ≈ sqrt(2 / π) * sqrt(Σ_preconditioned_boomerang[1, 1])
+        scratch = dense_preconditioned_state.boundary_scratch
+        cached_token = scratch.covariance_token
+        @test scratch.active_factor_valid
+        @test scratch.covariance ≈ Σ_preconditioned_boomerang
+        PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(dense_preconditioned_boomerang, dense_preconditioned_state, 1)
+        @test scratch.covariance_token == cached_token
+
+        old_l11 = dense_preconditioner.L[1, 1]
+        dense_preconditioner.L[1, 1] = old_l11 + 0.2
+        Σ_updated = dense_preconditioner.L * Σ_dense * dense_preconditioner.L'
+        μ_updated, σ_updated = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(
+            dense_preconditioned_boomerang, dense_preconditioned_state, 1)
+        @test scratch.covariance_token != cached_token
+        @test scratch.covariance ≈ Σ_updated
+        @test μ_updated ≈ Σ_updated[1, 2] / Σ_updated[2, 2] * dense_preconditioned_state.ξ.θ[2]
+        @test σ_updated^2 ≈ Σ_updated[1, 1] - Σ_updated[1, 2]^2 / Σ_updated[2, 2]
+        dense_preconditioner.L[1, 1] = old_l11
 
         dense_zz = DensePreconditionedZigZag(d)
         non_grid_alg = AggregateSticky(ThinningStrategy(GlobalBounds(1.0, d)), clock, trues(d))

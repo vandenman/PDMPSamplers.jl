@@ -15,6 +15,189 @@ function _boomerang_covariance_entry(flow::LowRankMutableBoomerang, i::Integer, 
     return value
 end
 
+function _boundary_values_token(values, h::UInt)
+    h = hash(size(values), h)
+    @inbounds for value in values
+        h = hash(value, h)
+    end
+    return h
+end
+
+_boundary_covariance_token(flow::AnyBoomerang) =
+    _boundary_values_token(flow.ΣL, hash(:boomerang_covariance))
+function _boundary_covariance_token(flow::LowRankMutableBoomerang)
+    lrp = flow.Γ
+    h = _boundary_values_token(lrp.D, hash(:lowrank_boomerang_covariance))
+    h = _boundary_values_token(lrp.V, h)
+    return _boundary_values_token(lrp.Λ, h)
+end
+
+_boundary_metric_token(::IdentityPreconditioner, h::UInt) = hash(:identity_preconditioner, h)
+_boundary_metric_token(metric::DiagonalPreconditioner, h::UInt) =
+    _boundary_values_token(metric.scale, hash(:diagonal_preconditioner, h))
+_boundary_metric_token(metric::DensePreconditioner, h::UInt) =
+    _boundary_values_token(metric.L, hash(:dense_preconditioner, h))
+
+_boundary_covariance_token(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) =
+    _boundary_metric_token(flow.metric, hash(:preconditioned_bps_covariance))
+_boundary_covariance_token(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang}) =
+    _boundary_metric_token(flow.metric, _boundary_covariance_token(flow.dynamics))
+
+function _materialize_boomerang_covariance!(dest::AbstractMatrix{Float64}, flow::AnyBoomerang)
+    mul!(dest, flow.ΣL, transpose(flow.ΣL))
+    return dest
+end
+
+function _materialize_boomerang_covariance!(dest::AbstractMatrix{Float64}, flow::LowRankMutableBoomerang)
+    lrp = flow.Γ
+    @inbounds for j in axes(dest, 2), i in axes(dest, 1)
+        value = i == j ? lrp.D[i] : 0.0
+        for k in eachindex(lrp.Λ)
+            value += lrp.V[i, k] * lrp.Λ[k] * lrp.V[j, k]
+        end
+        dest[i, j] = value
+    end
+    return dest
+end
+
+function _materialize_metric_covariance!(dest::AbstractMatrix{Float64}, ::IdentityPreconditioner)
+    fill!(dest, 0.0)
+    @inbounds for i in axes(dest, 1)
+        dest[i, i] = 1.0
+    end
+    return dest
+end
+
+function _materialize_metric_covariance!(dest::AbstractMatrix{Float64}, metric::DiagonalPreconditioner)
+    fill!(dest, 0.0)
+    @inbounds for i in axes(dest, 1)
+        dest[i, i] = abs2(metric.scale[i])
+    end
+    return dest
+end
+
+function _materialize_metric_covariance!(dest::AbstractMatrix{Float64}, metric::DensePreconditioner)
+    mul!(dest, metric.L, transpose(metric.L))
+    return dest
+end
+
+function _materialize_boundary_covariance!(scratch::BoundaryVelocityScratch, flow::AnyBoomerang)
+    return _materialize_boomerang_covariance!(scratch.covariance, flow)
+end
+
+function _materialize_boundary_covariance!(
+    scratch::BoundaryVelocityScratch,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
+)
+    return _materialize_metric_covariance!(scratch.covariance, flow.metric)
+end
+
+function _materialize_boundary_covariance!(
+    scratch::BoundaryVelocityScratch,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang},
+)
+    inner_cov = scratch.covariance_work
+    _materialize_boomerang_covariance!(inner_cov, flow.dynamics)
+    metric = flow.metric
+    if metric isa IdentityPreconditioner
+        copyto!(scratch.covariance, inner_cov)
+    elseif metric isa DiagonalPreconditioner
+        @inbounds for j in axes(inner_cov, 2), i in axes(inner_cov, 1)
+            scratch.covariance[i, j] = metric.scale[i] * inner_cov[i, j] * metric.scale[j]
+        end
+    else
+        mul!(scratch.ΣAA, metric.L, inner_cov)
+        mul!(scratch.covariance, scratch.ΣAA, transpose(metric.L))
+    end
+    return scratch.covariance
+end
+
+function _prepare_boundary_velocity_cache!(
+    flow::Union{
+        AnyBoomerang,
+        PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}},
+    },
+    state::StickyPDMPState,
+)
+    d = length(state.free)
+    scratch = _ensure_boundary_scratch!(state.boundary_scratch, d)
+    token = _boundary_covariance_token(flow)
+    covariance_changed = !scratch.covariance_valid || token != scratch.covariance_token
+    if covariance_changed
+        _materialize_boundary_covariance!(scratch, flow)
+        scratch.covariance_token = token
+        scratch.covariance_valid = true
+        scratch.active_factor_valid = false
+    end
+
+    active_changed = !scratch.active_factor_valid || scratch.cached_free != state.free
+    if active_changed
+        copyto!(scratch.cached_free, state.free)
+        k = 0
+        @inbounds for i in eachindex(state.free)
+            if state.free[i]
+                k += 1
+                scratch.active[k] = i
+            end
+        end
+        scratch.active_count = k
+        if ispositive(k)
+            @inbounds for b in 1:k, a in 1:k
+                scratch.ΣAA[a, b] = scratch.covariance[scratch.active[a], scratch.active[b]]
+            end
+            cholesky!(Symmetric(view(scratch.ΣAA, 1:k, 1:k), :L); check=true)
+        end
+        scratch.active_factor_valid = true
+    end
+    return scratch
+end
+
+function _solve_cached_active!(out::AbstractVector, scratch::BoundaryVelocityScratch, k::Int)
+    L = LowerTriangular(view(scratch.ΣAA, 1:k, 1:k))
+    ldiv!(L, out)
+    ldiv!(adjoint(L), out)
+    return out
+end
+
+function _conditional_boundary_velocity_params_prepared(
+    state::StickyPDMPState,
+    i::Integer,
+    context::AbstractString,
+)
+    scratch = state.boundary_scratch
+    covariance = scratch.covariance
+    σ2 = covariance[i, i]
+    ispositive(σ2) || throw(ArgumentError("$context boundary velocity variance must be positive, got $σ2"))
+
+    # Aggregate unstick clocks and boundary draws call this while i is inactive,
+    # so every inactive label shares the same cached active-block factorization.
+    if state.free[i]
+        scratch.active_factor_valid = false
+        return _conditional_boundary_velocity_params(
+            (a, b) -> covariance[a, b], state, i, context)
+    end
+
+    k = scratch.active_count
+    iszero(k) && return 0.0, sqrt(σ2)
+    ΣiA = scratch.ΣiA
+    solved_θ = view(scratch.solved_θ, 1:k)
+    solved_cross = view(scratch.solved_cross, 1:k)
+    @inbounds for a in 1:k
+        ia = scratch.active[a]
+        ΣiA[a] = covariance[i, ia]
+        solved_θ[a] = state.ξ.θ[ia]
+        solved_cross[a] = ΣiA[a]
+    end
+    _solve_cached_active!(solved_θ, scratch, k)
+    _solve_cached_active!(solved_cross, scratch, k)
+    ΣiA_view = view(ΣiA, 1:k)
+    μ = dot(ΣiA_view, solved_θ)
+    σ2_cond = σ2 - dot(ΣiA_view, solved_cross)
+    ispositive(σ2_cond) ||
+        throw(ArgumentError("$context conditional boundary velocity variance must be positive, got $σ2_cond"))
+    return μ, sqrt(σ2_cond)
+end
+
 _stdnormal_pdf(z::Real) = exp(-0.5 * abs2(z)) / sqrt(2π)
 
 function _normal_first_moment_between(μ::Real, σ::Real, a::Real, b::Real)
@@ -107,7 +290,8 @@ function _conditional_boundary_velocity_params(cov_entry, state::StickyPDMPState
 end
 
 function _boomerang_boundary_velocity_params(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
-    return _conditional_boundary_velocity_params((a, b) -> _boomerang_covariance_entry(flow, a, b), state, i, "Boomerang")
+    _prepare_boundary_velocity_cache!(flow, state)
+    return _conditional_boundary_velocity_params_prepared(state, i, "Boomerang")
 end
 
 """
@@ -148,7 +332,8 @@ function _preconditioned_gaussian_covariance_entry(flow::PreconditionedDynamics{
 end
 
 function _preconditioned_gaussian_boundary_velocity_params(flow::PreconditionedDynamics, state::StickyPDMPState, i::Integer)
-    return _conditional_boundary_velocity_params((a, b) -> _preconditioned_gaussian_covariance_entry(flow, a, b), state, i, "preconditioned")
+    _prepare_boundary_velocity_cache!(flow, state)
+    return _conditional_boundary_velocity_params_prepared(state, i, "preconditioned")
 end
 
 unstick_rate_constant(flow::PreconditionedDynamics{<:IdentityPreconditioner,<:ZigZag}, i::Integer) =
@@ -161,12 +346,27 @@ unstick_rate_constant(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Un
     sqrt(2 / π) * sqrt(_preconditioned_gaussian_covariance_entry(flow, i, i))
 
 _unstick_rate_constant(flow::ContinuousDynamics, ::StickyPDMPState, i::Integer) = unstick_rate_constant(flow, i)
+_prepare_boundary_velocity_cache!(::ContinuousDynamics, ::StickyPDMPState) = nothing
+_unstick_rate_constant_prepared(flow::ContinuousDynamics, state::StickyPDMPState, i::Integer) =
+    _unstick_rate_constant(flow, state, i)
 function _unstick_rate_constant(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
     μ, σ = _boomerang_boundary_velocity_params(flow, state, i)
     return _abs_normal_mean(μ, σ)
 end
+function _unstick_rate_constant_prepared(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
+    μ, σ = _conditional_boundary_velocity_params_prepared(state, i, "Boomerang")
+    return _abs_normal_mean(μ, σ)
+end
 function _unstick_rate_constant(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}}, state::StickyPDMPState, i::Integer)
     μ, σ = _preconditioned_gaussian_boundary_velocity_params(flow, state, i)
+    return _abs_normal_mean(μ, σ)
+end
+function _unstick_rate_constant_prepared(
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}},
+    state::StickyPDMPState,
+    i::Integer,
+)
+    μ, σ = _conditional_boundary_velocity_params_prepared(state, i, "preconditioned")
     return _abs_normal_mean(μ, σ)
 end
 

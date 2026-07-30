@@ -31,14 +31,35 @@ PDMPState(t::Real, ξ::SkeletonPoint) = PDMPState(Ref(float(t)), ξ)
 mutable struct BoundaryVelocityScratch
     active::Vector{Int}
     ΣAA::Matrix{Float64}
+    covariance::Matrix{Float64}
+    covariance_work::Matrix{Float64}
     ΣiA::Vector{Float64}
     θA::Vector{Float64}
     solved_θ::Vector{Float64}
     solved_cross::Vector{Float64}
+    cached_free::BitVector
+    covariance_token::UInt
+    active_count::Int
+    covariance_valid::Bool
+    active_factor_valid::Bool
 end
 
 function BoundaryVelocityScratch(d::Integer)
-    return BoundaryVelocityScratch(Vector{Int}(undef, d), Matrix{Float64}(undef, d, d), Vector{Float64}(undef, d), Vector{Float64}(undef, d), Vector{Float64}(undef, d), Vector{Float64}(undef, d))
+    return BoundaryVelocityScratch(
+        Vector{Int}(undef, d),
+        Matrix{Float64}(undef, d, d),
+        Matrix{Float64}(undef, d, d),
+        Matrix{Float64}(undef, d, d),
+        Vector{Float64}(undef, d),
+        Vector{Float64}(undef, d),
+        Vector{Float64}(undef, d),
+        Vector{Float64}(undef, d),
+        falses(d),
+        zero(UInt),
+        0,
+        false,
+        false,
+    )
 end
 BoundaryVelocityScratch() = BoundaryVelocityScratch(0)
 
@@ -46,10 +67,15 @@ function _ensure_boundary_scratch!(s::BoundaryVelocityScratch, d::Integer)
     length(s.active) >= d && return s
     resize!(s.active, d)
     s.ΣAA = Matrix{Float64}(undef, d, d)
+    s.covariance = Matrix{Float64}(undef, d, d)
+    s.covariance_work = Matrix{Float64}(undef, d, d)
     resize!(s.ΣiA, d)
     resize!(s.θA, d)
     resize!(s.solved_θ, d)
     resize!(s.solved_cross, d)
+    resize!(s.cached_free, d)
+    s.covariance_valid = false
+    s.active_factor_valid = false
     return s
 end
 
