@@ -597,6 +597,9 @@ function ess(
     θt_next = similar(θt)
     xt_at_seg = similar(xt)
     θt_at_seg = similar(θt)
+    xt_at_chunk_end = similar(xt)
+    θt_at_chunk_end = similar(θt)
+    segment_index = 1
 
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
@@ -605,6 +608,8 @@ function ess(
 
         seg_start = t₀
         seg_end = t₁
+        free = trace isa PDMPTrace && trace.free_masks !== nothing ?
+            view(trace.free_masks, :, segment_index) : nothing
 
         while seg_start < seg_end && batch_idx <= n_batches
             chunk_end = min(seg_end, batch_end)
@@ -614,15 +619,26 @@ function ess(
                 copyto!(xt_at_seg, xt)
                 copyto!(θt_at_seg, θt)
                 if elapsed > 0
-                    move_forward_time!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow)
+                    _move_ess_point!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow, free)
                 end
 
-                contribution = _integrate_segment(
-                    Statistics.mean, flow,
-                    xt_at_seg, xt_next,
-                    θt_at_seg, θt_next,
-                    seg_start, chunk_end
-                )
+                copyto!(xt_at_chunk_end, xt_at_seg)
+                copyto!(θt_at_chunk_end, θt_at_seg)
+                _move_ess_point!(
+                    SkeletonPoint(xt_at_chunk_end, θt_at_chunk_end),
+                    chunk_end - seg_start, flow, free)
+
+                contribution = isnothing(free) ?
+                    _integrate_segment(
+                        Statistics.mean, flow,
+                        xt_at_seg, xt_at_chunk_end,
+                        θt_at_seg, θt_at_chunk_end,
+                        seg_start, chunk_end) :
+                    _integrate_segment(
+                        Statistics.mean, flow,
+                        xt_at_seg, xt_at_chunk_end,
+                        θt_at_seg, θt_at_chunk_end,
+                        seg_start, chunk_end, free)
                 batch_integral .+= contribution
             end
 
@@ -640,6 +656,7 @@ function ess(
         t₀ = t₁
         copyto!(xt, xt_next)
         copyto!(θt, θt_next)
+        segment_index += 1
         next = iterate(iter, next[2])
     end
 
@@ -663,6 +680,15 @@ function ess(
     end
 
     return result
+end
+
+function _move_ess_point!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free)
+    if free !== nothing && _underlying_flow(flow) isa AnyBoomerang
+        move_forward_time!(ξ, τ, _underlying_flow(flow), free)
+    else
+        move_forward_time!(ξ, τ, flow)
+    end
+    return ξ
 end
 
 # Batch-means ESS for a single discrete column vector.

@@ -137,6 +137,8 @@ function _handle_global_event_impl!(
     elseif event_type == :horizon_hit
         (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
         _set_counter_last_rejected(stats, true)
+        needs_saving = true
+        isfactorized(flow) && (saving_args = first(eachindex(state.ξ.x)))
     end
 
     _check_sticky_times!(alg, state)

@@ -318,6 +318,12 @@ end
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
         alg::AggregateStickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
         detect_boundaries::Bool=false)
+    return next_event_time(rng, model, flow, alg, state, cache, stats, Inf, detect_boundaries)
+end
+
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+        alg::AggregateStickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        step_horizon::Float64, detect_boundaries::Bool=false)
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
 
@@ -328,12 +334,14 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
 
     if any(state.free)
         τ_refresh = rand_refresh_time(rng, flow)
-        max_horizon = min(τ_sticky, τ_refresh)
+        max_horizon = min(τ_sticky, τ_refresh, step_horizon)
         _inc_counter_sticky_inner_searches(stats)
         τ_inner, event_type, meta = _bounded_inner_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
             max_horizon, detect_boundaries)
 
-        if τ_sticky <= τ_inner && τ_sticky <= τ_refresh
+        if step_horizon <= τ_inner && step_horizon <= τ_sticky && step_horizon <= τ_refresh
+            return step_horizon, :horizon_hit, EmptyMeta()
+        elseif τ_sticky <= τ_inner && τ_sticky <= τ_refresh
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
             if t_unstick <= t_freeze
                 i_unstick = sample_label(rng, alg.clock, flow, state, τ_sticky, alg.can_stick)
@@ -349,6 +357,8 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         end
     else
         _inc_counter_sticky_all_frozen_events(stats)
+        step_horizon <= t_unstick - t &&
+            return step_horizon, :horizon_hit, EmptyMeta()
         isfinite(t_unstick) || return Inf, :sticky, CoordinateMeta(0)
         i_unstick = sample_label(rng, alg.clock, flow, state, t_unstick - t, alg.can_stick)
         return t_unstick - t, :sticky, CoordinateMeta(i_unstick)
@@ -358,7 +368,12 @@ end
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
         alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
         detect_boundaries::Bool=false)
+    return next_event_time(rng, model, flow, alg, state, cache, stats, Inf, detect_boundaries)
+end
 
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+        alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        step_horizon::Float64, detect_boundaries::Bool=false)
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
 
@@ -400,13 +415,15 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         # discard.
         τ_refresh = rand_refresh_time(rng, flow)
         τ_sticky = max(0.0, tᶠ - t)
-        max_horizon = min(τ_sticky, τ_refresh)
+        max_horizon = min(τ_sticky, τ_refresh, step_horizon)
 
         _inc_counter_sticky_inner_searches(stats)
         τ, event_type, meta = _bounded_inner_event_time(
             rng, model, flow, inner_alg_state, state, cache, stats, max_horizon, detect_boundaries)
 
-        if τ_sticky <= τ && τ_sticky <= τ_refresh # sticky event happens first
+        if step_horizon <= τ && step_horizon <= τ_sticky && step_horizon <= τ_refresh
+            return step_horizon, :horizon_hit, EmptyMeta()
+        elseif τ_sticky <= τ && τ_sticky <= τ_refresh # sticky event happens first
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
             return τ_sticky, :sticky, CoordinateMeta(i)
         elseif τ_refresh <= τ
@@ -428,6 +445,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     else
         _inc_counter_sticky_all_frozen_events(stats)
         Δt = tᶠ - t
+        step_horizon <= Δt && return step_horizon, :horizon_hit, EmptyMeta()
         return Δt, :sticky, CoordinateMeta(i)
     end
 end

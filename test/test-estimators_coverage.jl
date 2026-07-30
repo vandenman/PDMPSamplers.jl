@@ -99,6 +99,20 @@ end
         end
     end
 
+    @testset "ESS preserves sticky Boomerang masks" begin
+        times = [0.0, 0.2, 1.7, 2.0]
+        positions = zeros(1, length(times))
+        velocities = zeros(1, length(times))
+        masks = falses(1, length(times))
+        trace = PDMPTrace(
+            times, positions, velocities,
+            Boomerang(Diagonal([1.0]), [2.0], 0.0), masks)
+
+        # With every segment frozen, all exact batch means are identical even
+        # though an ordinary Boomerang trajectory would oscillate around μ=2.
+        @test ess(trace, [0.0], [1.0]; n_batches=3) == [3.0]
+    end
+
     @testset "PDMPDiscretize keeps frozen Boomerang coordinates frozen" begin
         # Regression: discretization must mirror sticky segment semantics. A
         # sticky trace retains the free mask because x=0 and θ=0 alone are

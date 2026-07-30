@@ -1,5 +1,5 @@
 function _clock_state_at(state::StickyPDMPState, flow::ContinuousDynamics, τ::Real)
-    state_at = copy(state)
+    state_at = _shallow_copy_sticky_state(state)
     move_forward_time!(state_at, τ, flow)
     return state_at
 end
@@ -13,8 +13,11 @@ end
 _positive_logweight(logw::Real) = logw > -Inf
 
 function _has_inactive_stickable_beta(clock::AbstractAggregateUnstickClock, state::StickyPDMPState, can_stick::BitVector)
-    for i in beta_indices(clock.slab_provider)
-        if can_stick[i] && !state.free[i]
+    provider = clock.slab_provider
+    active_beta = _active_beta_from_free(provider, state.free)
+    for (j, i) in enumerate(beta_indices(provider))
+        if can_stick[i] && !state.free[i] &&
+           log_model_add_odds(clock.model_prior, active_beta, j) > -Inf
             return true
         end
     end
@@ -93,14 +96,13 @@ function sample_time(rng::Random.AbstractRNG, clock::SummedRateClock, flow::Cont
     lo = 0.0
     hi = Float64(clock.initial_bracket)
     H_hi = cumulative_hazard(clock, flow, state, 0.0, hi, can_stick)
-    iterations = 0
-    while H_hi < threshold && iterations < 60
+    while H_hi < threshold
         lo = hi
-        hi *= clock.bracket_multiplier
+        next_hi = hi * clock.bracket_multiplier
+        (!isfinite(next_hi) || next_hi <= hi) && return Inf
+        hi = next_hi
         H_hi = cumulative_hazard(clock, flow, state, 0.0, hi, can_stick)
-        iterations += 1
     end
-    H_hi < threshold && return Inf
     f = τ -> cumulative_hazard(clock, flow, state, 0.0, τ, can_stick) - threshold
     return Roots.find_zero(f, (lo, hi), Roots.Bisection(); atol=clock.atol, rtol=clock.rtol)
 end

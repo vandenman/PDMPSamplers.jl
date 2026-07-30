@@ -257,6 +257,48 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test crit_online.target_ess == crit_online_copy.target_ess
     end
 
+    @testset "Finite deadlines constrain searches and are recorded" begin
+        checked_gradient = FullGradient(function (out, x)
+            x[1] <= 0.1 + 16eps(0.1) ||
+                error("gradient probe crossed the requested time horizon")
+            fill!(out, 0.0)
+            return out
+        end)
+        checked_model = PDMPModel(1, checked_gradient, nothing)
+        checked_trace, _ = pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            BouncyParticle(1, 0.0),
+            checked_model,
+            GridThinningStrategy(),
+            0.0, 0.1;
+            progress=false,
+        )
+        @test checked_trace.times == [0.0, 0.1]
+
+        ξ0, flow, model, alg = _stopping_setup(d=1)
+        composite_trace, composite_stats = pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 10.0, 0.0;
+            warmup_stop=FixedTimeCriterion(0.0),
+            stop=AnyCriterion(FixedTimeCriterion(0.25), EventCountCriterion(10_000)),
+            progress=false,
+        )
+        @test last_event_time(composite_trace) == 0.25
+        @test composite_stats.stop_reason == :reached_time
+
+        zero_gradient = FullGradient((out, x) -> (fill!(out, 0.0); out))
+        factorized_trace, _ = pdmp_sample(
+            SkeletonPoint([1.0], [1.0]),
+            ZigZag(1),
+            PDMPModel(1, zero_gradient, nothing),
+            GridThinningStrategy(),
+            0.0, 0.25;
+            progress=false,
+        )
+        @test factorized_trace isa PDMPSamplers.FactorizedTrace
+        @test last_event_time(factorized_trace) == 0.25
+        @test length(factorized_trace) == 2
+    end
+
     @testset "EventCountCriterion is phase-local" begin
         Random.seed!(1234)
         ξ0, flow, model, alg = _stopping_setup()

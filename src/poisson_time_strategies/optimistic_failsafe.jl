@@ -260,4 +260,19 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     error("OptimisticStrategy: safety limit reached after $(alg.safety_limit) iterations")
 end
 
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::OptimisticState,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true)
+end
+
 # COV_EXCL_STOP

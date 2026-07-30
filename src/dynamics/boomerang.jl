@@ -367,7 +367,7 @@ function move_forward_time!(state::StickyPDMPState, τ::Real, flow::AnyBoomerang
     state
 end
 
-function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::BitVector)
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::AbstractVector{Bool})
     x, θ = ξ.x, ξ.θ
     μ = flow.μ
     s, c = sincos(τ)

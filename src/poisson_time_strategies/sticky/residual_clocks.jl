@@ -476,30 +476,31 @@ function _boomerang_boundary_velocity_upper(flow::AnyBoomerang, state::StickyPDM
 end
 
 function _fourier_lower_on_cell(a0::Float64, a::Vector{Float64}, b::Vector{Float64}, lo::Float64, hi::Float64, T::Float64)
-    points = Float64[lo, hi]
-    K = length(a)
-    n = max(64, 16K)
-    prev_t = lo
-    prev_d = _fourier_derivative_eval(a, b, prev_t, T)
-    for s in 1:n
-        t = lo + (hi - lo) * s / n
-        d = _fourier_derivative_eval(a, b, t, T)
-        if iszero(d)
-            push!(points, t)
-        elseif iszero(prev_d)
-            push!(points, prev_t)
-        elseif signbit(prev_d) != signbit(d)
-            root = Roots.find_zero(τ -> _fourier_derivative_eval(a, b, τ, T), (prev_t, t), Roots.Bisection(); atol=1e-12, rtol=1e-12)
-            lo <= root <= hi && push!(points, root)
-        end
-        prev_t = t
-        prev_d = d
+    T > 0 || throw(ArgumentError("Fourier period must be positive"))
+    lower = a0
+    magnitude = abs(a0)
+    ω0 = 2π / T
+    @inbounds for k in eachindex(a, b)
+        ak, bk = a[k], b[k]
+        r = hypot(ak, bk)
+        magnitude += r
+        iszero(r) && continue
+        ω = k * ω0
+        phase = atan(bk, ak)
+        term_min = min(
+            r * cos(ω * lo - phase),
+            r * cos(ω * hi - phase),
+        )
+        # Each harmonic reaches its minimum where ωt-phase = π+2πn.
+        n_lo = ceil((ω * lo - phase - π) / (2π))
+        n_hi = floor((ω * hi - phase - π) / (2π))
+        n_lo <= n_hi && (term_min = -r)
+        lower += term_min
     end
-    lower = Inf
-    @inbounds for t in points
-        lower = min(lower, _fourier_eval(a0, a, b, t, T))
-    end
-    return lower - _fp_pad(lower)
+    # Summing independently bounded harmonics is conservative. The explicit
+    # roundoff allowance keeps the result an enclosure under floating-point
+    # evaluation as well.
+    return lower - _fp_pad(magnitude)
 end
 
 function _fixed_gaussian_boundary_rate_upper(

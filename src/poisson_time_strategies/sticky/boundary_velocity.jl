@@ -345,6 +345,18 @@ function _preconditioned_gaussian_boundary_velocity_params(flow::PreconditionedD
     return _conditional_boundary_velocity_params_prepared(state, i, "preconditioned")
 end
 
+_preconditioned_gaussian_boundary_velocity_params(
+    ::PreconditionedDynamics{IdentityPreconditioner,<:BouncyParticle},
+    ::StickyPDMPState,
+    ::Integer,
+) = (0.0, 1.0)
+
+_preconditioned_gaussian_boundary_velocity_params(
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+    ::StickyPDMPState,
+    i::Integer,
+) = (0.0, abs(Float64(flow.metric.scale[i])))
+
 unstick_rate_constant(flow::PreconditionedDynamics{<:IdentityPreconditioner,<:ZigZag}, i::Integer) =
     unstick_rate_constant(flow.dynamics, i)
 unstick_rate_constant(flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}, i::Integer) =
@@ -356,6 +368,14 @@ unstick_rate_constant(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Un
 
 _unstick_rate_constant(flow::ContinuousDynamics, ::StickyPDMPState, i::Integer) = unstick_rate_constant(flow, i)
 _prepare_boundary_velocity_cache!(::ContinuousDynamics, ::StickyPDMPState) = nothing
+_prepare_boundary_velocity_cache!(
+    ::PreconditionedDynamics{IdentityPreconditioner,<:BouncyParticle},
+    ::StickyPDMPState,
+) = nothing
+_prepare_boundary_velocity_cache!(
+    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+    ::StickyPDMPState,
+) = nothing
 _unstick_rate_constant_prepared(flow::ContinuousDynamics, state::StickyPDMPState, i::Integer) =
     _unstick_rate_constant(flow, state, i)
 function _unstick_rate_constant(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
@@ -378,6 +398,16 @@ function _unstick_rate_constant_prepared(
     μ, σ = _conditional_boundary_velocity_params_prepared(state, i, "preconditioned")
     return _abs_normal_mean(μ, σ)
 end
+_unstick_rate_constant_prepared(
+    ::PreconditionedDynamics{IdentityPreconditioner,<:BouncyParticle},
+    ::StickyPDMPState,
+    ::Integer,
+) = sqrt(2 / π)
+_unstick_rate_constant_prepared(
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+    ::StickyPDMPState,
+    i::Integer,
+) = sqrt(2 / π) * abs(Float64(flow.metric.scale[i]))
 
 function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, ::ZigZag, i::Integer)
     state.ξ.θ[i] = rand(rng, (-1.0, 1.0))

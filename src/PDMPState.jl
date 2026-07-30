@@ -69,6 +69,27 @@ function BoundaryVelocityScratch(d::Integer)
 end
 BoundaryVelocityScratch() = BoundaryVelocityScratch(0)
 
+function Base.copy(s::BoundaryVelocityScratch)
+    return BoundaryVelocityScratch(
+        copy(s.active),
+        copy(s.ΣAA),
+        copy(s.covariance),
+        isnothing(s.covariance_work) ? nothing : copy(s.covariance_work),
+        copy(s.ΣiA),
+        copy(s.θA),
+        copy(s.solved_θ),
+        copy(s.solved_cross),
+        copy(s.conditional_std),
+        copy(s.conditional_std_valid),
+        copy(s.cached_free),
+        s.covariance_source,
+        s.covariance_generation,
+        s.active_count,
+        s.covariance_valid,
+        s.active_factor_valid,
+    )
+end
+
 function _ensure_boundary_scratch!(s::BoundaryVelocityScratch, d::Integer)
     length(s.active) >= d && return s
     resize!(s.active, d)
@@ -105,7 +126,13 @@ substate(state::StickyPDMPState) = PDMPState(state.t, SkeletonPoint(view(state.�
 subflow(flow::ContinuousDynamics, ::BitVector) = flow
 
 Base.copy(state::PDMPState) = PDMPState(Ref(state.t[]), copy(state.ξ))
-Base.copy(state::StickyPDMPState) = StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free), copy(state.old_velocity), state.boundary_scratch)
+Base.copy(state::StickyPDMPState) =
+    StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free),
+                    copy(state.old_velocity), copy(state.boundary_scratch))
+
+_shallow_copy_sticky_state(state::StickyPDMPState) =
+    StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free),
+                    copy(state.old_velocity), state.boundary_scratch)
 
 function Base.copyto!(dest::PDMPState, src::PDMPState)
     dest.t[] = src.t[]

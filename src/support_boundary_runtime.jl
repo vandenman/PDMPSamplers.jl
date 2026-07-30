@@ -14,18 +14,8 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::NoBoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats)
-
-_next_event_time_for_step(
-    rng::Random.AbstractRNG,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
-    state::AbstractPDMPState,
-    cache::NamedTuple,
-    stats::AbstractStatisticCounter,
-    ::BoundaryHandling,
+    ::BoundaryPolicy,
+    max_horizon::Real,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats)
 
 _next_event_time_for_step(
@@ -36,8 +26,10 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::BoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats, true)
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+) = next_event_time(rng, model, flow, alg, state, cache, stats,
+                    Float64(max_horizon), policy isa BoundaryHandling)
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -47,8 +39,57 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::BoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats, Inf, true, :horizon_hit, true)
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+) = next_event_time(rng, model, flow, alg, state, cache, stats,
+                    Float64(max_horizon), true, :horizon_hit,
+                    policy isa BoundaryHandling)
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::Union{VectorVariationAdaptiveState,PositiveVariationGridAdaptiveState},
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true, :horizon_hit,
+                           policy isa BoundaryHandling)
+end
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::RootsPoissonTimeStrategy,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true, :horizon_hit)
+end
+
+function _bounded_inner_event_time(
+    rng::Random.AbstractRNG,
+    model::PDMPModel{<:GlobalGradientStrategy},
+    flow::ContinuousDynamics,
+    inner_alg_state::RootsPoissonTimeStrategy,
+    state::StickyPDMPState,
+    cache,
+    stats::AbstractStatisticCounter,
+    max_horizon::Float64,
+    ::Bool=false,
+)
+    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
+                           max_horizon, false, :sticky_horizon_hit)
+end
 
 function _cap_event_time_for_step(τ::Real, event_type::Symbol, meta, max_horizon::Real)
     if isfinite(max_horizon) && τ > max_horizon
@@ -72,9 +113,9 @@ function _step!(
     phase::Symbol,
     max_horizon::Real=Inf,
 ) where {FL<:ContinuousDynamics}
-    τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling())
+    τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling(), max_horizon)
     τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
-    @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+    @assert ispositive(τ) || (iszero(τ) && event_type === :sticky) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
     needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
     needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
@@ -97,10 +138,10 @@ function _step!(
 ) where {FL<:ContinuousDynamics}
     support_boundary_options = boundary_policy.opts
     try
-        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy)
+        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy, max_horizon)
         τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
 
-        @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+        @assert ispositive(τ) || (iszero(τ) && event_type === :sticky) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
         needs_saving, saving_args = handle_event!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
         needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)

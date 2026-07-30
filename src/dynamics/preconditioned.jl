@@ -315,7 +315,5 @@ end
 function default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
                                          model_prior::AbstractModelPrior,
                                          flow::PreconditionedDynamics)
-    return flow.dynamics isa AnyBoomerang ?
-        FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=false) :
-        default_aggregate_unstick_clock(provider, model_prior)
+    return SummedRateClock(provider, model_prior)
 end
