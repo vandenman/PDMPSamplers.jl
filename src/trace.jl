@@ -28,12 +28,16 @@ end
 
 const GrowableMatrix{T} = ElasticArray{T, 2, 1, Vector{T}}
 
-struct PDMPTrace{T, U<:ContinuousDynamics, M<:AbstractMatrix{T}} <: AbstractPDMPTrace
+struct PDMPTrace{T, U<:ContinuousDynamics, M<:AbstractMatrix{T}, F} <: AbstractPDMPTrace
     times::Vector{T}
     positions::M    # d × N
     velocities::M   # d × N
     flow::U
+    free_masks::F   # nothing for ordinary traces; d × N for sticky traces
 end
+
+PDMPTrace(times::Vector{T}, positions::M, velocities::M, flow::U) where {T,U<:ContinuousDynamics,M<:AbstractMatrix{T}} =
+    PDMPTrace(times, positions, velocities, flow, nothing)
 
 function PDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics)
     T = float(typeof(state.t[]))
@@ -43,7 +47,14 @@ function PDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics)
     velocities = ElasticMatrix{T}(undef, d, 1)
     copyto!(view(positions, :, 1), state.ξ.x)
     copyto!(view(velocities, :, 1), state.ξ.θ)
-    PDMPTrace(times, positions, velocities, flow)
+    free_masks = if state isa StickyPDMPState
+        masks = ElasticMatrix{Bool}(undef, d, 1)
+        copyto!(view(masks, :, 1), state.free)
+        masks
+    else
+        nothing
+    end
+    PDMPTrace(times, positions, velocities, flow, free_masks)
 end
 
 function PDMPTrace(events::Vector{<:PDMPEvent}, flow::ContinuousDynamics)
@@ -65,7 +76,8 @@ end
 function make_empty_trace(::Type{<:PDMPTrace}, state::AbstractPDMPState, flow::ContinuousDynamics)
     T = float(typeof(state.t[]))
     d = length(state.ξ.x)
-    PDMPTrace(T[], ElasticMatrix{T}(undef, d, 0), ElasticMatrix{T}(undef, d, 0), flow)
+    free_masks = state isa StickyPDMPState ? ElasticMatrix{Bool}(undef, d, 0) : nothing
+    PDMPTrace(T[], ElasticMatrix{T}(undef, d, 0), ElasticMatrix{T}(undef, d, 0), flow, free_masks)
 end
 
 # mutable struct FactorizedTrace{T<:FactorizedEvent, U<:FactorizedDynamics, V<:PDMPEvent} <: AbstractPDMPTrace
@@ -151,7 +163,8 @@ function PDMPTrace(trace::FactorizedTrace)
 end
 
 function compact(trace::PDMPTrace{T, U, <:GrowableMatrix}) where {T, U}
-    PDMPTrace(trace.times, Matrix(trace.positions), Matrix(trace.velocities), trace.flow)
+    masks = trace.free_masks === nothing ? nothing : Matrix(trace.free_masks)
+    PDMPTrace(trace.times, Matrix(trace.positions), Matrix(trace.velocities), trace.flow, masks)
 end
 compact(trace::PDMPTrace{T, U, <:Matrix}) where {T, U} = trace
 compact(trace::FactorizedTrace) = trace
@@ -174,15 +187,22 @@ function Base.last(trace::FactorizedTrace)
 end
 
 function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, event::PDMPEvent) where {T,U}
+    trace.free_masks === nothing ||
+        throw(ArgumentError("append a StickyPDMPState, not a bare PDMPEvent, to a sticky trace"))
     push!(trace.times, event.time)
     append!(trace.positions, event.position)
     append!(trace.velocities, event.velocity)
     trace
 end
 function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, state::AbstractPDMPState) where {T,U}
+    trace.free_masks === nothing || state isa StickyPDMPState ||
+        throw(ArgumentError("cannot append a non-sticky state to a sticky trace"))
     push!(trace.times, float(state.t[]))
     append!(trace.positions, state.ξ.x)
     append!(trace.velocities, state.ξ.θ)
+    if trace.free_masks !== nothing
+        append!(trace.free_masks, state.free)
+    end
     trace
 end
 function Base.push!(trace::FactorizedTrace, event::FactorizedEvent)
@@ -364,28 +384,31 @@ _to_range(D::PDMPDiscretize) = first(D.trace).time:D.dt:last_event_time(D.trace)
 Base.IteratorSize(::PDMPDiscretize) = Base.HasLength()
 Base.length(D::PDMPDiscretize) = length(_to_range(D))
 
-@inline function _discretize_free_mask!(free::BitVector, x::AbstractVector, θ::AbstractVector)
-    @inbounds for i in eachindex(free, x, θ)
-        free[i] = !(iszero(x[i]) && iszero(θ[i]))
-    end
-    return free
+function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free)
+    move_forward_time!(ξ, τ, flow)
+    return ξ
 end
 
-function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free::BitVector)
+function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::Nothing)
     move_forward_time!(ξ, τ, flow)
     return ξ
 end
 
 function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::BitVector)
-    _discretize_free_mask!(free, ξ.x, ξ.θ)
     move_forward_time!(ξ, τ, flow, free)
     return ξ
 end
 
-function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::PreconditionedDynamics, free::BitVector)
+function _discretize_move_forward!(ξ::SkeletonPoint, τ::Real, flow::PreconditionedDynamics, free)
     _discretize_move_forward!(ξ, τ, flow.dynamics, free)
     return ξ
 end
+
+function _discretize_apply_free_mask!(free::BitVector, trace::PDMPTrace, k::Int)
+    trace.free_masks === nothing || copyto!(free, view(trace.free_masks, :, k))
+    return free
+end
+_discretize_apply_free_mask!(free, trace, k::Int) = free
 
 function Base.iterate(D::PDMPDiscretize)
     trace = D.trace
@@ -404,7 +427,11 @@ function Base.iterate(D::PDMPDiscretize)
     range_iterator_state = iterate(t_range)[2]
 
     k = trace isa FactorizedTrace ? 1 : 2
-    free = trues(length(x))
+    free = if trace isa PDMPTrace && trace.free_masks !== nothing
+        BitVector(view(trace.free_masks, :, 1))
+    else
+        nothing
+    end
 
     iterator_state = (t_range, range_iterator_state, x, θ, k, free)
 
@@ -433,6 +460,7 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
             Δt = _event_time(trace, k_current) - t_current
             _discretize_move_forward!(ξ, Δt, trace.flow, free)
             t_current = _apply_event!(x_current, θ_current, trace, k_current)
+            _discretize_apply_free_mask!(free, trace, k_current)
             k_current += 1
         end
     else
@@ -446,6 +474,7 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
         end
         if found_event
             t_current = _apply_event!(x_current, θ_current, trace, last_before)
+            _discretize_apply_free_mask!(free, trace, last_before)
         end
     end
     # 4. Evolve the state from the time of the last processed event up to t_new

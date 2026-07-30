@@ -438,30 +438,45 @@ function _active_count(active_beta::BitVector)
     return count(active_beta)
 end
 
-function _write_active_gradient!(out::AbstractVector, full_indices::AbstractVector{Int}, active_beta::BitVector, grad_active::AbstractVector, k::Integer=_active_count(active_beta))
+function _write_active_gradient_full!(out::AbstractVector, full_indices::AbstractVector{Int}, active_beta::BitVector, grad_active::AbstractVector, k::Integer=_active_count(active_beta))
     fill!(out, 0.0)
-    if length(out) == length(full_indices)
-        a = 0
-        @inbounds for j in eachindex(active_beta)
-            if active_beta[j]
-                a += 1
-                out[j] = grad_active[a]
-                a == k && break
-            end
+    maximum(full_indices) <= length(out) ||
+        throw(DimensionMismatch("full-state output must have length at least $(maximum(full_indices))"))
+    a = 0
+    @inbounds for j in eachindex(active_beta)
+        if active_beta[j]
+            a += 1
+            out[full_indices[j]] = grad_active[a]
+            a == k && break
         end
-    elseif maximum(full_indices) <= length(out)
-        a = 0
-        @inbounds for j in eachindex(active_beta)
-            if active_beta[j]
-                a += 1
-                out[full_indices[j]] = grad_active[a]
-                a == k && break
-            end
-        end
-    else
-        throw(DimensionMismatch("out must have length $(length(full_indices)) for beta-block gradients or at least $(maximum(full_indices)) for full-state gradients"))
     end
     return out
+end
+
+function _write_active_gradient_beta!(out::AbstractVector, active_beta::BitVector, grad_active::AbstractVector, k::Integer=_active_count(active_beta))
+    length(out) == length(active_beta) ||
+        throw(DimensionMismatch("beta-block output must have length $(length(active_beta))"))
+    fill!(out, 0.0)
+    a = 0
+    @inbounds for j in eachindex(active_beta)
+        if active_beta[j]
+            a += 1
+            out[j] = grad_active[a]
+            a == k && break
+        end
+    end
+    return out
+end
+
+function _write_active_gradient!(out::AbstractVector, x::AbstractVector, full_indices::AbstractVector{Int},
+                                 active_beta::BitVector, grad_active::AbstractVector,
+                                 k::Integer=_active_count(active_beta))
+    if length(out) == length(x)
+        return _write_active_gradient_full!(out, full_indices, active_beta, grad_active, k)
+    elseif length(out) == length(full_indices)
+        return _write_active_gradient_beta!(out, active_beta, grad_active, k)
+    end
+    throw(DimensionMismatch("out must be a full-state vector of length $(length(x)) or a beta-block vector of length $(length(full_indices))"))
 end
 
 function _fill_dense_active_system!(work_cov::AbstractMatrix{Float64}, work_rhs::AbstractVector{Float64}, provider::DenseGaussianSlab, x::AbstractVector, active_beta::BitVector, k::Integer)
@@ -658,7 +673,7 @@ function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x:
     work_rhs = cache.work_rhs
     _fill_dense_active_system!(work_cov, work_rhs, provider, x, active_beta, k)
     _cholesky_solve_spd_prefix!(work_cov, work_rhs, k)
-    return _write_active_gradient!(out, indices, active_beta, work_rhs, k)
+    return _write_active_gradient!(out, x, indices, active_beta, work_rhs, k)
 end
 
 function active_prior_grad!(provider::IndependentZeroMeanGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
@@ -666,16 +681,18 @@ function active_prior_grad!(provider::IndependentZeroMeanGaussianSlab, out::Abst
     length(active_beta) == length(indices) ||
         throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
     fill!(out, 0.0)
-    if length(out) == length(indices)
-        @inbounds for j in eachindex(indices)
-            active_beta[j] && (out[j] = provider.precision[j] * x[indices[j]])
-        end
-    elseif maximum(indices) <= length(out)
+    if length(out) == length(x)
+        maximum(indices) <= length(out) ||
+            throw(DimensionMismatch("beta indices exceed full-state output length $(length(out))"))
         @inbounds for j in eachindex(indices)
             active_beta[j] && (out[indices[j]] = provider.precision[j] * x[indices[j]])
         end
+    elseif length(out) == length(indices)
+        @inbounds for j in eachindex(indices)
+            active_beta[j] && (out[j] = provider.precision[j] * x[indices[j]])
+        end
     else
-        throw(DimensionMismatch("out must have length $(length(indices)) for beta-block gradients or at least $(maximum(indices)) for full-state gradients"))
+        throw(DimensionMismatch("out must be a full-state vector of length $(length(x)) or a beta-block vector of length $(length(indices))"))
     end
     return out
 end
@@ -686,15 +703,9 @@ function active_prior_grad!(provider::IndependentZeroMeanLogscaleGaussianSlab, o
         throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
     fill!(out, 0.0)
     full_required = max(maximum(indices), maximum(provider.logscale_indices))
-    if length(out) == length(indices)
-        @inbounds for j in eachindex(indices)
-            if active_beta[j]
-                log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
-                out[j] = x[indices[j]] / exp(2log_s)
-            end
-        end
-        return out
-    elseif full_required <= length(out)
+    if length(out) == length(x)
+        full_required <= length(out) ||
+            throw(DimensionMismatch("slab indices exceed full-state output length $(length(out))"))
         @inbounds for j in eachindex(indices)
             if active_beta[j]
                 β = x[indices[j]]
@@ -705,8 +716,16 @@ function active_prior_grad!(provider::IndependentZeroMeanLogscaleGaussianSlab, o
             end
         end
         return out
+    elseif length(out) == length(indices)
+        @inbounds for j in eachindex(indices)
+            if active_beta[j]
+                log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
+                out[j] = x[indices[j]] / exp(2log_s)
+            end
+        end
+        return out
     else
-        throw(DimensionMismatch("out must have length $(length(indices)) for beta-block gradients or at least $full_required for full-state gradients"))
+        throw(DimensionMismatch("out must be a full-state vector of length $(length(x)) or a beta-block vector of length $(length(indices))"))
     end
 end
 
@@ -754,7 +773,7 @@ function active_prior_grad!(provider::AbstractGaussianSlabProvider, out::Abstrac
     F = cholesky(Symmetric(Matrix{Float64}(cov[A, A])); check=true)
     delta = Vector{Float64}(x[indices[A]] .- mean[A])
     grad_active = F \ delta
-    return _write_active_gradient!(out, indices, active_beta, grad_active, length(A))
+    return _write_active_gradient!(out, x, indices, active_beta, grad_active, length(A))
 end
 
 function active_prior_grad!(provider::CallbackGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)

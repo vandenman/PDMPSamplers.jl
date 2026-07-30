@@ -32,6 +32,11 @@ All Boomerang dynamics methods dispatch on this type.
 """
 const AnyBoomerang = Union{Boomerang, MutableBoomerang}
 
+default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
+                                model_prior::AbstractModelPrior,
+                                ::AnyBoomerang) =
+    FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=false)
+
 
 """
     LowRankPrecision{T<:Real}

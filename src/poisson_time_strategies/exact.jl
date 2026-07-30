@@ -1,7 +1,7 @@
 """
     ExactStrategy
 
-EXPERIMENTAL, intentionally unexported and still in development.
+EXPERIMENTAL and still in development.
 """
 struct ExactStrategy{T} <: PoissonTimeStrategy
     get_next_event_time::T # Function to compute the next event time

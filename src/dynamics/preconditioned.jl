@@ -312,3 +312,10 @@ end
 function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, pd::PreconditionedDynamics)
     return ∂λ∂t(state, ∇U_xt, curvature_input, pd.dynamics)
 end
+function default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
+                                         model_prior::AbstractModelPrior,
+                                         flow::PreconditionedDynamics)
+    return flow.dynamics isa AnyBoomerang ?
+        FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=false) :
+        default_aggregate_unstick_clock(provider, model_prior)
+end

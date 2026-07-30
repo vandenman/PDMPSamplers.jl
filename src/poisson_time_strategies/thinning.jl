@@ -107,11 +107,10 @@ end
 
 function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::AbstractStatisticCounter)
     pq = cache.pq # rename for clarity
-    # i₀, t_event = dequeue_pair!(pq)
-    i₀, t_event = Base.popfirst!(pq)
+    i₀, t_event = first(pq)
     τ = t_event - state.t[]
     ispositive(τ) || error("$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event")
-    return τ, nothing, CoordinateMeta(i₀)
+    return τ, :reflect, CoordinateMeta(i₀)
 end
 
 function accept_reflection_event(rng::Random.AbstractRNG, ::ThinningStrategy, ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::ContinuousDynamics, dt::Real, cache, meta::BoundsMeta)

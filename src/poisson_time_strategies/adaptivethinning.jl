@@ -12,7 +12,7 @@ AdaptiveThinningStrategy(c::BoundStrategy) = AdaptiveThinningStrategy(0.65, c)
 """
     AdaptiveBounds
 
-EXPERIMENTAL, intentionally unexported and still in development.
+EXPERIMENTAL and still in development.
 """
 struct AdaptiveBounds <: BoundStrategy
     c::Vector{Float64}

@@ -204,6 +204,8 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
+    RootsPoissonTimeStrategy,
+    ExactStrategy,
     # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
     Sticky,
     AggregateSticky,
@@ -212,6 +214,7 @@ export
     # Bound strategies
     GlobalBounds,
     LocalBounds,
+    AdaptiveBounds,
 
 
     # Main interface

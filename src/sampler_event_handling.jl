@@ -180,12 +180,21 @@ function _handle_coordinatewise_event_impl!(
     meta,
     stats::AbstractStatisticCounter,
     wrap_boundary::Bool,
+    event_type::Symbol,
 )
     _set_counter_last_rejected(stats, false)
+    if event_type === :horizon_hit
+        move_forward_time!(state, τ, flow)
+        validate_state(state, flow, "after coordinate-wise horizon hit")
+        _set_counter_last_rejected(stats, true)
+        return false, nothing
+    end
+    event_type === :reflect || throw(ArgumentError("unsupported coordinate-wise event type: $event_type"))
     pq = cache.pq
     i₀ = meta.i
     ξ = state.ξ
     abc_i₀_old = ab_i(i₀, ξ, alg, flow, cache)
+    delete!(pq, i₀)
     move_forward_time!(state, τ, flow)
 
     ∇ϕ_i₀ = if !wrap_boundary
@@ -232,9 +241,9 @@ function _handle_coordinatewise_event_impl!(
 end
 
 function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter, phase::Symbol=:unknown)
-    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, false)
+    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, false, event_type)
 end
 
 function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter, phase::Symbol=:unknown)
-    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, true)
+    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, true, event_type)
 end

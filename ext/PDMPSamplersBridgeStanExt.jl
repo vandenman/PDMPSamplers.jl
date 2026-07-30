@@ -13,17 +13,12 @@ import PDMPSamplers: PDMPModel, FullGradient, _SupportBoundaryProbeError, _last_
 struct BridgeStanCallError <: _SupportBoundaryProbeError
     operation::Symbol
     code::Cint
-    message::Cstring
+    message::String
 end
-
-_bridgestan_error_message(err::Base.RefValue{Cstring}) =
-    isassigned(err) && err[] != C_NULL ? err[] : Cstring(C_NULL)
 
 function Base.showerror(io::IO, err::BridgeStanCallError)
     print(io, "BridgeStan ", err.operation, " failed (code ", err.code, ")")
-    err.message == C_NULL && return
-    msg = unsafe_string(err.message)
-    isempty(msg) || print(io, ": ", msg)
+    isempty(err.message) || print(io, ": ", err.message)
 end
 
 struct FastBridgeStanModel
@@ -34,6 +29,7 @@ struct FastBridgeStanModel
     log_density_fn::Ptr{Nothing}
     grad_fn::Ptr{Nothing}
     hvp_fn::Ptr{Nothing}
+    free_error_fn::Ptr{Nothing}
     lp::Base.RefValue{Float64}
     potential_lp::Base.RefValue{Float64}
     err::Base.RefValue{Cstring}
@@ -45,14 +41,27 @@ function FastBridgeStanModel(sm::BridgeStan.StanModel)
     log_density_fn = dlsym(sm.lib, :bs_log_density)
     grad_fn = dlsym(sm.lib, :bs_log_density_gradient)
     hvp_fn = dlsym(sm.lib, :bs_log_density_hessian_vector_product)
+    free_error_fn = dlsym(sm.lib, :bs_free_error_msg)
     lp = Ref(0.0)
     potential_lp = Ref(0.0)
-    err = Ref{Cstring}()
-    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, log_density_fn, grad_fn, hvp_fn, lp, potential_lp, err, d)
+    err = Ref{Cstring}(C_NULL)
+    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, log_density_fn, grad_fn, hvp_fn, free_error_fn, lp, potential_lp, err, d)
+end
+
+function _take_bridgestan_error_message!(m::FastBridgeStanModel)
+    ptr = m.err[]
+    m.err[] = C_NULL
+    ptr == C_NULL && return ""
+    try
+        return unsafe_string(ptr)
+    finally
+        @ccall $(m.free_error_fn)(ptr::Cstring)::Cvoid
+    end
 end
 
 function fast_potential(m::FastBridgeStanModel, q::Vector{Float64})
     m.potential_lp[] = 0.0
+    m.err[] = C_NULL
     rc = @ccall $(m.log_density_fn)(
         m.stanmodel::Ptr{BridgeStan.StanModelStruct},
         true::Bool, true::Bool,
@@ -60,7 +69,7 @@ function fast_potential(m::FastBridgeStanModel, q::Vector{Float64})
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        throw(BridgeStanCallError(:log_density, rc, _bridgestan_error_message(m.err))) # COV_EXCL_LINE
+        throw(BridgeStanCallError(:log_density, rc, _take_bridgestan_error_message!(m))) # COV_EXCL_LINE
     end
     return -m.potential_lp[]
 end
@@ -75,6 +84,7 @@ end
 
 function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, out::Vector{Float64})
     m.lp[] = 0.0
+    m.err[] = C_NULL
     rc = @ccall $(m.grad_fn)(
         m.stanmodel::Ptr{BridgeStan.StanModelStruct},
         true::Bool, true::Bool,
@@ -82,13 +92,14 @@ function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, 
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        throw(BridgeStanCallError(:gradient, rc, _bridgestan_error_message(m.err))) # COV_EXCL_LINE
+        throw(BridgeStanCallError(:gradient, rc, _take_bridgestan_error_message!(m))) # COV_EXCL_LINE
     end
     return out
 end
 
 function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Vector{Float64}, out::Vector{Float64})
     m.lp[] = 0.0
+    m.err[] = C_NULL
     rc = @ccall $(m.hvp_fn)(
         m.stanmodel::Ptr{BridgeStan.StanModelStruct},
         true::Bool, true::Bool,
@@ -97,7 +108,7 @@ function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Ve
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        throw(BridgeStanCallError(:hvp, rc, _bridgestan_error_message(m.err))) # COV_EXCL_LINE
+        throw(BridgeStanCallError(:hvp, rc, _take_bridgestan_error_message!(m))) # COV_EXCL_LINE
     end
     return out
 end

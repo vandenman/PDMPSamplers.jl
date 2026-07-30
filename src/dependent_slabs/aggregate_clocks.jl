@@ -254,6 +254,13 @@ Base.copy(clock::ExponentialSumAggregateClock) = ExponentialSumAggregateClock(
     atol=clock.atol,
 )
 
+"""
+    default_aggregate_unstick_clock(provider, model_prior[, flow])
+
+Choose an aggregate unstick clock. Pass `flow` when it is available so the
+default can select a compatible residual sampler; in particular,
+Boomerang-family flows use a Fourier residual clock for global-logscale slabs.
+"""
 default_aggregate_unstick_clock(provider::IndependentZeroMeanLogscaleGaussianSlab, model_prior::AbstractModelPrior) =
     ExponentialSumAggregateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab, model_prior::AbstractModelPrior) =
@@ -262,6 +269,9 @@ default_aggregate_unstick_clock(provider::AbstractGaussianSlabProvider, model_pr
     slab_cache_style(provider) isa FixedCovarianceCache ? LinearGaussianAggregateClock(provider, model_prior) : SummedRateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::AbstractSlabPrior, model_prior::AbstractModelPrior) =
     SummedRateClock(provider, model_prior)
+
+default_aggregate_unstick_clock(provider::AbstractSlabPrior, model_prior::AbstractModelPrior, ::ContinuousDynamics) =
+    default_aggregate_unstick_clock(provider, model_prior)
 
 function SummedRateClock(
     slab_provider::AbstractSlabPrior,

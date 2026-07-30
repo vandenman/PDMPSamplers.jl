@@ -2,6 +2,9 @@
 
 Dependent slab support is intended for sticky variable-selection samplers where the active coefficients have a joint Gaussian slab prior.
 Users should normally construct a model prior, a Gaussian slab prior, and an `AggregateSticky` strategy with a `GridThinningStrategy` inner clock.
+Choose the clock with `default_aggregate_unstick_clock(slab, model_prior, flow)`;
+the flow-aware form selects the Fourier residual implementation needed by
+Boomerang-family flows instead of the linear-flow Chebyshev clock.
 
 ## Support Matrix
 

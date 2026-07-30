@@ -28,10 +28,20 @@ accept_reflection_event(alg::AggregateStickyLoopState, args...) = accept_reflect
 _is_sticky_loop_state(::StickyLoopState) = true
 _is_sticky_loop_state(::AggregateStickyLoopState) = true
 
+function _enforce_nonstickable_coordinates_free!(state::StickyPDMPState, can_stick::AbstractVector{Bool})
+    length(can_stick) == length(state.free) ||
+        throw(DimensionMismatch("can_stick length $(length(can_stick)) does not match dimension $(length(state.free))"))
+    @inbounds for i in eachindex(state.free, can_stick)
+        can_stick[i] || (state.free[i] = true)
+    end
+    return state
+end
+
 # this could use less memory by looking at
 function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
 
     d = length(state.ξ)
+    state isa StickyPDMPState && _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()
@@ -64,6 +74,7 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
         throw(ArgumentError("AggregateSticky does not support this flow; dense-preconditioned ZigZag needs a separate coordinate boundary velocity law"))
     d = length(state.ξ)
     length(strat.can_stick) == d || throw(DimensionMismatch("can_stick length $(length(strat.can_stick)) does not match dimension $d"))
+    _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()

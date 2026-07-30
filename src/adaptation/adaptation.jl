@@ -444,6 +444,10 @@ function welford_update!(ws::WelfordBoomerangStats, x::AbstractVector, theta::Ab
         @inbounds for i in eachindex(ws.free_time)
             ws.free_time[i] += dt
         end
+        if !isempty(ws.free_sum_x_dt)
+            _boom_raw_S1!(ws.free_sum_x_dt, ws.prev_x, ws.prev_theta, mu, dt)
+            _boom_raw_S2!(ws.free_sum_x2_dt, ws.prev_x, ws.prev_theta, mu, dt)
+        end
     else
         _boom_raw_S1_masked!(ws.free_sum_x_dt, ws.free_time, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
         _boom_raw_S2_masked!(ws.free_sum_x2_dt, ws.prev_x, ws.prev_theta, mu, ws.prev_free, dt)
