@@ -15,34 +15,6 @@ function _boomerang_covariance_entry(flow::LowRankMutableBoomerang, i::Integer, 
     return value
 end
 
-function _boundary_values_token(values, h::UInt)
-    h = hash(size(values), h)
-    @inbounds for value in values
-        h = hash(value, h)
-    end
-    return h
-end
-
-_boundary_covariance_token(flow::AnyBoomerang) =
-    _boundary_values_token(flow.ΣL, hash(:boomerang_covariance))
-function _boundary_covariance_token(flow::LowRankMutableBoomerang)
-    lrp = flow.Γ
-    h = _boundary_values_token(lrp.D, hash(:lowrank_boomerang_covariance))
-    h = _boundary_values_token(lrp.V, h)
-    return _boundary_values_token(lrp.Λ, h)
-end
-
-_boundary_metric_token(::IdentityPreconditioner, h::UInt) = hash(:identity_preconditioner, h)
-_boundary_metric_token(metric::DiagonalPreconditioner, h::UInt) =
-    _boundary_values_token(metric.scale, hash(:diagonal_preconditioner, h))
-_boundary_metric_token(metric::DensePreconditioner, h::UInt) =
-    _boundary_values_token(metric.L, hash(:dense_preconditioner, h))
-
-_boundary_covariance_token(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) =
-    _boundary_metric_token(flow.metric, hash(:preconditioned_bps_covariance))
-_boundary_covariance_token(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang}) =
-    _boundary_metric_token(flow.metric, _boundary_covariance_token(flow.dynamics))
-
 function _materialize_boomerang_covariance!(dest::AbstractMatrix{Float64}, flow::AnyBoomerang)
     mul!(dest, flow.ΣL, transpose(flow.ΣL))
     return dest
@@ -94,22 +66,45 @@ end
 
 function _materialize_boundary_covariance!(
     scratch::BoundaryVelocityScratch,
-    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang},
+    flow::PreconditionedDynamics{IdentityPreconditioner,<:AnyBoomerang},
 )
-    inner_cov = scratch.covariance_work
-    _materialize_boomerang_covariance!(inner_cov, flow.dynamics)
-    metric = flow.metric
-    if metric isa IdentityPreconditioner
-        copyto!(scratch.covariance, inner_cov)
-    elseif metric isa DiagonalPreconditioner
-        @inbounds for j in axes(inner_cov, 2), i in axes(inner_cov, 1)
-            scratch.covariance[i, j] = metric.scale[i] * inner_cov[i, j] * metric.scale[j]
-        end
-    else
-        mul!(scratch.ΣAA, metric.L, inner_cov)
-        mul!(scratch.covariance, scratch.ΣAA, transpose(metric.L))
+    return _materialize_boomerang_covariance!(scratch.covariance, flow.dynamics)
+end
+
+function _materialize_boundary_covariance!(
+    scratch::BoundaryVelocityScratch,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:AnyBoomerang},
+)
+    covariance = _materialize_boomerang_covariance!(scratch.covariance, flow.dynamics)
+    scale = flow.metric.scale
+    @inbounds for j in axes(covariance, 2), i in axes(covariance, 1)
+        covariance[i, j] *= scale[i] * scale[j]
     end
+    return covariance
+end
+
+function _materialize_boundary_covariance!(
+    scratch::BoundaryVelocityScratch,
+    flow::PreconditionedDynamics{DensePreconditioner,<:AnyBoomerang},
+)
+    d = length(scratch.active)
+    inner_cov = scratch.covariance_work
+    if inner_cov === nothing || size(inner_cov) != (d, d)
+        inner_cov = Matrix{Float64}(undef, d, d)
+        scratch.covariance_work = inner_cov
+    end
+    _materialize_boomerang_covariance!(inner_cov, flow.dynamics)
+    mul!(scratch.ΣAA, flow.metric.L, inner_cov)
+    mul!(scratch.covariance, scratch.ΣAA, transpose(flow.metric.L))
     return scratch.covariance
+end
+
+function _invalidate_boundary_velocity_cache!(state::StickyPDMPState)
+    scratch = state.boundary_scratch
+    scratch.covariance_valid = false
+    scratch.active_factor_valid = false
+    fill!(scratch.conditional_std_valid, false)
+    return state
 end
 
 function _prepare_boundary_velocity_cache!(
@@ -121,13 +116,14 @@ function _prepare_boundary_velocity_cache!(
 )
     d = length(state.free)
     scratch = _ensure_boundary_scratch!(state.boundary_scratch, d)
-    token = _boundary_covariance_token(flow)
-    covariance_changed = !scratch.covariance_valid || token != scratch.covariance_token
+    covariance_changed = !scratch.covariance_valid || scratch.covariance_source !== flow
     if covariance_changed
         _materialize_boundary_covariance!(scratch, flow)
-        scratch.covariance_token = token
+        scratch.covariance_source = flow
+        scratch.covariance_generation += one(UInt)
         scratch.covariance_valid = true
         scratch.active_factor_valid = false
+        fill!(scratch.conditional_std_valid, false)
     end
 
     active_changed = !scratch.active_factor_valid || scratch.cached_free != state.free
@@ -141,6 +137,7 @@ function _prepare_boundary_velocity_cache!(
             end
         end
         scratch.active_count = k
+        fill!(scratch.conditional_std_valid, false)
         if ispositive(k)
             @inbounds for b in 1:k, a in 1:k
                 scratch.ΣAA[a, b] = scratch.covariance[scratch.active[a], scratch.active[b]]
@@ -148,6 +145,15 @@ function _prepare_boundary_velocity_cache!(
             cholesky!(Symmetric(view(scratch.ΣAA, 1:k, 1:k), :L); check=true)
         end
         scratch.active_factor_valid = true
+    end
+
+    k = scratch.active_count
+    if ispositive(k)
+        solved_θ = view(scratch.solved_θ, 1:k)
+        @inbounds for a in 1:k
+            solved_θ[a] = state.ξ.θ[scratch.active[a]]
+        end
+        _solve_cached_active!(solved_θ, scratch, k)
     end
     return scratch
 end
@@ -173,6 +179,7 @@ function _conditional_boundary_velocity_params_prepared(
     # so every inactive label shares the same cached active-block factorization.
     if state.free[i]
         scratch.active_factor_valid = false
+        fill!(scratch.conditional_std_valid, false)
         return _conditional_boundary_velocity_params(
             (a, b) -> covariance[a, b], state, i, context)
     end
@@ -181,21 +188,23 @@ function _conditional_boundary_velocity_params_prepared(
     iszero(k) && return 0.0, sqrt(σ2)
     ΣiA = scratch.ΣiA
     solved_θ = view(scratch.solved_θ, 1:k)
-    solved_cross = view(scratch.solved_cross, 1:k)
     @inbounds for a in 1:k
         ia = scratch.active[a]
         ΣiA[a] = covariance[i, ia]
-        solved_θ[a] = state.ξ.θ[ia]
-        solved_cross[a] = ΣiA[a]
     end
-    _solve_cached_active!(solved_θ, scratch, k)
-    _solve_cached_active!(solved_cross, scratch, k)
     ΣiA_view = view(ΣiA, 1:k)
     μ = dot(ΣiA_view, solved_θ)
-    σ2_cond = σ2 - dot(ΣiA_view, solved_cross)
-    ispositive(σ2_cond) ||
-        throw(ArgumentError("$context conditional boundary velocity variance must be positive, got $σ2_cond"))
-    return μ, sqrt(σ2_cond)
+    if !scratch.conditional_std_valid[i]
+        solved_cross = view(scratch.solved_cross, 1:k)
+        copyto!(solved_cross, ΣiA_view)
+        _solve_cached_active!(solved_cross, scratch, k)
+        σ2_cond = σ2 - dot(ΣiA_view, solved_cross)
+        ispositive(σ2_cond) ||
+            throw(ArgumentError("$context conditional boundary velocity variance must be positive, got $σ2_cond"))
+        scratch.conditional_std[i] = sqrt(σ2_cond)
+        scratch.conditional_std_valid[i] = true
+    end
+    return μ, scratch.conditional_std[i]
 end
 
 _stdnormal_pdf(z::Real) = exp(-0.5 * abs2(z)) / sqrt(2π)

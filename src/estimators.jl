@@ -914,6 +914,216 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow
     return buf
 end
 
+# Sticky traces pass the segment's active mask after the time arguments. Each
+# statistic supplies its own mask-aware methods, keeping this protocol open to
+# additional user-defined statistics.
+function _integrate_segment(::typeof(Statistics.mean), flow::Union{ZigZag, BouncyParticle},
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean),
+                             ::Union{ZigZag, BouncyParticle},
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    @inbounds for i in eachindex(x0, free)
+        buf[i] += x0[i] * dt + (free[i] ? θ0[i] * dt^2 / 2 : 0.0)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.var), flow::Union{ZigZag, BouncyParticle},
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.var, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.var),
+                             ::Union{ZigZag, BouncyParticle},
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    @inbounds for i in eachindex(x0, free)
+        y = x0[i] - μ_est[i]
+        v = free[i] ? θ0[i] : 0.0
+        buf[i] += dt * (y^2 + y * v * dt + v^2 * dt^2 / 3)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, BouncyParticle},
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = zeros(length(x0), length(x0))
+    return _integrate_segment!(result, Statistics.cov, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov),
+                             ::Union{ZigZag, BouncyParticle},
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    d = length(x0)
+    @inbounds for j in 1:d, i in j:d
+        yᵢ = x0[i] - μ_est[i]
+        yⱼ = x0[j] - μ_est[j]
+        vᵢ = free[i] ? θ0[i] : 0.0
+        vⱼ = free[j] ? θ0[j] : 0.0
+        val = dt * (yᵢ * yⱼ +
+                    (yᵢ * vⱼ + yⱼ * vᵢ) * dt / 2 +
+                    vᵢ * vⱼ * dt^2 / 3)
+        buf[i, j] += val
+        i != j && (buf[j, i] += val)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang,
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::Boomerang,
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    s, c = sincos(dt)
+    @inbounds for i in eachindex(x0, free)
+        buf[i] += free[i] ?
+            (x0[i] - flow.μ[i]) * s + θ0[i] * (1 - c) + flow.μ[i] * dt :
+            x0[i] * dt
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang,
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), ::MutableBoomerang,
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    @inbounds for i in eachindex(x0, free)
+        buf[i] += (free[i] ? (x0[i] + x1[i]) / 2 : x0[i]) * dt
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang,
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.var, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.var), flow::AnyBoomerang,
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    s2 = sin(2dt)
+    @inbounds for i in eachindex(x0, free)
+        if free[i]
+            a = x0[i] - flow.μ[i]
+            b = θ0[i]
+            c0 = flow.μ[i] - μ_est[i]
+            buf[i] += (a^2 * (dt / 2 + s2 / 4) +
+                       b^2 * (dt / 2 - s2 / 4) +
+                       c0^2 * dt + a * b * s^2 +
+                       2a * c0 * s + 2b * c0 * (1 - c))
+        else
+            buf[i] += (x0[i] - μ_est[i])^2 * dt
+        end
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.cov), flow::AnyBoomerang,
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = zeros(length(x0), length(x0))
+    return _integrate_segment!(result, Statistics.cov, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow::AnyBoomerang,
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    s2 = sin(2dt)
+    d = length(x0)
+    @inbounds for j in 1:d, i in j:d
+        aᵢ = free[i] ? x0[i] - flow.μ[i] : 0.0
+        bᵢ = free[i] ? θ0[i] : 0.0
+        cᵢ = (free[i] ? flow.μ[i] : x0[i]) - μ_est[i]
+        aⱼ = free[j] ? x0[j] - flow.μ[j] : 0.0
+        bⱼ = free[j] ? θ0[j] : 0.0
+        cⱼ = (free[j] ? flow.μ[j] : x0[j]) - μ_est[j]
+        val = (aᵢ * aⱼ * (dt / 2 + s2 / 4) +
+               bᵢ * bⱼ * (dt / 2 - s2 / 4) +
+               (aᵢ * bⱼ + aⱼ * bᵢ) * s^2 / 2 +
+               cᵢ * cⱼ * dt +
+               (aᵢ * cⱼ + aⱼ * cᵢ) * s +
+               (bᵢ * cⱼ + bⱼ * cᵢ) * (1 - c))
+        buf[i, j] += val
+        i != j && (buf[j, i] += val)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(inclusion_probs), flow::ContinuousDynamics,
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = zeros(length(x0))
+    return _integrate_segment!(result, inclusion_probs, flow, x0, x1, θ0, θ1,
+                               t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), ::ContinuousDynamics,
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    @inbounds for i in eachindex(free)
+        free[i] && (buf[i] += dt)
+    end
+    return buf
+end
+
+_integrate_segment(::typeof(inclusion_probs), flow::PreconditionedDynamics,
+                   x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool}) =
+    _integrate_segment(inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free)
+
+_integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flow::PreconditionedDynamics,
+                    x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool}) =
+    _integrate_segment!(buf, inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free)
+
+const _MomentStatistic = Union{
+    typeof(Statistics.mean),
+    typeof(Statistics.var),
+    typeof(Statistics.cov),
+}
+
+_integrate_segment(f::_MomentStatistic, flow::PreconditionedDynamics,
+                   x0, x1, θ0, θ1, t0, t1,
+                   free::AbstractVector{Bool}, args...) =
+    _integrate_segment(f, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free, args...)
+
+_integrate_segment!(buf, f::_MomentStatistic, flow::PreconditionedDynamics,
+                    x0, x1, θ0, θ1, t0, t1,
+                    free::AbstractVector{Bool}, args...) =
+    _integrate_segment!(buf, f, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free, args...)
+
 
 
 
@@ -1095,106 +1305,45 @@ function _integrate(trace::FactorizedTrace, ::typeof(inclusion_probs))
     return integral / total_time
 end
 
-function _integrate_masked_boomerang_segment!(
-    integral,
-    f,
-    flow::ContinuousDynamics,
-    x0,
-    x1,
-    θ0,
-    t0,
-    t1,
-    free,
-    args...,
-)
-    base = _underlying_flow(flow)
-    dt = t1 - t0
-    s, c = sincos(dt)
-    s2 = sin(2dt)
-
-    if f === Statistics.mean
-        @inbounds for i in eachindex(x0)
-            if free[i]
-                if base isa MutableBoomerang
-                    integral[i] += (x0[i] + x1[i]) * dt / 2
-                else
-                    integral[i] += (x0[i] - base.μ[i]) * s +
-                                   θ0[i] * (1 - c) + base.μ[i] * dt
-                end
-            else
-                integral[i] += x0[i] * dt
-            end
-        end
-    elseif f === inclusion_probs
-        @inbounds for i in eachindex(x0)
-            free[i] && (integral[i] += dt)
-        end
-    elseif f === Statistics.var
-        μ_est = only(args)
-        @inbounds for i in eachindex(x0)
-            if free[i]
-                a = x0[i] - base.μ[i]
-                b = θ0[i]
-                c0 = base.μ[i] - μ_est[i]
-                integral[i] += (a^2 * (dt / 2 + s2 / 4) +
-                                b^2 * (dt / 2 - s2 / 4) +
-                                c0^2 * dt + a * b * s^2 +
-                                2a * c0 * s + 2b * c0 * (1 - c))
-            else
-                integral[i] += (x0[i] - μ_est[i])^2 * dt
-            end
-        end
-    elseif f === Statistics.cov
-        μ_est = only(args)
-        d = length(x0)
-        @inbounds for j in 1:d, i in j:d
-            aᵢ = free[i] ? x0[i] - base.μ[i] : 0.0
-            bᵢ = free[i] ? θ0[i] : 0.0
-            cᵢ = (free[i] ? base.μ[i] : x0[i]) - μ_est[i]
-            aⱼ = free[j] ? x0[j] - base.μ[j] : 0.0
-            bⱼ = free[j] ? θ0[j] : 0.0
-            cⱼ = (free[j] ? base.μ[j] : x0[j]) - μ_est[j]
-            val = (aᵢ * aⱼ * (dt / 2 + s2 / 4) +
-                   bᵢ * bⱼ * (dt / 2 - s2 / 4) +
-                   (aᵢ * bⱼ + aⱼ * bᵢ) * s^2 / 2 +
-                   cᵢ * cⱼ * dt +
-                   (aᵢ * cⱼ + aⱼ * cᵢ) * s +
-                   (bᵢ * cⱼ + bⱼ * cᵢ) * (1 - c))
-            integral[i, j] += val
-            i != j && (integral[j, i] += val)
-        end
-    else
-        throw(ArgumentError("unsupported masked Boomerang statistic $f"))
-    end
-    return integral
-end
-
-function _integrate_masked_boomerang(trace::PDMPTrace, f, args...)
+function _integrate_masked(trace::PDMPTrace, f, args...)
     n = length(trace)
     n < 2 && error("Cannot compute statistics on a trace with fewer than 2 events")
-    d = size(trace.positions, 1)
-    integral = f === Statistics.cov ? zeros(d, d) : zeros(d)
-    @inbounds for k in 1:n-1
-        _integrate_masked_boomerang_segment!(
-            integral,
-            f,
-            trace.flow,
-            view(trace.positions, :, k),
-            view(trace.positions, :, k + 1),
-            view(trace.velocities, :, k),
-            trace.times[k],
-            trace.times[k + 1],
-            view(trace.free_masks, :, k),
-            args...,
-        )
+    flow = trace.flow
+    x0 = copy(view(trace.positions, :, 1))
+    x1 = copy(view(trace.positions, :, 2))
+    θ0 = copy(view(trace.velocities, :, 1))
+    θ1 = copy(view(trace.velocities, :, 2))
+    t0, t1 = trace.times[1], trace.times[2]
+    free = view(trace.free_masks, :, 1)
+    integral = _integrate_segment(f, flow, x0, x1, θ0, θ1, t0, t1, free, args...)
+    has_inplace = hasmethod(
+        _integrate_segment!,
+        Tuple{typeof(integral), typeof(f), typeof(flow), typeof(x0), typeof(x1),
+              typeof(θ0), typeof(θ1), typeof(t0), typeof(t1), typeof(free),
+              map(typeof, args)...},
+    )
+    @inbounds for k in 2:n-1
+        copyto!(x0, x1)
+        copyto!(θ0, θ1)
+        copyto!(x1, view(trace.positions, :, k + 1))
+        copyto!(θ1, view(trace.velocities, :, k + 1))
+        t0, t1 = trace.times[k], trace.times[k + 1]
+        free = view(trace.free_masks, :, k)
+        if has_inplace
+            _integrate_segment!(integral, f, flow, x0, x1, θ0, θ1, t0, t1,
+                                free, args...)
+        else
+            integral .+= _integrate_segment(f, flow, x0, x1, θ0, θ1, t0, t1,
+                                            free, args...)
+        end
     end
     total_time = trace.times[end] - trace.times[1]
     return integral / total_time
 end
 
 function _integrate(trace::PDMPTrace, f, args...)
-    if trace.free_masks !== nothing && _underlying_flow(trace.flow) isa AnyBoomerang
-        return _integrate_masked_boomerang(trace, f, args...)
+    if trace.free_masks !== nothing
+        return _integrate_masked(trace, f, args...)
     end
     return _integrate_unmasked(trace, f, args...)
 end
@@ -1257,8 +1406,8 @@ function _integrate_unmasked(trace::AbstractPDMPTrace, f, args...)
 end
 
 function _integrate!(out::AbstractVector, trace::PDMPTrace, f, args...)
-    if trace.free_masks !== nothing && _underlying_flow(trace.flow) isa AnyBoomerang
-        copyto!(out, _integrate_masked_boomerang(trace, f, args...))
+    if trace.free_masks !== nothing
+        copyto!(out, _integrate_masked(trace, f, args...))
         return out
     end
     return _integrate_unmasked!(out, trace, f, args...)

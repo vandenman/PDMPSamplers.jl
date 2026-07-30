@@ -1,5 +1,17 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+struct _TestMaskOccupation end
+const _test_mask_occupation = _TestMaskOccupation()
+
+function PDMPSamplers._integrate_segment(
+    ::_TestMaskOccupation,
+    ::PDMPSamplers.ContinuousDynamics,
+    x0, x1, θ0, θ1, t0, t1,
+    free::AbstractVector{Bool},
+)
+    return Float64.(free) .* (t1 - t0)
+end
+
 @testset "Estimators coverage" begin
 
     @testset "MutableBoomerang trapezoidal mean integration" begin
@@ -112,6 +124,7 @@
             @test quantile(trace, 0.25; coordinate=1) == 0.0
             @test quantile(trace, [0.25, 0.5, 0.75]; coordinate=1) == zeros(3)
             @test inclusion_probs(trace)[1] == 0.0
+            @test PDMPSamplers._integrate(trace, _test_mask_occupation) == [0.0, 1.0]
 
             ordinary = PDMPTrace([
                 PDMPEvent(0.0, [0.0, 1.0], [0.0, 0.5]),

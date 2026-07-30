@@ -307,6 +307,44 @@ end
         set_active_set!(hvp_model, BitVector([false, true, true]))
         @test hvp_model.hvp(hvp_x, hvp_v) ≈ [0.0, -0.4, 0.0] atol=1e-6
 
+        # Sticky event handling must synchronize every independently copied
+        # target in PDMPModel, not only the gradient target.
+        transition_slab = DenseGaussianSlab(zeros(2), Matrix(I, 2, 2), 1:2)
+        transition_target = DependentSlabTarget(
+            2, (out, x) -> fill!(out, 0.0), (out, x) -> fill!(out, 0.0),
+            transition_slab, BernoulliModelPrior(fill(0.5, 2));
+            initial_free=trues(2),
+        )
+        transition_model = PDMPModel(transition_target; hvp=true)
+        transition_flow = ZigZag(2)
+        transition_alg = Sticky(GridThinningStrategy(), fill(0.5, 2))
+        transition_state, transition_model_, transition_alg_, transition_cache, transition_stats =
+            PDMPSamplers.initialize_state(
+                MersenneTwister(812),
+                transition_flow,
+                transition_model,
+                transition_alg,
+                0.0,
+                SkeletonPoint(zeros(2), ones(2)),
+            )
+        direction = ones(2)
+        @test transition_model_.hvp(zeros(2), direction) ≈ ones(2) atol=1e-6
+        PDMPSamplers._handle_event_no_boundary!(
+            MersenneTwister(813),
+            0.0,
+            transition_model_,
+            transition_flow,
+            transition_alg_,
+            transition_state,
+            transition_cache,
+            :sticky,
+            CoordinateMeta(1),
+            transition_stats,
+        )
+        @test transition_state.free == BitVector([false, true])
+        @test transition_model_.hvp(zeros(2), direction) ≈ [0.0, 1.0] atol=1e-6
+        @test transition_model_.vhv(zeros(2), direction, direction) ≈ 1.0 atol=1e-6
+
         hvp_trace, _ = pdmp_sample(SkeletonPoint([0.1, -0.2, 0.3], [0.4, 0.2, -0.1]), Boomerang(d, 0.0), hvp_model, GridThinningStrategy(), 0.0, 0.05)
         @test !isempty(hvp_trace.times)
     end
@@ -1228,6 +1266,7 @@ end
         boomerang_params = PDMPSamplers._boomerang_boundary_velocity_params(boomerang, inactive_state, 1)
         @test identity_params[1] ≈ boomerang_params[1]
         @test identity_params[2] ≈ boomerang_params[2]
+        @test inactive_state.boundary_scratch.covariance_work === nothing
         @test isfinite(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(135), precond_boomerang_state, precond_boomerang, 1))
 
         dense_preconditioner = PDMPSamplers.DensePreconditioner(d)
@@ -1241,18 +1280,28 @@ end
         @test σ_dense_preconditioned^2 ≈ Σ_preconditioned_boomerang[1, 1] - Σ_preconditioned_boomerang[1, 2]^2 / Σ_preconditioned_boomerang[2, 2]
         @test PDMPSamplers.unstick_rate_constant(dense_preconditioned_boomerang, 1) ≈ sqrt(2 / π) * sqrt(Σ_preconditioned_boomerang[1, 1])
         scratch = dense_preconditioned_state.boundary_scratch
-        cached_token = scratch.covariance_token
+        cached_generation = scratch.covariance_generation
         @test scratch.active_factor_valid
+        @test scratch.conditional_std_valid[1]
+        @test scratch.covariance_work !== nothing
         @test scratch.covariance ≈ Σ_preconditioned_boomerang
         PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(dense_preconditioned_boomerang, dense_preconditioned_state, 1)
-        @test scratch.covariance_token == cached_token
+        @test scratch.covariance_generation == cached_generation
+        cached_std = scratch.conditional_std[1]
+        dense_preconditioned_state.ξ.θ[2] = 0.9
+        μ_new_velocity, σ_new_velocity = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(
+            dense_preconditioned_boomerang, dense_preconditioned_state, 1)
+        @test μ_new_velocity ≈ Σ_preconditioned_boomerang[1, 2] / Σ_preconditioned_boomerang[2, 2] * 0.9
+        @test σ_new_velocity == cached_std
+        dense_preconditioned_state.ξ.θ[2] = 0.75
 
         old_l11 = dense_preconditioner.L[1, 1]
         dense_preconditioner.L[1, 1] = old_l11 + 0.2
         Σ_updated = dense_preconditioner.L * Σ_dense * dense_preconditioner.L'
+        PDMPSamplers._invalidate_boundary_velocity_cache!(dense_preconditioned_state)
         μ_updated, σ_updated = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(
             dense_preconditioned_boomerang, dense_preconditioned_state, 1)
-        @test scratch.covariance_token != cached_token
+        @test scratch.covariance_generation != cached_generation
         @test scratch.covariance ≈ Σ_updated
         @test μ_updated ≈ Σ_updated[1, 2] / Σ_updated[2, 2] * dense_preconditioned_state.ξ.θ[2]
         @test σ_updated^2 ≈ Σ_updated[1, 1] - Σ_updated[1, 2]^2 / Σ_updated[2, 2]

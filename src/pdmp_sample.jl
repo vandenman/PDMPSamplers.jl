@@ -381,6 +381,7 @@ function _handle_dynamics_adaptation!(
     _reset_inner_grid!(alg_)
     _inc_counter_grid_resets_from_dynamics_adaptation(stats)
 
+    state isa StickyPDMPState && _invalidate_boundary_velocity_cache!(state)
     alg_ isa Union{StickyLoopState,AggregateStickyLoopState} && update_all_stick_times!(rng, alg_, state, flow)
 
     return nothing

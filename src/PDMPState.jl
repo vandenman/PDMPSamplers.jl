@@ -32,13 +32,16 @@ mutable struct BoundaryVelocityScratch
     active::Vector{Int}
     ΣAA::Matrix{Float64}
     covariance::Matrix{Float64}
-    covariance_work::Matrix{Float64}
+    covariance_work::Union{Nothing,Matrix{Float64}}
     ΣiA::Vector{Float64}
     θA::Vector{Float64}
     solved_θ::Vector{Float64}
     solved_cross::Vector{Float64}
+    conditional_std::Vector{Float64}
+    conditional_std_valid::BitVector
     cached_free::BitVector
-    covariance_token::UInt
+    covariance_source::Any
+    covariance_generation::UInt
     active_count::Int
     covariance_valid::Bool
     active_factor_valid::Bool
@@ -49,12 +52,15 @@ function BoundaryVelocityScratch(d::Integer)
         Vector{Int}(undef, d),
         Matrix{Float64}(undef, d, d),
         Matrix{Float64}(undef, d, d),
-        Matrix{Float64}(undef, d, d),
+        nothing,
+        Vector{Float64}(undef, d),
         Vector{Float64}(undef, d),
         Vector{Float64}(undef, d),
         Vector{Float64}(undef, d),
         Vector{Float64}(undef, d),
         falses(d),
+        falses(d),
+        nothing,
         zero(UInt),
         0,
         false,
@@ -68,11 +74,13 @@ function _ensure_boundary_scratch!(s::BoundaryVelocityScratch, d::Integer)
     resize!(s.active, d)
     s.ΣAA = Matrix{Float64}(undef, d, d)
     s.covariance = Matrix{Float64}(undef, d, d)
-    s.covariance_work = Matrix{Float64}(undef, d, d)
+    s.covariance_work = nothing
     resize!(s.ΣiA, d)
     resize!(s.θA, d)
     resize!(s.solved_θ, d)
     resize!(s.solved_cross, d)
+    resize!(s.conditional_std, d)
+    resize!(s.conditional_std_valid, d)
     resize!(s.cached_free, d)
     s.covariance_valid = false
     s.active_factor_valid = false

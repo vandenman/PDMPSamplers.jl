@@ -64,7 +64,7 @@ end
 function _handle_global_event_impl!(
     rng::Random.AbstractRNG,
     τ::Real,
-    gradient_strategy::GlobalGradientStrategy,
+    model_or_gradient::Union{GlobalGradientStrategy,GlobalGradientModel},
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     state::AbstractPDMPState,
@@ -75,6 +75,7 @@ function _handle_global_event_impl!(
     wrap_boundary::Bool,
     phase::Symbol,
 )
+    gradient_strategy = model_or_gradient isa PDMPModel ? model_or_gradient.grad : model_or_gradient
     move_forward_time!(state, τ, flow)
     validate_state(state, flow, "after moving forward in time")
 
@@ -126,7 +127,7 @@ function _handle_global_event_impl!(
             alg.inner_alg_state isa GridAdaptiveState
             _invalidate_cached_gradient!(alg.inner_alg_state)
         end
-        set_active_set!(gradient_strategy, state.free)
+        set_active_set!(model_or_gradient, state.free)
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = true
         if isfactorized(flow)
@@ -142,17 +143,23 @@ function _handle_global_event_impl!(
     return needs_saving, saving_args
 end
 
-function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy,
+function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, model_or_gradient::Union{GlobalGradientStrategy,GlobalGradientModel},
     flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta,
     stats::AbstractStatisticCounter, phase::Symbol=:unknown)
-    return _handle_global_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, event_type, meta, stats, false, phase)
+    return _handle_global_event_impl!(rng, τ, model_or_gradient, flow, alg, state, cache, event_type, meta, stats, false, phase)
 end
 
-function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy,
+function handle_event!(rng::Random.AbstractRNG, τ::Real, model_or_gradient::Union{GlobalGradientStrategy,GlobalGradientModel},
     flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta,
     stats::AbstractStatisticCounter, phase::Symbol=:unknown)
-    return _handle_global_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, event_type, meta, stats, true, phase)
+    return _handle_global_event_impl!(rng, τ, model_or_gradient, flow, alg, state, cache, event_type, meta, stats, true, phase)
 end
+
+_handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, model::CoordinateWiseGradientModel,
+    args...) = _handle_event_no_boundary!(rng, τ, model.grad, args...)
+
+handle_event!(rng::Random.AbstractRNG, τ::Real, model::CoordinateWiseGradientModel,
+    args...) = handle_event!(rng, τ, model.grad, args...)
 
 function _coordinate_boundary_context(
     state::PDMPState,
