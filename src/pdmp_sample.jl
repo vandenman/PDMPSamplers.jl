@@ -509,6 +509,8 @@ _phase_criterion(c::StoppingCriterion, ::Real) = c
 _step_horizon(::StoppingCriterion, state) = Inf
 _step_horizon(c::FixedTimeCriterion, state) = max(0.0, c.T - state.t[])
 _step_horizon(c::_CommonPhaseCriterion, state) = c.check_time ? max(0.0, c.T - state.t[]) : Inf
+_step_horizon(c::AdaptiveWarmupCriterion, state) =
+    max(0.0, c.start_time + c.max_time - state.t[])
 _step_horizon(c::AnyCriterion, state) = minimum(child -> _step_horizon(child, state), c.criteria)
 
 function _pdmp_sample_single(

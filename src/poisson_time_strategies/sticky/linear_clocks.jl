@@ -226,14 +226,13 @@ function sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateCloc
     lo = 0.0
     hi = 1.0
     H_hi = cumulative_hazard(clock, flow, state, 0.0, hi, can_stick)
-    iterations = 0
-    while H_hi < threshold && iterations < 60
+    while H_hi < threshold
         lo = hi
-        hi *= 2.0
+        next_hi = 2.0 * hi
+        (!isfinite(next_hi) || next_hi <= hi) && return Inf
+        hi = next_hi
         H_hi = cumulative_hazard(clock, flow, state, 0.0, hi, can_stick)
-        iterations += 1
     end
-    H_hi < threshold && return Inf
     f = τ -> cumulative_hazard(clock, flow, state, 0.0, τ, can_stick) - threshold
     return Roots.find_zero(f, (lo, hi), Roots.Bisection(); atol=clock.atol, rtol=clock.rtol)
 end

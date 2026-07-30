@@ -297,6 +297,45 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test factorized_trace isa PDMPSamplers.FactorizedTrace
         @test last_event_time(factorized_trace) == 0.25
         @test length(factorized_trace) == 2
+
+        coordinate_model = PDMPModel(
+            1, CoordinateWiseGradient((x, i) -> 0.0), nothing)
+        coordinate_trace, coordinate_stats = pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            ZigZag(1),
+            coordinate_model,
+            ThinningStrategy(LocalBounds([0.0])),
+            0.0, 0.25;
+            progress=false,
+        )
+        @test length(coordinate_trace) == 2
+        @test last_event_time(coordinate_trace) == 0.25
+        @test coordinate_stats.stop_reason == :reached_time
+
+        adaptive_gradient = FullGradient(function (out, x)
+            x[1] <= 0.1 + 16eps(0.1) ||
+                error("adaptive warmup crossed max_time")
+            fill!(out, 0.0)
+            return out
+        end)
+        adaptive_criterion = AdaptiveWarmupCriterion(;
+            min_time=0.0, max_time=0.1, stable_time=1.0,
+            min_events=10_000, check_every=1)
+        adaptive_state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        PDMPSamplers.initialize!(
+            adaptive_criterion, adaptive_state, nothing,
+            PDMPSamplers.DevelStatisticCounter())
+        @test PDMPSamplers._step_horizon(
+            adaptive_criterion, adaptive_state) == 0.1
+        pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            BouncyParticle(1, 0.0),
+            PDMPModel(1, adaptive_gradient, nothing),
+            GridThinningStrategy(),
+            0.0, 0.1, 1.0;
+            warmup_stop=adaptive_criterion,
+            progress=false,
+        )
     end
 
     @testset "EventCountCriterion is phase-local" begin

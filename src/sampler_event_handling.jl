@@ -196,7 +196,7 @@ function _handle_coordinatewise_event_impl!(
         move_forward_time!(state, τ, flow)
         validate_state(state, flow, "after coordinate-wise horizon hit")
         _set_counter_last_rejected(stats, true)
-        return false, nothing
+        return true, first(eachindex(state.ξ.x))
     end
     event_type === :reflect || throw(ArgumentError("unsupported coordinate-wise event type: $event_type"))
     pq = cache.pq

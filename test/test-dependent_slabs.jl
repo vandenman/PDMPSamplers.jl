@@ -638,6 +638,15 @@ end
         τ = PDMPSamplers.sample_time(rng_time, const_clock, const_flow, const_state, Inf, const_can_stick)
         @test τ ≈ rand(rng_ref, Exponential()) / λ0 rtol=1e-7 atol=1e-8
 
+        tiny_prior = BernoulliModelPrior(fill(1e-20, 2))
+        tiny_linear = LinearGaussianAggregateClock(const_provider, tiny_prior)
+        tiny_summed = SummedRateClock(const_provider, tiny_prior)
+        @test PDMPSamplers.sample_time(
+            MersenneTwister(199), tiny_linear, const_flow, const_state, Inf,
+            const_can_stick) ≈ PDMPSamplers.sample_time(
+                MersenneTwister(199), tiny_summed, const_flow, const_state, Inf,
+                const_can_stick) rtol=1e-7
+
         κ = [0.25, 0.5, 0.75]
         indep_provider = IndependentZeroMeanGaussianSlab(κ, 1:3)
         indep_dense = DenseGaussianSlab(zeros(3), Matrix(Diagonal(@. inv(2π * κ^2))), 1:3)
@@ -1291,6 +1300,9 @@ end
         @test copied_state.boundary_scratch !== precond_bps_state.boundary_scratch
         copied_state.boundary_scratch.active_count = 99
         @test precond_bps_state.boundary_scratch.active_count != 99
+        roots_probe_state = PDMPSamplers._roots_probe_state(precond_bps_state)
+        @test roots_probe_state.boundary_scratch === precond_bps_state.boundary_scratch
+        @test roots_probe_state.ξ !== precond_bps_state.ξ
 
         dense_bps = DensePreconditionedBPS(d; refresh_rate=0.0)
         Σ_dense_precond = [1.0 0.3; 0.3 1.6]

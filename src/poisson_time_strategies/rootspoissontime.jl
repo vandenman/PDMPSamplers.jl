@@ -27,9 +27,12 @@ mutable struct IntegralCache
     τR::Float64; IR::Float64   # right bracket
     τC::Float64; IC::Float64   # last evaluated
 end
+_roots_probe_state(state::AbstractPDMPState) = copy(state)
+_roots_probe_state(state::StickyPDMPState) = _shallow_copy_sticky_state(state)
+
 function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, atol=1e-9)
     ic = IntegralCache(0.0, 0.0, Inf, Inf, Inf, Inf)  # only left at (0,0) initially
-    state_s = copy(state)
+    state_s = _roots_probe_state(state)
 
     # Define rate function outside to avoid boxing
     ratefun = let state = state, state_s = state_s, grad = grad, flow = flow, cache = cache, λ = λ
