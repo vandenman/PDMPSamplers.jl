@@ -243,7 +243,23 @@ function _grid_min_cells(strat::GridThinningStrategy, flow::ContinuousDynamics, 
     return min_grid_cells(flow, strat.N_min, N_base)
 end
 
+_validate_grid_model(::ContinuousDynamics, ::PDMPModel) = nothing
+
+function _validate_grid_model(::ContinuousDynamics,
+    ::PDMPModel{<:SubsampledGradient})
+    throw(ArgumentError(
+        "SubsampledGradient's event-scoped batch lifecycle is not exact with GridThinning; use MarkedControlVariate"))
+end
+
+function _validate_grid_model(flow::ContinuousDynamics,
+    ::PDMPModel{<:MarkedControlVariate})
+    flow isa Union{BouncyParticle,ZigZag} || throw(ArgumentError(
+        "MarkedControlVariate GridThinning currently supports only ordinary BouncyParticle and ZigZag dynamics; got $(typeof(flow))"))
+    return nothing
+end
+
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
+    _validate_grid_model(flow, model)
     T = typeof(strat.t_max)
     0.0 <= strat.linear_area_threshold || throw(ArgumentError("linear_area_threshold must be nonnegative"))
     0.0 <= strat.linear_min_area_gain || throw(ArgumentError("linear_min_area_gain must be nonnegative"))
@@ -326,6 +342,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         PiecewiseAffineBound(2N_base),
+        PiecewiseAffineBound(2N_base),
         Base.RefValue{Int}(N_base),
         Base.RefValue{Float64}(strat.t_max),
         strat.α⁺,
@@ -372,6 +389,7 @@ end
 struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
+    marked_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
     α⁺::Float64

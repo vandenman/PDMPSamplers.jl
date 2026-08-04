@@ -396,6 +396,8 @@ end
     prior_gradient_calls::Int
     fd_curvature_gradient_calls::Int
     potential_calls::Int
+    residual_oracle_calls::Int
+    deterministic_gradient_calls::Int
 end
 
 @counter_ops GradientCallCounter begin
@@ -408,6 +410,8 @@ end
         prior_gradient_calls,
         fd_curvature_gradient_calls,
         potential_calls,
+        residual_oracle_calls,
+        deterministic_gradient_calls,
     )
 
     get_sum(
@@ -419,13 +423,16 @@ end
         prior_gradient_calls,
         fd_curvature_gradient_calls,
         potential_calls,
+        residual_oracle_calls,
+        deterministic_gradient_calls,
     )
 end
 
 # Purpose counters intentionally overlap with the total ∇f_calls counter. For
 # example, a stochastic gradient used as a finite-difference curvature probe
 # increments ∇f_calls, stochastic_gradient_calls, and fd_curvature_gradient_calls.
-@inline _inc_gradient_purpose!(::AbstractStatisticCounter, ::Val{:full_gradient}) = nothing
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:full_gradient}) =
+    _inc_counter_full_gradient_calls(stats)
 @inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:stochastic_gradient}) =
     _inc_counter_stochastic_gradient_calls(stats)
 @inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:full_reflection_gradient}) =
@@ -434,6 +441,8 @@ end
     _inc_counter_prior_gradient_calls(stats)
 @inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:ordinary_full_gradient}) =
     _inc_counter_full_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:deterministic_gradient}) =
+    _inc_counter_deterministic_gradient_calls(stats)
 
 @counter_struct mutable struct GridThinningCounter <: AbstractStatisticCounter
     grid_builds::Int

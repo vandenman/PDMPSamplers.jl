@@ -31,6 +31,120 @@ end
 
 Base.copy(g::FullGradient) = FullGradient(_copy_callable(g.f))
 
+"""
+    SeparableResidualEnvelope(weights, component_scales!)
+
+An additive residual-rate envelope with
+`b_i(t) = sum(weights[r, i] * c_r(t), r)`. `component_scales!` is called as
+`component_scales!(out, state, t)`. Along a linear GridThinning trajectory
+each scale must be affine in `t`.
+
+The resulting `b_i(t)` must dominate the observation's perturbation of the
+chosen dynamics' event rate. For BPS this is
+`abs(dot(v, r_i(x)))`; for ZigZag it is
+`sum(abs(v[j] * r_i(x)[j]), j)`, which is the bound needed by its
+coordinatewise flip rates.
+"""
+mutable struct SeparableResidualEnvelope{T<:AbstractMatrix,F}
+    weights::T
+    component_scales!::F
+    totals::Vector{Float64}
+    alias_tables::Vector{Union{Nothing,AliasTables.AliasTable{UInt64,Int}}}
+    scales::Vector{Float64}
+end
+
+function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!)
+    isempty(weights) && throw(ArgumentError("residual envelope weights must be nonempty"))
+    any(x -> !isfinite(x) || x < 0, weights) &&
+        throw(ArgumentError("residual envelope weights must be finite and nonnegative"))
+    stored_weights = Matrix{Float64}(weights)
+    totals = vec(sum(stored_weights; dims=2))
+    tables = Union{Nothing,AliasTables.AliasTable{UInt64,Int}}[
+        ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
+        for r in axes(stored_weights, 1)
+    ]
+    return SeparableResidualEnvelope(stored_weights, component_scales!, totals,
+        tables, zeros(Float64, size(stored_weights, 1)))
+end
+
+"""
+    MarkedControlVariate(deterministic_gradient!, residual_oracle, envelope,
+                         anchor, m; begin_search! = ..., deterministic_hvp! = nothing,
+                         full_gradient! = nothing)
+
+Exact marked-minibatch gradient strategy for GridThinning. The residual oracle
+is called as `oracle(out, x, subset, frozen_anchor)` and returns the unscaled
+sum of observation residual gradients for precisely `subset`. Julia owns the
+`N/m` scaling. `begin_search!` runs once before the anchor is frozen.
+The optional full-gradient callback is deliberately outside candidate and
+reflection evaluation and is available only to explicit anchor-management
+code through `full_gradient!`.
+"""
+mutable struct MarkedControlVariate{F,O,E<:SeparableResidualEnvelope,A,B,H,G} <: GlobalGradientStrategy
+    deterministic_gradient!::F
+    residual_oracle::O
+    envelope::E
+    anchor::A
+    active_anchor::A
+    begin_search_callback!::B
+    deterministic_hvp!::H
+    full_gradient!::G
+    m::Int
+    subset::Vector{Int}
+    residual_buffer::Vector{Float64}
+    sampling_map::Dict{Int,Int}
+end
+
+function MarkedControlVariate(deterministic_gradient!, residual_oracle,
+    envelope::SeparableResidualEnvelope, anchor::AbstractVector, m::Integer;
+    begin_search! = (cv, state) -> nothing, deterministic_hvp! = nothing,
+    full_gradient! = nothing)
+    N = size(envelope.weights, 2)
+    1 <= m <= N || throw(ArgumentError("minibatch size m must lie in 1:N"))
+    a = collect(Float64, anchor)
+    return MarkedControlVariate(deterministic_gradient!, residual_oracle, envelope,
+        a, copy(a), begin_search!, deterministic_hvp!, full_gradient!, Int(m),
+        Vector{Int}(undef, m), zeros(Float64, length(a)), Dict{Int,Int}())
+end
+
+Base.copy(cv::MarkedControlVariate) = MarkedControlVariate(
+    _copy_callable(cv.deterministic_gradient!), _copy_callable(cv.residual_oracle),
+    deepcopy(cv.envelope), copy(cv.anchor), cv.m;
+    begin_search! = _copy_callable(cv.begin_search_callback!),
+    deterministic_hvp! = _copy_callable(cv.deterministic_hvp!),
+    full_gradient! = _copy_callable(cv.full_gradient!))
+
+function begin_search!(cv::MarkedControlVariate, state::AbstractPDMPState)
+    cv.begin_search_callback!(cv, state)
+    copyto!(cv.active_anchor, cv.anchor)
+    return cv
+end
+
+function component_scales!(out, envelope::SeparableResidualEnvelope, state, t)
+    envelope.component_scales!(out, state, t)
+    length(out) == length(envelope.totals) || throw(DimensionMismatch("wrong number of component scales"))
+    any(x -> !isfinite(x) || x < 0, out) &&
+        throw(ArgumentError("residual-envelope component scales must be finite and nonnegative"))
+    return out
+end
+
+function total_residual_bound(envelope::SeparableResidualEnvelope, state, t)
+    scales = component_scales!(envelope.scales, envelope, state, t)
+    return dot(scales, envelope.totals)
+end
+
+deterministic_gradient!(out, cv::MarkedControlVariate, x) = cv.deterministic_gradient!(out, x)
+function deterministic_hvp!(out, cv::MarkedControlVariate, x, v)
+    cv.deterministic_hvp! === nothing && throw(ArgumentError("no deterministic HVP callback is available"))
+    cv.deterministic_hvp!(out, x, v)
+end
+function full_gradient!(out, cv::MarkedControlVariate, x)
+    cv.full_gradient! === nothing && throw(ArgumentError(
+        "no full-gradient callback is available; it is only needed for explicit anchor creation or updates"))
+    cv.full_gradient!(out, x)
+end
+residual_gradient!(out, oracle, x, subset, anchor) = oracle(out, x, subset, anchor)
+
 struct SubsampledGradient{F1, F2, F3, F4} <: GlobalGradientStrategy
     f::F1
     resample_indices!::F2
@@ -94,6 +208,26 @@ function with_stats(grad::SubsampledGradient, stats::AbstractStatisticCounter)
         grad.fixed_batch_within_event,
     )
 end
+
+struct WithResidualStats{F,S}
+    f::F
+    stats::S
+end
+function (ws::WithResidualStats)(args...)
+    _inc_counter_residual_oracle_calls(ws.stats)
+    return ws.f(args...)
+end
+
+function with_stats(cv::MarkedControlVariate, stats::AbstractStatisticCounter)
+    return MarkedControlVariate(
+        WithStats(cv.deterministic_gradient!, stats, Val(:deterministic_gradient)),
+        WithResidualStats(cv.residual_oracle, stats), deepcopy(cv.envelope),
+        copy(cv.anchor), cv.m;
+        begin_search! = cv.begin_search_callback!,
+        deterministic_hvp! = cv.deterministic_hvp!,
+        full_gradient! = cv.full_gradient! === nothing ? nothing :
+            WithStats(cv.full_gradient!, stats, Val(:full_gradient)))
+end
 with_stats(grad::CoordinateWiseGradient, stats::AbstractStatisticCounter) =
     CoordinateWiseGradient(with_stats(grad.f, stats, Val(:ordinary_full_gradient)))
 
@@ -143,6 +277,7 @@ function set_active_set!(strategy::SubsampledGradient, free::BitVector)
     return nothing
 end
 set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_set!(strategy.f, free)
+set_active_set!(::MarkedControlVariate, ::BitVector) = nothing
 
 # Main entry point: compute gradient from state
 function compute_gradient!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
@@ -176,6 +311,11 @@ function compute_gradient!(strategy::SubsampledGradient, x, out)
     return out
 end
 
+function compute_gradient!(strategy::MarkedControlVariate, x, out)
+    deterministic_gradient!(out, strategy, x)
+    return out
+end
+
 function compute_gradient!(strategy::CoordinateWiseGradient, x, i::Integer, cache)
     cache.∇ϕx[i] = strategy.f(x, i)
     return cache.∇ϕx[i]
@@ -195,3 +335,7 @@ function compute_gradient_for_reflection!(strategy::SubsampledGradient, x, out)
     end
     return out
 end
+
+
+compute_gradient_for_reflection!(strategy::MarkedControlVariate, x, out) =
+    compute_gradient!(strategy, x, out)

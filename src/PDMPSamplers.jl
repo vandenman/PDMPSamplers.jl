@@ -18,6 +18,7 @@ import QuadGK
 import Roots
 
 import ADTypes
+import AliasTables
 import DifferentiationInterface as DI
 
 import ElasticArrays
@@ -72,6 +73,7 @@ include("poisson_time_strategies/grid_event_constant.jl")
 include("poisson_time_strategies/grid_event_value_quadratic.jl")
 include("poisson_time_strategies/grid_event_dispatch.jl")
 include("poisson_time_strategies/grid_event_grid.jl")
+include("poisson_time_strategies/marked_gridthinning.jl")
 include("poisson_time_strategies/positive_variation_gridthinning.jl")
 include("poisson_time_strategies/vector_variation_thinning.jl")
 include("poisson_time_strategies/thinning.jl")
@@ -149,6 +151,8 @@ export
     # Gradient strategies
     FullGradient,
     SubsampledGradient,
+    MarkedControlVariate,
+    SeparableResidualEnvelope,
     CoordinateWiseGradient,
     compute_gradient!,
     set_active_set!,

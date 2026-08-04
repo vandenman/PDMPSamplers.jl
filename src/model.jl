@@ -33,6 +33,16 @@ Construct from a log-density `d`. Uses `ADTypes` backend to generate a `FullGrad
 
 Compatibility constructor. Wraps `f` in `FullGradient`.
 """
+struct MarkedDeterministicHVP{C,S} <: Function
+    cv::C
+    stats::S
+end
+
+function (h::MarkedDeterministicHVP)(out, x, v)
+    h.stats === nothing || _inc_counter_∇²f_calls(h.stats)
+    return deterministic_hvp!(out, h.cv, x, v)
+end
+
 struct PDMPModel{G<:GradientStrategy,H,V,J}
     d::Int
     grad::G
@@ -40,6 +50,12 @@ struct PDMPModel{G<:GradientStrategy,H,V,J}
     vhv::V
     joint::J
     function PDMPModel(d::Integer, grad::GradientStrategy, hvp, vhv, grad_inplace::Bool, hvp_inplace::Bool, joint=nothing)
+
+        if grad isa MarkedControlVariate &&
+            !(hvp === nothing || hvp isa MarkedDeterministicHVP)
+            throw(ArgumentError(
+                "a marked model's deterministic HVP must be supplied through MarkedControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
+        end
 
         hvp_new = if hvp === nothing
             nothing
@@ -77,6 +93,22 @@ function PDMPModel(f::Function, args...; kwargs...)
 end
 
 PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true, true)
+
+function PDMPModel(d::Integer, cv::MarkedControlVariate)
+    length(cv.anchor) == d || throw(DimensionMismatch("anchor length must match model dimension"))
+    hvp = cv.deterministic_hvp! === nothing ? nothing :
+        MarkedDeterministicHVP(cv, nothing)
+    return PDMPModel(d, cv, hvp, nothing, true, true)
+end
+
+PDMPModel(d::Integer, cv::MarkedControlVariate, ::Nothing,
+    grad_inplace=true, hvp_inplace=true) = PDMPModel(d, cv)
+
+function PDMPModel(::Integer, ::MarkedControlVariate, hvp,
+    grad_inplace=true, hvp_inplace=true)
+    throw(ArgumentError(
+        "a marked model's deterministic HVP must be supplied through MarkedControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
+end
 
 function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADType, needs_hvp::Bool=false)
 
@@ -169,6 +201,15 @@ function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
     vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
     joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
     PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
+end
+
+function with_stats(model::PDMPModel{<:MarkedControlVariate}, stats::AbstractStatisticCounter)
+    grad_new = with_stats(model.grad, stats)
+    hvp_new = grad_new.deterministic_hvp! === nothing ? nothing :
+        MarkedDeterministicHVP(grad_new, stats)
+    vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
+    joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
+    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, true, joint_new)
 end
 
 function set_active_set!(model::PDMPModel, free::BitVector)

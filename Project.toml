@@ -5,6 +5,7 @@ authors = ["Don van den Bergh <donvdbergh@hotmail.com>"]
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
+AliasTables = "66dad0bd-aa9a-41b7-9441-69ab47430ed8"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
@@ -32,6 +33,7 @@ PDMPSamplersDynamicPPLExt = "DynamicPPL"
 
 [compat]
 ADTypes = "1"
+AliasTables = "1"
 BridgeStan = "2"
 DataStructures = "0.18, 0.19"
 DifferentiationInterface = "0.7"

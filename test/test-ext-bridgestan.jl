@@ -123,7 +123,7 @@ else
                 PDMPSamplers.compute_gradient!(model_unit.grad, x_test, out)
                 @test norm(out - x_test) < 1e-8
 
-                model_copy = PDMPSamplers._copy_model(model_unit)
+                model_copy = copy(model_unit)
                 @test model_copy.grad.f.model.stanmodel != model_unit.grad.f.model.stanmodel
                 out_copy = zeros(d)
                 PDMPSamplers.compute_gradient!(model_copy.grad, x_test, out_copy)
@@ -142,7 +142,7 @@ else
                 @test PDMPSamplers._potential(model_potential, x_test) ≈ gradient_potential
                 @test out == gradient_snapshot
 
-                model_copy = PDMPSamplers._copy_model(model_potential)
+                model_copy = copy(model_potential)
                 @test model_copy.grad.f.model.stanmodel != model_potential.grad.f.model.stanmodel
                 @test PDMPSamplers._potential(model_copy, x_test) ≈ gradient_potential
 
@@ -177,7 +177,7 @@ else
                 result = model_unit_hvp.hvp(x_test, v_test)
                 @test norm(result - v_test) < 1e-8
 
-                model_copy_hvp = PDMPSamplers._copy_model(model_unit_hvp)
+                model_copy_hvp = copy(model_unit_hvp)
                 @test model_copy_hvp.grad.f.model.stanmodel != model_unit_hvp.grad.f.model.stanmodel
                 @test model_copy_hvp.hvp.model.stanmodel != model_unit_hvp.hvp.model.stanmodel
                 @test model_copy_hvp.hvp(x_test, v_test) ≈ result

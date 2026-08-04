@@ -104,7 +104,7 @@ function pdmp_sample(
             statistic_counter)
         return PDMPChains([trace], [stats])
     end
-    models = [_copy_model(model) for _ in 1:n_chains]
+    models = [copy(model) for _ in 1:n_chains]
     return pdmp_sample(ξ₀, flow, models, alg, t₀, T, t_warmup;
         stop, warmup_stop, threaded, progress, adapter, seed,
         support_boundary_options, statistic_counter)
@@ -181,12 +181,23 @@ _copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metr
 
 initialize_flow_state!(::AbstractPDMPState, ::ContinuousDynamics) = nothing
 
-function _copy_model(model::PDMPModel)
+function Base.copy(model::PDMPModel)
     grad_new = copy(model.grad)
     hvp_new = model.hvp === nothing ? nothing : _copy_callable(model.hvp)
     vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
     joint_new = model.joint === nothing ? nothing : _copy_callable(model.joint)
     return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
+end
+
+function Base.copy(model::PDMPModel{<:MarkedControlVariate})
+    # Reconstruct the generated HVP from the chain-local control variate.
+    # Copying model.hvp directly would retain the closure over model.grad.
+    grad_new = copy(model.grad)
+    hvp_new = grad_new.deterministic_hvp! === nothing ? nothing :
+        MarkedDeterministicHVP(grad_new, nothing)
+    vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
+    joint_new = model.joint === nothing ? nothing : _copy_callable(model.joint)
+    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, true, joint_new)
 end
 
 function _update_progress!(progress::Bool, prg, tstop::Base.RefValue{Float64}, T::Float64, progress_stops::Int, state::AbstractPDMPState)
