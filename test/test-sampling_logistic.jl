@@ -90,59 +90,6 @@ end
         end
     end
 
-    @testset "Subsampled gradient (ZigZag)" begin
-        Random.seed!(stable_test_seed(:zigzag, :logistic_sub))
-
-        nsub = n ÷ 10
-        T = 20_000.0
-
-        grad = SubsampledGradient(Base.Fix1(neg_gradient_sub_cv!, target), Base.Fix1(resample_indices!, target), nsub)
-        flow = ZigZag(Matrix(1.0I(d)), zeros(d))
-        model = PDMPModel(d, grad, Base.Fix1(neg_hvp_sub!, target))
-        alg = GridThinningStrategy()
-
-        x0 = zeros(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
-        ξ0 = SkeletonPoint(x0, θ0)
-
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
-
-        @test length(trace) > 100
-
-        test_logistic_approximation(trace, β_map; name="LogReg($d,$n) sub", elapsed=stats.elapsed_time)
-    end
-
-    @testset "Subsampled gradient multi-chain independence (ZigZag)" begin
-        Random.seed!(stable_test_seed(:zigzag, :logistic_sub_multichain))
-
-        nsub = n ÷ 10
-        T = 5_000.0
-
-        grad = SubsampledGradient(Base.Fix1(neg_gradient_sub_cv!, target), Base.Fix1(resample_indices!, target), nsub)
-        flow = ZigZag(Matrix(1.0I(d)), zeros(d))
-        model = PDMPModel(d, grad, Base.Fix1(neg_hvp_sub!, target))
-        alg = GridThinningStrategy()
-
-        x0 = zeros(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
-        ξ0 = SkeletonPoint(x0, θ0)
-
-        chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T; n_chains=2, progress=false)
-
-        @test length(chains) == 2
-        trace1, _ = chains[1]
-        trace2, _ = chains[2]
-        @test length(trace1) > 50
-        @test length(trace2) > 50
-
-        # Chains must have independent state: their means should differ
-        @test mean(trace1) != mean(trace2)
-
-        # Both chains should give reasonable posterior means
-        test_logistic_approximation(trace1, β_map; name="LogReg($d,$n) sub chain1")
-        test_logistic_approximation(trace2, β_map; name="LogReg($d,$n) sub chain2")
-    end
-
     @testset "Sticky ZigZag" begin
         d_s, n_s = 5, 200
         β_gen_s = [0.5, 0.0, 1.0, 0.0, -0.8]
@@ -187,48 +134,6 @@ end
             min_ess = minimum(ess(trace))
             println("ok   | $(rpad(_flow_name(trace), 22)) | $(rpad("LogReg($d_s,$n_s) sticky", 26)) | ESS=$(lpad(round(Int, min_ess), 7)) | $(_format_elapsed(stats.elapsed_time)) | incl=[$incl_str]")
         end
-    end
-
-    @testset "CV-subsampled gradient and HVP unbiasedness (MC)" begin
-        Random.seed!(stable_test_seed(:logistic_mc_unbiasedness))
-
-        d_mc, n_mc = 4, 300
-        nsub = n_mc ÷ 10
-        N_mc = 2_000
-
-        target_mc = gen_data(LogisticRegressionModel, d_mc, n_mc)
-
-        β = randn(d_mc)
-        v = randn(d_mc)
-
-        set_anchor!(target_mc, randn(d_mc))   # anchor ≠ β to stress-test CV
-
-        true_grad = zeros(d_mc)
-        neg_gradient!(target_mc, true_grad, β)
-
-        true_hvp = zeros(d_mc)
-        neg_hvp!(target_mc, true_hvp, β, v)
-
-        grad_acc = zeros(d_mc)
-        hvp_acc  = zeros(d_mc)
-        g_tmp    = zeros(d_mc)
-        h_tmp    = zeros(d_mc)
-
-        for _ in 1:N_mc
-            resample_indices!(target_mc, nsub)
-            neg_gradient_sub_cv!(target_mc, g_tmp, β)
-            neg_hvp_sub!(target_mc, h_tmp, β, v)
-            grad_acc .+= g_tmp
-            hvp_acc  .+= h_tmp
-        end
-
-        mc_grad = grad_acc ./ N_mc
-        mc_hvp  = hvp_acc  ./ N_mc
-
-        mc_se = 1.0 / sqrt(N_mc)
-
-        @test isapprox(mc_grad, true_grad; atol=mc_se * norm(true_grad) + mc_se)
-        @test isapprox(mc_hvp,  true_hvp;  atol=mc_se * norm(true_hvp)  + mc_se)
     end
 
 end

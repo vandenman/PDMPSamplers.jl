@@ -52,6 +52,7 @@ include("dynamics/zigzag.jl")
 include("dynamics/bouncyparticle.jl")
 include("dynamics/boomerang.jl")
 include("dynamics/preconditioned.jl")
+include("dynamics/marked_trajectory_bounds.jl")
 
 # Gradient strategies
 # include("gradient_strategies.jl") # This line was moved up
@@ -89,8 +90,6 @@ include("trace.jl")
 include("transforms.jl")
 include("estimators.jl")
 include("transformed_estimators.jl")
-include("adaptation/hcv.jl")
-include("adaptation/anchor_bank.jl")
 include("adaptation/adaptation.jl")
 include("stopping_criteria.jl")
 
@@ -136,6 +135,7 @@ export
     AbstractPreconditioner,
     DiagonalPreconditioner,
     DensePreconditioner,
+    set_dense_preconditioner!,
     # short hands
     PreconditionedZigZag,
     PreconditionedBPS,
@@ -150,9 +150,10 @@ export
     LogDensity,
     # Gradient strategies
     FullGradient,
-    SubsampledGradient,
     MarkedControlVariate,
     SeparableResidualEnvelope,
+    TrajectoryResidualEnvelope,
+    DampedHCVResidualEnvelope,
     CoordinateWiseGradient,
     compute_gradient!,
     set_active_set!,
@@ -178,25 +179,10 @@ export
     default_aggregate_unstick_clock,
     DependentSlabTarget,
 
-    # Hessian control variate
-    HCVState,
-    apply_hcv_correction!,
-    update_hcv!,
-
-    # Anchor bank
-    AnchorEntry,
-    AnchorBank,
-    has_active_anchor,
-    active_entry,
-    select_nearest!,
-    add_anchor!,
-
     # Adaptation
     AbstractAdapter,
     NoAdaptation,
     SequenceAdapter,
-    GradientResampler,
-    AnchorBankAdapter,
 
     # Event metadata
     PDMPEventMeta,

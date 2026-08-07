@@ -325,6 +325,9 @@ end
     reflections_accepted::Int
     refreshment_events::Int
     sticky_events::Int
+    sticky_freezes::Int
+    sticky_unfreezes::Int
+    sticky_unfreeze_rejections::Int
     boundary_reflections::Int
     last_rejected::Bool
 end
@@ -335,6 +338,9 @@ end
         reflections_accepted,
         refreshment_events,
         sticky_events,
+        sticky_freezes,
+        sticky_unfreezes,
+        sticky_unfreeze_rejections,
         boundary_reflections,
     )
 
@@ -345,6 +351,9 @@ end
         reflections_accepted,
         refreshment_events,
         sticky_events,
+        sticky_freezes,
+        sticky_unfreezes,
+        sticky_unfreeze_rejections,
     )
 
     get_any(last_rejected)
@@ -390,9 +399,7 @@ end
 @counter_struct mutable struct GradientCallCounter <: AbstractStatisticCounter
     ∇f_calls::Int
     ∇²f_calls::Int
-    stochastic_gradient_calls::Int
     full_gradient_calls::Int
-    full_reflection_gradient_calls::Int
     prior_gradient_calls::Int
     fd_curvature_gradient_calls::Int
     potential_calls::Int
@@ -404,9 +411,7 @@ end
     inc(
         ∇f_calls,
         ∇²f_calls,
-        stochastic_gradient_calls,
         full_gradient_calls,
-        full_reflection_gradient_calls,
         prior_gradient_calls,
         fd_curvature_gradient_calls,
         potential_calls,
@@ -417,9 +422,7 @@ end
     get_sum(
         ∇f_calls,
         ∇²f_calls,
-        stochastic_gradient_calls,
         full_gradient_calls,
-        full_reflection_gradient_calls,
         prior_gradient_calls,
         fd_curvature_gradient_calls,
         potential_calls,
@@ -428,15 +431,8 @@ end
     )
 end
 
-# Purpose counters intentionally overlap with the total ∇f_calls counter. For
-# example, a stochastic gradient used as a finite-difference curvature probe
-# increments ∇f_calls, stochastic_gradient_calls, and fd_curvature_gradient_calls.
 @inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:full_gradient}) =
     _inc_counter_full_gradient_calls(stats)
-@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:stochastic_gradient}) =
-    _inc_counter_stochastic_gradient_calls(stats)
-@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:full_reflection_gradient}) =
-    _inc_counter_full_reflection_gradient_calls(stats)
 @inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:prior_gradient}) =
     _inc_counter_prior_gradient_calls(stats)
 @inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:ordinary_full_gradient}) =
@@ -575,6 +571,28 @@ end
         grid_points_evaluated,
         grid_endpoint_derivative_points_loaded,
         grid_resets_from_dynamics_adaptation,
+    )
+end
+
+@counter_struct mutable struct MarkedThinningCounter <: AbstractStatisticCounter
+    marked_cell_roof_proposals::Int
+    marked_aggregate_accepts::Int
+    marked_subset_evaluations::Int
+    marked_final_reflections::Int
+end
+
+@counter_ops MarkedThinningCounter begin
+    inc(
+        marked_cell_roof_proposals,
+        marked_aggregate_accepts,
+        marked_subset_evaluations,
+        marked_final_reflections,
+    )
+    get_sum(
+        marked_cell_roof_proposals,
+        marked_aggregate_accepts,
+        marked_subset_evaluations,
+        marked_final_reflections,
     )
 end
 
@@ -778,12 +796,8 @@ end
     main_gradient_calls::Int
     warmup_hessian_calls::Int
     main_hessian_calls::Int
-    warmup_stochastic_gradient_calls::Int
-    main_stochastic_gradient_calls::Int
     warmup_full_gradient_calls::Int
     main_full_gradient_calls::Int
-    warmup_full_reflection_gradient_calls::Int
-    main_full_reflection_gradient_calls::Int
     warmup_prior_gradient_calls::Int
     main_prior_gradient_calls::Int
     warmup_fd_curvature_gradient_calls::Int
@@ -822,12 +836,8 @@ end
         main_gradient_calls,
         warmup_hessian_calls,
         main_hessian_calls,
-        warmup_stochastic_gradient_calls,
-        main_stochastic_gradient_calls,
         warmup_full_gradient_calls,
         main_full_gradient_calls,
-        warmup_full_reflection_gradient_calls,
-        main_full_reflection_gradient_calls,
         warmup_prior_gradient_calls,
         main_prior_gradient_calls,
         warmup_fd_curvature_gradient_calls,
@@ -931,6 +941,7 @@ end
     GradientCallCounter,
     RunSummaryCounter,
     GridThinningCounter,
+    MarkedThinningCounter,
     ConstantBoundCounter,
     StickyStatsCounter,
     AffineBoundCounter,

@@ -131,10 +131,15 @@ end
 function _vv_signed_channels!(out::AbstractVector, state::AbstractPDMPState,
     grad::AbstractVector, flow::DensePreconditionedZigZag, cache)
 
-    mul!(out, transpose(flow.metric.L), grad)
-    v = flow.metric.v_canonical
-    @inbounds for i in eachindex(out, v)
-        out[i] *= v[i]
+    scratch = _dense_zigzag_stratum!(state, flow)
+    fill!(out, 0.0)
+    k = scratch.active_count
+    @inbounds for b in 1:k
+        value = zero(eltype(out))
+        for a in b:k
+            value += scratch.ΣAA[a, b] * grad[scratch.active[a]]
+        end
+        out[b] = scratch.canonical_signs[b] * value
     end
     return out
 end

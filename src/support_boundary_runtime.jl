@@ -5,6 +5,8 @@ struct BoundaryHandling{M} <: BoundaryPolicy
 end
 
 _boundary_policy(opts::SupportBoundaryOptions) = opts.detect_boundaries ? BoundaryHandling{opts.mode}(opts) : NoBoundaryHandling()
+_detect_boundaries(::NoBoundaryHandling) = false
+_detect_boundaries(::BoundaryHandling) = true
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -18,6 +20,36 @@ _next_event_time_for_step(
     max_horizon::Real,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats)
 
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::MarkedThinningState,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryHandling,
+    max_horizon::Real,
+)
+    throw(ArgumentError(
+        "support-boundary detection is not yet supported by MarkedControlVariate ThinningStrategy"))
+end
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::MarkedThinningState,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::NoBoundaryHandling,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+        Float64(max_horizon), true, :horizon_hit)
+end
+
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
@@ -29,7 +61,7 @@ _next_event_time_for_step(
     policy::BoundaryPolicy,
     max_horizon::Real,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats,
-                    Float64(max_horizon), policy isa BoundaryHandling)
+                    Float64(max_horizon), _detect_boundaries(policy))
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -43,7 +75,7 @@ _next_event_time_for_step(
     max_horizon::Real,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats,
                     Float64(max_horizon), true, :horizon_hit,
-                    policy isa BoundaryHandling)
+                    _detect_boundaries(policy))
 
 function _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -58,7 +90,7 @@ function _next_event_time_for_step(
 )
     return next_event_time(rng, model, flow, alg, state, cache, stats,
                            Float64(max_horizon), true, :horizon_hit,
-                           policy isa BoundaryHandling)
+                           _detect_boundaries(policy))
 end
 
 function _next_event_time_for_step(

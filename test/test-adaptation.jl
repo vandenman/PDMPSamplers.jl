@@ -246,30 +246,6 @@
         @test result isa PDMPSamplers.NoAdaptation
     end
 
-    @testset "default_adapter for MutableBoomerang + SubsampledGradient" begin
-        d = 3
-        flow = AdaptiveBoomerang(d; scheme=:diagonal)
-        grad_sub = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            2,
-            false;
-            resample_dt=0.25,
-        )
-
-        adapter = PDMPSamplers.default_adapter(flow, grad_sub, 6.0, 40.0, 1.5)
-        @test adapter isa PDMPSamplers.SequenceAdapter
-
-        ad_flow, ad_grad = adapter.adapters
-        @test ad_flow isa PDMPSamplers.BoomerangAdapter
-        @test ad_flow.base_dt == 6.0
-        @test ad_flow.last_update == 1.5
-        @test ad_grad isa PDMPSamplers.SequenceAdapter
-    end
-
     @testset "default_dynamics_adapter for PreconditionedDynamics" begin
         zz = ZigZag(3)
         precond = PDMPSamplers.PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), zz)
@@ -421,171 +397,25 @@
         PDMPSamplers.adapt!(seq, nothing, nothing, nothing, nothing)
     end
 
-    @testset "AnchorBankAdapter adapt! — warmup phase triggers update" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        select_called = Ref(0)
-        update_trace = Ref{Any}(nothing)
-        ad = AnchorBankAdapter(
-            _ -> (select_called[] += 1),
-            tr -> (update_trace[] = tr),
-            5.0, 0.0, true,
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:warmup)
-
-        @test select_called[] == 1
-        @test update_trace[] === nothing   # get_warmup_trace returns nothing
-        @test ad.last_update == 0.0
-    end
-
-    @testset "AnchorBankAdapter adapt! — main phase with warmup_only=false triggers update" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        update_called = Ref(0)
-        ad = AnchorBankAdapter(
-            _ -> nothing,
-            _ -> (update_called[] += 1),
-            5.0, 0.0, false,
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
-
-        @test update_called[] == 0
-        @test ad.last_update == 0.0
-    end
-
-    @testset "AnchorBankAdapter adapt! — main phase with warmup_only=true skips update" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        select_called = Ref(0)
-        update_called = Ref(0)
-        ad = AnchorBankAdapter(
-            _ -> (select_called[] += 1),
-            _ -> (update_called[] += 1),
-            5.0, 0.0, true,
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
-
-        @test select_called[] == 0
-        @test update_called[] == 0
-        @test ad.last_update == 0.0
-    end
-
-    @testset "AnchorBankAdapter adapt! — update not triggered when interval not elapsed" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        select_called = Ref(0)
-        update_called = Ref(0)
-        ad = AnchorBankAdapter(
-            _ -> (select_called[] += 1),
-            _ -> (update_called[] += 1),
-            5.0, 8.0, true,   # 10.0 - 8.0 = 2.0 < 5.0
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:warmup)
-
-        @test select_called[] == 1   # select always runs
-        @test update_called[] == 0   # update not triggered
-        @test ad.last_update == 8.0  # unchanged
-    end
-
-    @testset "AnchorUpdater adapt! — warmup triggers update_anchor!" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]  # iterable with ≥2 elements
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0)
-
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:warmup)
-        @test anchor_called[] == 1
-        @test ad.last_update == 10.0
-    end
-
-    @testset "AnchorUpdater adapt! — not triggered when interval not elapsed" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 8.0)  # 10.0 - 8.0 = 2.0 < 5.0
-
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:warmup)
-        @test anchor_called[] == 0
-        @test ad.last_update == 8.0
-    end
-
-    @testset "AnchorUpdater adapt! — main phase with warmup_only=false" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0, false)
+    @testset "marked anchor-bank selection continues after warmup" begin
+        state = PDMPState(10.0, SkeletonPoint([1.0], [0.0]))
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 5.0)
+        envelope = TrajectoryResidualEnvelope(ones(1, 1), [0.0])
+        grad = MarkedControlVariate(
+            (out, x) -> fill!(out, 0.0),
+            (out, x, subset, anchor) -> fill!(out, 0.0),
+            envelope, [0.0], 1)
+        selected = Ref(0)
+        updated = Ref(0)
+        ad = PDMPSamplers.MarkedAnchorBankAdapter(
+            (cv, x, phase) -> (selected[] += phase === :main),
+            (cv, trace) -> (updated[] += 1),
+            1.0, 0.0)
 
         PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
-        @test anchor_called[] == 1
-        @test ad.last_update == 10.0
-    end
-
-    @testset "AnchorUpdater adapt! — main phase skipped when warmup_only=true" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0, true)
-
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
-        @test anchor_called[] == 0
+        @test selected[] == 1
+        @test updated[] == 0
         @test ad.last_update == 0.0
     end
 
-    @testset "default_adapter for MutableBoomerang + SubsampledGradient + AnchorBankAdapter" begin
-        d = 3
-        flow = AdaptiveBoomerang(d; scheme=:diagonal)
-        grad_sub = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            2,
-            false;
-            resample_dt=0.25,
-        )
-        bank_adapter = AnchorBankAdapter(_ -> nothing, _ -> nothing, 0.0, 0.0, true)
-
-        adapter = PDMPSamplers.default_adapter(flow, grad_sub, bank_adapter, 6.0, 40.0, 1.5)
-
-        @test adapter isa PDMPSamplers.SequenceAdapter
-        ad_flow, ad_resampler, ad_bank = adapter.adapters
-        @test ad_flow isa PDMPSamplers.BoomerangAdapter
-        @test ad_resampler isa PDMPSamplers.GradientResampler
-        @test ad_bank === bank_adapter
-        @test bank_adapter.update_dt ≈ 40.0 / 2   # t_warmup / no_anchor_updates
-        @test bank_adapter.last_update == 1.5
-    end
 end

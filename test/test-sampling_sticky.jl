@@ -2,7 +2,9 @@
 
 @testset "Sticky PDMP Sampler Tests" begin
 
-    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang, PreconditionedZigZag, PreconditionedBPS, DensePreconditionedZigZag, DensePreconditionedBPS)
+    pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang,
+        PreconditionedZigZag, PreconditionedBPS, DensePreconditionedZigZag,
+        DensePreconditionedBPS)
     factorized_gradient_types = (FullGradient,)
     nonfactorized_gradient_types = (FullGradient,)
 
@@ -33,13 +35,10 @@
                 @testset "$(data_name(data_type, data_arg))" for data_type in data_types, data_arg in data_args[data_type]
 
                     # MvTDist slab: only ZigZag-based samplers converge reliably.
-                    # Dense preconditioners are incompatible: freezing canonical v[i]=0
-                    # doesn't zero physical θ[j] = Σ L[j,k]v[k] due to off-diagonal L.
                     if data_type === SpikeAndSlabDist{Bernoulli,Distributions.MvTDist}
                         pdmp_type <: Union{BouncyParticle, AnyBoomerang,
                             PreconditionedDynamics{<:Any, BouncyParticle},
-                            PreconditionedDynamics{<:Any, Boomerang},
-                            PreconditionedDynamics{DensePreconditioner}} && continue
+                            PreconditionedDynamics{<:Any, Boomerang}} && continue
                         algorithm === ThinningStrategy && continue
                     end
 
@@ -62,6 +61,10 @@
                     c0 = pdmp_type === ZigZag ? 1e-4 : 1e-2
 
                     flow = pdmp_type(inv(Symmetric(cov(D.slab_dist))), mean(D.slab_dist))
+                    if flow isa PreconditionedDynamics{DensePreconditioner}
+                        set_dense_preconditioner!(flow.metric,
+                            cholesky(Symmetric(cov(D.slab_dist))).L)
+                    end
 
                     alg0 = if algorithm === ThinningStrategy
                         if gradient_type === CoordinateWiseGradient

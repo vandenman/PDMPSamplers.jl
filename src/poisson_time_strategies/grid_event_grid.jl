@@ -99,9 +99,9 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             ∇ϕx = _compute_grid_gradient_or_throw!(
                 state_, state, flow, model, cache, 0.0, τ_reflection, probe_failure_handler)
 
-            l_reflection = λ(state_.ξ, ∇ϕx, flow)
+            l_reflection = λ(state_, ∇ϕx, flow)
             _inc_counter_grid_acceptance_tests(stats)
-            if l_reflection > lb_reflection * (1 + 1e-10) + 1e-12
+            if _bound_violated(l_reflection, lb_reflection)
                 _inc_counter_grid_bound_violations(stats)
                 signed_reflection = flow isa BouncyParticle ? dot(∇ϕx, state_.ξ.θ) : NaN
                 msg = _grid_bound_violation_message(
@@ -428,7 +428,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             ∇ϕx = _compute_grid_gradient_or_throw!(
                 state2_, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
 
-            l_actual = λ(state2_.ξ, ∇ϕx, flow)
+            l_actual = λ(state2_, ∇ϕx, flow)
             _inc_counter_grid_acceptance_tests(stats)
             proposal_attempts += 1
             last_τ_proposal = τ_proposal

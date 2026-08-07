@@ -2,6 +2,7 @@
 # _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
 # is this type stable? isfactorized depends only on the type of flow though
 _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = isfactorized(flow) ? FactorizedTrace : PDMPTrace
+_trace_type(::ContinuousDynamics, ::Union{Sticky,AggregateSticky}) = PDMPTrace
 # _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
 # _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
 

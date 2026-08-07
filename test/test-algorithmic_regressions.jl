@@ -10,7 +10,7 @@
         θ = [0.7, 0.0, -0.4, 0.0]
         cache = (; z=zeros(d), tmp=zeros(d))
 
-        state_a = StickyPDMPState(0.0, SkeletonPoint(copy(x), copy(θ)), copy(free), zeros(d))
+        state_a = StickyPDMPState(0.0, SkeletonPoint(copy(x), copy(θ)), copy(free))
         state_b = copy(state_a)
         grad_a = [1.0, 2.0, -0.5, 3.0]
         grad_b = [1.0, 2_000.0, -0.5, -3_000.0]
@@ -40,7 +40,6 @@
         state.free .= false
         state.ξ.x .= 0.0
         state.ξ.θ .= 0.0
-        state.old_velocity .= 1.0
         PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
 
         pq_i, pq_t = first(alg_.sticky_pq)
@@ -69,7 +68,6 @@
         state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
 
         state.free .= true
-        state.old_velocity .= one(eltype(state.old_velocity))
         state.ξ.x .= [2.0, -1.0, 3.0, 4.0, 5.0]
         state.ξ.θ .= [1.0, 1.0, 1.0, 1.0, 1.0]
         PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
@@ -135,7 +133,6 @@
         state.free .= BitVector([true, false, true])
         state.ξ.x .= [0.4, 0.0, -0.5]
         state.ξ.θ .= [-0.2, 0.0, 0.3]
-        state.old_velocity .= [0.0, 1.25, 0.0]
         PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
 
         old_stuck_time = alg_.sticky_times[2]

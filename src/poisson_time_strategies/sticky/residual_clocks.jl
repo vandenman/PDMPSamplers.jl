@@ -439,39 +439,7 @@ function _boomerang_velocity_coeffs(flow::AnyBoomerang, state::StickyPDMPState, 
 end
 
 function _boomerang_boundary_velocity_upper(flow::AnyBoomerang, state::StickyPDMPState, i::Integer, lo::Float64, hi::Float64)
-    active = findall(j -> state.free[j] && j != i, eachindex(state.free))
-    σ2 = _boomerang_covariance_entry(flow, i, i)
-    ispositive(σ2) || throw(ArgumentError("Boomerang boundary velocity variance must be positive, got $σ2"))
-    if isempty(active)
-        upper = sqrt(2 / π) * sqrt(σ2)
-        return upper + _fp_pad(upper)
-    end
-
-    k = length(active)
-    ΣAA = Matrix{Float64}(undef, k, k)
-    ΣiA = Vector{Float64}(undef, k)
-    @inbounds for a in 1:k
-        ia = active[a]
-        ΣiA[a] = _boomerang_covariance_entry(flow, i, ia)
-        for bidx in 1:k
-            ΣAA[a, bidx] = _boomerang_covariance_entry(flow, ia, active[bidx])
-        end
-    end
-    F = cholesky(Symmetric(ΣAA); check=true)
-    α = F \ ΣiA
-    σ2_cond = σ2 - dot(ΣiA, α)
-    ispositive(σ2_cond) || throw(ArgumentError("Boomerang conditional boundary velocity variance must be positive, got $σ2_cond"))
-    c0 = 0.0
-    cc = 0.0
-    cs = 0.0
-    @inbounds for a in 1:k
-        v0, vc, vs = _boomerang_velocity_coeffs(flow, state, active[a])
-        c0 += α[a] * v0
-        cc += α[a] * vc
-        cs += α[a] * vs
-    end
-    μlo, μhi = _sinusoid_range_on_cell(c0, cc, cs, lo, hi)
-    upper = _abs_normal_mean(max(abs(μlo), abs(μhi)), sqrt(σ2_cond))
+    upper = _boundary_proposal_clock_constant(flow, state, i)
     return upper + _fp_pad(upper)
 end
 

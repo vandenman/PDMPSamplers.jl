@@ -41,7 +41,7 @@ function _constant_bound_event_time(
         _inc_counter_grid_acceptance_gradient_calls(stats)
         ∇ϕx = _compute_grid_gradient_or_throw!(
             state_, state, flow, model, cache, 0.0, τ_proposal, probe_failure_handler)
-        l_actual = λ(state_.ξ, ∇ϕx, flow)
+        l_actual = λ(state_, ∇ϕx, flow)
         _inc_counter_grid_acceptance_tests(stats)
 
         if l_actual > λ_bound

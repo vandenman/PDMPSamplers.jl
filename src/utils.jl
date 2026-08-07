@@ -8,6 +8,31 @@ end
 
 pos(x) = max(zero(x), x)
 
+@inline _grid_cell_count(t_grid, N, max_time) = isfinite(max_time) ?
+    max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+
+@inline function posdot(x, y)
+    value = zero(promote_type(eltype(x), eltype(y)))
+    @inbounds for i in eachindex(x, y)
+        value += pos(x[i] * y[i])
+    end
+    return value
+end
+
+function _rand_posdot_index(rng::Random.AbstractRNG, x, y)
+    total = posdot(x, y)
+    ispositive(total) || return rand(rng, eachindex(x))
+    threshold = rand(rng) * total
+    cumulative = zero(total)
+    selected = firstindex(x)
+    @inbounds for i in eachindex(x, y)
+        cumulative += pos(x[i] * y[i])
+        selected = i
+        cumulative >= threshold && break
+    end
+    return selected
+end
+
 # TODO: remove these!
 function idot(A, j, x)
     return dot((@view A[:, j]), x)

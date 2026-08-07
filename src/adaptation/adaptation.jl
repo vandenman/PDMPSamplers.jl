@@ -79,28 +79,6 @@ function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow,
     end
 end
 
-# B. Gradient Resampling (Subsampling)
-mutable struct GradientResampler <: AbstractAdapter
-    const dt::Float64
-    last_update::Float64
-end
-GradientResampler() = GradientResampler(0.0, -Inf)
-
-function adapt!(::Random.AbstractRNG, ad::GradientResampler, state, flow, grad::SubsampledGradient, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    if !ispositive(ad.dt) || (state.t[] - ad.last_update >= ad.dt)
-        grad.resample_indices!(grad.nsub)
-        ad.last_update = state.t[]
-    end
-end
-
-# C. Anchor Updating (Control Variates)
-mutable struct AnchorUpdater <: AbstractAdapter
-    dt::Float64
-    last_update::Float64
-    warmup_only::Bool
-end
-AnchorUpdater(dt::Float64, last_update::Float64) = AnchorUpdater(dt, last_update, true)
-
 _has_integrable_segment(::Nothing) = false
 
 function _has_integrable_segment(trace)
@@ -110,54 +88,28 @@ function _has_integrable_segment(trace)
     return second_event !== nothing
 end
 
-function adapt!(::Random.AbstractRNG, ad::AnchorUpdater, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    if (state.t[] - ad.last_update >= ad.dt)
-        if phase === :warmup
-            trace = get_warmup_trace(trace_mgr)
-            if _has_integrable_segment(trace)
-                grad.update_anchor!(trace)
-                ad.last_update = state.t[]
-            end
-        elseif !ad.warmup_only
-            trace = get_main_trace(trace_mgr)
-            if _has_integrable_segment(trace)
-                grad.update_anchor!(trace)
-                ad.last_update = state.t[]
-            end
-        end
-    end
-end
-
-# D. Anchor Bank (spatial cache of anchors with nearest-neighbor selection)
-mutable struct AnchorBankAdapter{F1, F2} <: AbstractAdapter
+# Marked anchor banks select at every event boundary, including the main
+# phase, but populate new entries only from warmup traces. The callbacks take
+# the chain-local MarkedControlVariate explicitly so copied/statistics-wrapped
+# models cannot accidentally refresh another chain's provider.
+mutable struct MarkedAnchorBankAdapter{F1,F2} <: AbstractAdapter
     select_fn!::F1
     update_fn!::F2
     update_dt::Float64
     last_update::Float64
-    warmup_only::Bool
 end
 
-function adapt!(::Random.AbstractRNG, ad::AnchorBankAdapter, state, flow, grad, trace_mgr;
-                phase::Symbol=:warmup, kwargs...)
-    if phase === :warmup || !ad.warmup_only
-        ad.select_fn!(state.ξ.x)
-    end
-
-    if state.t[] - ad.last_update >= ad.update_dt
-        if phase === :warmup
-            trace = get_warmup_trace(trace_mgr)
-            if _has_integrable_segment(trace)
-                ad.update_fn!(trace)
-                ad.last_update = state.t[]
-            end
-        elseif !ad.warmup_only
-            trace = get_main_trace(trace_mgr)
-            if _has_integrable_segment(trace)
-                ad.update_fn!(trace)
-                ad.last_update = state.t[]
-            end
+function adapt!(::Random.AbstractRNG, ad::MarkedAnchorBankAdapter, state, flow,
+        grad::MarkedControlVariate, trace_mgr; phase::Symbol=:warmup, kwargs...)
+    ad.select_fn!(grad, state.ξ.x, phase)
+    if phase === :warmup && state.t[] - ad.last_update >= ad.update_dt
+        trace = get_warmup_trace(trace_mgr)
+        if _has_integrable_segment(trace)
+            ad.update_fn!(grad, trace)
+            ad.last_update = state.t[]
         end
     end
+    return nothing
 end
 
 
@@ -177,17 +129,6 @@ end
 # Fallback: Swallow extra args (t_warmup, t0)
 default_gradient_adapter(::Any, args...) = NoAdaptation()
 
-# Specific: anchor_dt derived from grad.no_anchor_updates so each chain respects its own setting
-function default_gradient_adapter(grad::SubsampledGradient, t_warmup, t0)
-    resampler = GradientResampler(grad.resample_dt, t0)
-    grad.no_anchor_updates == 0 && return resampler
-    return SequenceAdapter((
-        resampler,
-        AnchorUpdater(t_warmup / grad.no_anchor_updates, t0)
-    ))
-end
-
-
 # --- 4. The Top-Level Interface ---
 
 function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, precond_dt=10.0, t_warmup=100.0, t0=0.0)
@@ -202,33 +143,6 @@ function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, preco
 
     return SequenceAdapter((adpt_flow, adpt_grad))
 end
-
-function default_adapter(flow::ContinuousDynamics, grad::SubsampledGradient,
-                         bank_adapter::AnchorBankAdapter,
-                         precond_dt=10.0, t_warmup=100.0, t0=0.0)
-    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, t_warmup)
-    resampler = GradientResampler(grad.resample_dt, t0)
-    bank_adapter.update_dt = grad.no_anchor_updates > 0 ? t_warmup / grad.no_anchor_updates : 0.0
-    bank_adapter.last_update = t0
-    return SequenceAdapter((adpt_flow, resampler, bank_adapter))
-end
-
-function default_adapter(flow::MutableBoomerang, grad::SubsampledGradient, precond_dt=10.0, t_warmup=100.0, t0=0.0)
-    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, 0.0)
-    adpt_grad = default_gradient_adapter(grad, t_warmup, t0)
-    return SequenceAdapter((adpt_flow, adpt_grad))
-end
-
-function default_adapter(flow::MutableBoomerang, grad::SubsampledGradient,
-                         bank_adapter::AnchorBankAdapter,
-                         precond_dt=10.0, t_warmup=100.0, t0=0.0)
-    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, 0.0)
-    resampler = GradientResampler(grad.resample_dt, t0)
-    bank_adapter.update_dt = grad.no_anchor_updates > 0 ? t_warmup / grad.no_anchor_updates : 0.0
-    bank_adapter.last_update = t0
-    return SequenceAdapter((adpt_flow, resampler, bank_adapter))
-end
-
 
 # --- 5. Boomerang Adaptation ---
 
@@ -617,6 +531,7 @@ function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerang
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
         update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace, ad.options)
+        _invalidate_boundary_velocity_cache!(state)
         refresh_velocity!(rng, state, flow)
         _boomerang_stats_reset_start!(ad.stats, state)
         ad.last_update = state.t[]

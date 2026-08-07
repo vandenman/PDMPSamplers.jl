@@ -66,9 +66,20 @@ end
 
 reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache) = reflect!(state, ∇ϕ, flow, cache)
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache)
-    # this does not work in general! we'd need some kind of sub-cache here as well...
-    subcache = (; z = view(cache.z, 1:sum(state.free)))
-    reflect!(substate(state), view(∇ϕ, state.free), flow, subcache)
+    numerator = zero(eltype(state.ξ.θ))
+    denominator = zero(eltype(state.ξ.θ))
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ)
+        if state.free[i]
+            numerator += state.ξ.θ[i] * ∇ϕ[i]
+            denominator += abs2(∇ϕ[i])
+        end
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * numerator / denominator
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ)
+        state.free[i] && (state.ξ.θ[i] -= coefficient * ∇ϕ[i])
+    end
+    return nothing
 end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))

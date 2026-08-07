@@ -29,9 +29,9 @@ function _boundary_logweights_with_velocity!(weights::AbstractVector{Float64}, c
     indices = beta_indices(provider)
     active_beta, stickable_beta = _clock_active_and_stickable(clock, state, can_stick)
     boundary_logweights!(weights, provider, clock.model_prior, state.ξ.x, active_beta, stickable_beta)
-    _prepare_boundary_velocity_cache!(flow, state)
     @inbounds for j in eachindex(indices)
-        isfinite(weights[j]) && (weights[j] += log(_unstick_rate_constant_prepared(flow, state, indices[j])))
+        isfinite(weights[j]) && (weights[j] += log(
+            _boundary_proposal_clock_constant(flow, state, indices[j])))
     end
     return weights
 end

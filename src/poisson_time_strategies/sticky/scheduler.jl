@@ -1,18 +1,3 @@
-# θf = 20.4
-# e1 = [-log(rand()) / (κ * abs(θf)) for _ in 1:10000]
-# D2 = Exponential((κ * abs(θf)))
-# qprobs = .01:.01:.99
-# q1 = quantile(e1, qprobs)
-# q2 = quantile(D2, qprobs)
-# f, ax, _ = scatter(q1, q2)
-# ablines!(ax, 0, 1, color = :grey, linestyle = :dash)
-# f
-
-# f0(κ, θf) = -log(rand()) / (κ * abs(θf))
-# f1(κ, θf) = rand(Exponential(κ * abs(θf)))
-# @benchmark f0($κ,$θf)
-# @benchmark f1($κ,$θf)
-
 """
     τ = freezing_time(ξ::SkeletonPoint, flow::ContinuousDynamics, i::Integer)
 
@@ -30,11 +15,9 @@ end
 
 get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_strat.κ[i]
 get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_strat.κ(i, args...)
-get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:RateFunction}, i, args...) = sticky_strat.κ(i, args...)
 
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_state.κ[i]
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_state.κ(i, args...)
-get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:RateFunction}, i, args...) = sticky_state.κ(i, args...)
 
 function update_all_stick_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
 
@@ -43,7 +26,7 @@ function update_all_stick_times!(rng::Random.AbstractRNG, alg::StickyLoopState, 
         if state.free[i]
             _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
         else # stuck/ frozen
-            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
+            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, flow, i))
         end
         isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
     end
@@ -94,16 +77,6 @@ function update_all_freeze_times!(alg::AggregateStickyLoopState, state::StickyPD
     return nothing
 end
 
-function update_all_unfreeze_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
-    t = state.t[]
-    for i in alg.stickable_indices
-        if !state.free[i]
-            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
-            isinf(alg.sticky_times[i]) && error("sticky_times[$i] is Inf but it's stuck with x[i]=$(state.ξ.x[i])")
-        end
-    end
-end
-
 function update_all_unfreeze_times!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
     _, t_freeze = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
@@ -125,7 +98,7 @@ function _update_sticky_time_at_index!(rng::Random.AbstractRNG, alg::StickyLoopS
         _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
         isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
     else
-        _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
+        _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, flow, i))
         isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN after unfreezing")
     end
     return nothing
@@ -198,78 +171,30 @@ function _update_sticky_schedule_after_horizon_hit!(::Random.AbstractRNG, ::Stic
     return nothing
 end
 
-function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::ContinuousDynamics, alg::StickyLoopState, i::Int)
-
-    t = state.t[]
+function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState,
+        flow::ContinuousDynamics, alg::StickyLoopState, i::Int)
     ξ = state.ξ
-    sticky_times = alg.sticky_times
-    θf = state.old_velocity
-    tol = sqrt(eps(eltype(ξ.x))) # tolerance for floating point errors in move_forward_time!, could also depend on the flow?
-    if state.free[i] # if free -> stuck
-
-        # deterministic process should have move x[i] to exactly zero, but perhaps this needs a tolerance
-        abs(ξ.x[i]) < tol || error("freezing but not frozen: x[i] = $(ξ.x[i]) !≈ 0 at $(sticky_times[i]) with tol = $(tol)")
-
-        θf[i] = ξ.θ[i] # store speed
-        ξ.θ[i] = 0.0 # freeze speed
-        ξ.x[i] = 0.0 # freeze position, set to 0 exactly to avoid floating point errors
-        state.free[i] = false # mark as stuck
-
-        # κᵢ = get_κ(alg, i, state.ξ.x)
-        # sticky_times[i] = t - log(rand()) / (κᵢ * abs(θf[i])) # sticky time
-
-        if alg.κ isa AbstractVector
-            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, i))
-            @assert !isnan(alg.sticky_times[i]) "sticky_times[$i] is NaN after unfreezing"
-        else
-            #= TODO: not sure about this design... there are a few cases:
-
-                1. prior inclusion probabilities are independent and fixed: γᵢ ~ Bernoulli(pᵢ)
-                    -> κ isa Vector
-                2. prior inclusion probabilities depend on whether other parameters "stick": γᵢ ~ BetaBernoulli(n, a, b)
-                    -> κ isa Function
-                3. prior inclusion probabilities depend on hyperparameters: γᵢ ~ Bernoulli(θ); θ ~ Beta(1, 1))
-                    -> κ isa Function
-
-                alternatively for case 2:
-
-                - all unfreezing times are exponentials
-                - sample the first unfreezing time from the joint distribution of independent not identically distributed Exponentials.
-                - tᶠ is min(first unfreezing time, first freezing time).
-                We must (re)compute all freezing times since they are deterministic.
-
-                case 3 still needs to be studied. No idea if the current approach even works.
-
-            =#
-            update_all_stick_times!(rng, alg, state, flow)
-            # update_all_unfreeze_times!(alg, state, flow)
-        end
-        # tfrez[i] = t - log(rand()) # option 2 # TODO: this is independent of the prior!?
-
-        # TODO: maybe we need to update other freezing times here as well
-
-
-    else # stuck -> not stuck
-
-        # deterministic process should have move x[i] to exactly zero and left it there
-        # velocity should be at exactly zero at this point.
-        (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) || error("unfreezing but not frozen: x[i] = $(ξ.x[i]) ≉ 0 or θ[i] = $(ξ.θ[i]) ≉ 0 at $(sticky_times[i]) with tol = $(tol)")# isfrozen
-
-        ξ.θ[i] = θf[i] # restore speed
-        θf[i] = zero(eltype(θf[i])) # perhaps not necessary?
-        state.free[i] = true # mark as not stuck
-
-        # update_all_stick_times!(alg, state, flow)
-        _set_sticky_time!(alg, i, t + freezing_time(ξ, flow, i))
-        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(sticky_times[i])) after freezing (θ[i] = $(ξ.θ[i]))")
-        if !(alg.κ isa AbstractVector)
-            update_all_stick_times!(rng, alg, state, flow)
-            # update_all_unfreeze_times!(alg, state, flow)
-        end
-        # TODO: maybe we need to update other freezing times here as well
-
+    tol = sqrt(eps(eltype(ξ.x)))
+    if state.free[i]
+        abs(ξ.x[i]) < tol || error("freezing but not frozen: x[$i] = $(ξ.x[i])")
+        ξ.x[i] = 0.0
+        state.free[i] = false
+        _invalidate_active_stratum_cache!(state)
+        draw_stratum_velocity!(rng, state, flow)
+        accepted = true
+    else
+        (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) ||
+            error("unfreezing but coordinate $i is not frozen")
+        accepted = propose_boundary_velocity!(rng, state, flow, i)
+        accepted && (state.free[i] = true)
+    end
+    if accepted
+        update_all_stick_times!(rng, alg, state, flow)
+    else
+        _update_sticky_time_at_index!(rng, alg, state, flow, i)
     end
     validate_state(state, flow, "after stick_or_unstick! at index $i")
+    return accepted
 end
 
 function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::ContinuousDynamics, alg::AggregateStickyLoopState, i::Int)
@@ -280,27 +205,42 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
 
     if state.free[i]
         abs(ξ.x[i]) < tol || error("freezing but not frozen: x[$i] = $(ξ.x[i]) !≈ 0 at $(t) with tol = $(tol)")
-        state.old_velocity[i] = ξ.θ[i]
-        ξ.θ[i] = 0.0
         ξ.x[i] = 0.0
         state.free[i] = false
+        _invalidate_active_stratum_cache!(state)
+        draw_stratum_velocity!(rng, state, flow)
         alg.sticky_times[i] = Inf
         haskey(alg.sticky_pq, i) && delete!(alg.sticky_pq, i)
         update_all_stick_times!(rng, alg, state, flow)
     else
         (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) ||
             error("unfreezing but not frozen: x[$i] = $(ξ.x[i]) ≉ 0 or θ[$i] = $(ξ.θ[i]) ≉ 0 at $(t) with tol = $(tol)")
-        draw_boundary_velocity!(rng, state, flow, i)
-        state.free[i] = true
-        _set_sticky_time!(alg, i, t + freezing_time(ξ, flow, i))
-        update_all_stick_times!(rng, alg, state, flow)
+        accepted = propose_boundary_velocity!(rng, state, flow, i)
+        accepted && (state.free[i] = true)
+        if accepted
+            update_all_stick_times!(rng, alg, state, flow)
+        else
+            update_all_unfreeze_times!(rng, alg, state, flow)
+        end
+        validate_state(state, flow, "after aggregate stick_or_unstick! at index $i")
+        return accepted
     end
     validate_state(state, flow, "after aggregate stick_or_unstick! at index $i")
+    return true
 end
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
         inner_alg_state::GridAdaptiveState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
         max_horizon::Float64, detect_boundaries::Bool=false)
+    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
+        max_horizon, false, :sticky_horizon_hit, detect_boundaries)
+end
+
+function _bounded_inner_event_time(rng::Random.AbstractRNG,
+        model::PDMPModel{<:MarkedControlVariate}, flow::ContinuousDynamics,
+        inner_alg_state::MarkedThinningState, state::StickyPDMPState, cache,
+        stats::AbstractStatisticCounter, max_horizon::Float64,
+        detect_boundaries::Bool=false)
     return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
         max_horizon, false, :sticky_horizon_hit, detect_boundaries)
 end

@@ -1,34 +1,21 @@
 """
-A simple wrapper function so that the Sticky strategy knows whether a function
-returns the waiting time, or the rate of an inhomogeneous Poisson process.
-
-The rate_function must accept the same arguments as κ(i, x, free, θ)
-
-"""
-struct RateFunction{F<:Function}
-    rate_function::F
-end
-
-"""
 
 
-There are three options for the unfreezing time, κ.
+There are two supported ways to provide the scalar sticky rate κ.
 
 - `AbstractVector`: For independent model and parameter priors, the rates are fixed and can be known in advance.
 - `Function`: For dependent model priors, the rates only depend on whether the parameters are (non)zero.
-- `RateFunction`: For dependent parameters priors, the rates depend on the specific values of the parameters, and the unfreeze times become inhomogeneous Poisson processes.
 
-The first two should return the rate of an homogeneous Poisson process, such that
+Both forms must return a non-negative scalar. For a frozen coordinate `i`, the
+proposal clock has rate `κ * Cᵢ`, where `Cᵢ` is the exact flux normalizer for
+Gaussian/product dynamics or the state-dependent dominating constant for dense
+ZigZag. Distribution-valued return values are unsupported.
 
-```julia
-λ = κ[i] or κ(i, x, γ, θ)
-rand(Exponential(inv(κ * abs(θf))))
-```
-equals the unfreezing time.
-
-The third should return the rate of an inhomogeneous Poisson process, which is sampled through the algorithm specified by `alg`.
+At every accepted freeze or unfreeze transition, the complete velocity on the
+new active coordinate stratum is redrawn from that stratum's invariant law.
+No saved pre-freeze velocity is restored.
 """
-struct Sticky{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,AbstractVector}} <: PoissonTimeStrategy
+struct Sticky{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector}} <: PoissonTimeStrategy
     alg::T
     κ::U
     can_stick::BitVector
@@ -64,5 +51,5 @@ _supports_aggregate_sticky_flow(::ZigZag) = true
 _supports_aggregate_sticky_flow(::BouncyParticle) = true
 _supports_aggregate_sticky_flow(::AnyBoomerang) = true
 _supports_aggregate_sticky_flow(flow::PreconditionedDynamics) = _supports_aggregate_sticky_flow(flow.dynamics)
-_supports_aggregate_sticky_flow(::DensePreconditionedZigZag) = false
+_supports_aggregate_sticky_flow(::DensePreconditionedZigZag) = true
 _supports_aggregate_sticky_flow(::ContinuousDynamics) = false

@@ -121,9 +121,9 @@ end
         μ = [2.0, -1.0]
         for flow in (Boomerang(Diagonal(ones(d)), μ), AdaptiveBoomerang(Diagonal(ones(d)), μ))
             state0 = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 1.0], [0.0, 0.5]),
-                BitVector([false, true]), zeros(d))
+                BitVector([false, true]))
             state2 = StickyPDMPState(Ref(2.0), SkeletonPoint([0.0, 1.0], [0.0, 0.5]),
-                BitVector([false, true]), zeros(d))
+                BitVector([false, true]))
             trace = PDMPTrace(state0, flow)
             push!(trace, state2)
             samples = Matrix(PDMPDiscretize(trace, 0.5))

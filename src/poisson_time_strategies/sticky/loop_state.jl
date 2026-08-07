@@ -1,4 +1,4 @@
-struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,AbstractVector},V<:AbstractVector} <: PoissonTimeStrategy
+struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector},V<:AbstractVector} <: PoissonTimeStrategy
     # A' could be the internal version of the wrapped algorithm
     inner_alg_state::T # this should perhaps be the more generic, i.e., _to_internal(Sticky.alg, ...)!
     κ::U
@@ -8,6 +8,24 @@ struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,RateFunction,Abs
     sticky_pq::PriorityQueue{Int,Float64}
     empty_∇ϕx::V
 end
+
+function _validate_sticky_rates(κ::AbstractVector, can_stick::BitVector,
+        d::Integer)
+    length(κ) == d ||
+        throw(DimensionMismatch("κ length $(length(κ)) does not match dimension $d"))
+    @inbounds for i in eachindex(κ)
+        value = κ[i]
+        value isa Real ||
+            throw(ArgumentError("κ[$i] must be a non-negative real rate"))
+        isnan(value) && throw(ArgumentError("κ[$i] must not be NaN"))
+        value < 0 && throw(ArgumentError("κ[$i] must be non-negative"))
+        isinf(value) && can_stick[i] && throw(ArgumentError(
+            "κ[$i] = Inf is reserved for a non-stickable coordinate"))
+    end
+    return nothing
+end
+
+_validate_sticky_rates(::Function, ::BitVector, ::Integer) = nothing
 
 mutable struct AggregateStickyLoopState{T<:PoissonTimeStrategy,C<:AbstractAggregateUnstickClock,V<:AbstractVector} <: PoissonTimeStrategy
     inner_alg_state::T
@@ -29,41 +47,31 @@ _is_sticky_loop_state(::StickyLoopState) = true
 _is_sticky_loop_state(::AggregateStickyLoopState) = true
 
 function _enforce_nonstickable_coordinates_free!(
-    rng::Random.AbstractRNG,
     state::StickyPDMPState,
-    flow::ContinuousDynamics,
     can_stick::AbstractVector{Bool},
 )
     length(can_stick) == length(state.free) ||
         throw(DimensionMismatch("can_stick length $(length(can_stick)) does not match dimension $(length(state.free))"))
-    forced = findall(i -> !can_stick[i] && !state.free[i], eachindex(state.free))
-    isempty(forced) && return state
-
-    velocity = initialize_velocity(rng, flow, length(state.free))
-    attempts = 1
-    while any(i -> iszero(velocity[i]), forced)
-        attempts += 1
-        attempts <= 100 ||
-            throw(ArgumentError("could not draw nonzero initial velocities for non-stickable coordinates $forced"))
-        velocity = initialize_velocity(rng, flow, length(state.free))
-    end
+    changed = false
     @inbounds for i in eachindex(state.free, can_stick)
-        if !can_stick[i]
-            if !state.free[i]
-                state.ξ.θ[i] = velocity[i]
-                state.old_velocity[i] = 0.0
-            end
+        if !can_stick[i] && !state.free[i]
             state.free[i] = true
+            changed = true
         end
     end
+    changed && _invalidate_active_stratum_cache!(state)
     return state
 end
 
-# this could use less memory by looking at
 function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
 
     d = length(state.ξ)
-    state isa StickyPDMPState && _enforce_nonstickable_coordinates_free!(rng, state, flow, strat.can_stick)
+    length(strat.can_stick) == d ||
+        throw(DimensionMismatch("can_stick length $(length(strat.can_stick)) does not match dimension $d"))
+    _validate_sticky_rates(strat.κ, strat.can_stick, d)
+    state isa StickyPDMPState &&
+        _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
+    state isa StickyPDMPState && draw_stratum_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()
@@ -71,16 +79,6 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     state isa StickyPDMPState && set_active_set!(model, state.free)
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
 
-    # old_velocity = copy(state.ξ.θ)
-    # # zero is problematic because the unfreeze time divides by abs(θf[i]), so divide by zero
-    # if any(iszero, old_velocity)
-    #     old_velocity2 = initialize_velocity(flow, d)
-    #     for i in eachindex(old_velocity, old_velocity2)
-    #         if iszero(old_velocity[i])
-    #             old_velocity[i] = old_velocity2[i]
-    #         end
-    #     end
-    # end
     alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, stickable_indices, sticky_pq, similar(state.ξ.x, 0))
     update_all_stick_times!(rng, alg, state, flow)
     # @show alg.sticky_times
@@ -93,10 +91,11 @@ end
 function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     state isa StickyPDMPState || throw(ArgumentError("AggregateSticky requires StickyPDMPState; initialize_state must use requires_sticky_state"))
     _supports_aggregate_sticky_flow(flow) ||
-        throw(ArgumentError("AggregateSticky does not support this flow; dense-preconditioned ZigZag needs a separate coordinate boundary velocity law"))
+        throw(ArgumentError("AggregateSticky does not support this flow"))
     d = length(state.ξ)
     length(strat.can_stick) == d || throw(DimensionMismatch("can_stick length $(length(strat.can_stick)) does not match dimension $d"))
-    _enforce_nonstickable_coordinates_free!(rng, state, flow, strat.can_stick)
+    _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
+    draw_stratum_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()

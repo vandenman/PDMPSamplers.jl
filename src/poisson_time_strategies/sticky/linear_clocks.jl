@@ -712,27 +712,18 @@ end
 
 Simulate the time a stuck/ frozen particle takes to unfreeze/ unstick
 """
-function unfreeze_time(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, i::Integer)
-    validate_state(state, nothing, "in unfreeze_time")
+function unfreeze_time(rng::Random.AbstractRNG, alg::StickyLoopState,
+        state::StickyPDMPState, flow::ContinuousDynamics, i::Integer)
     κ = get_κ(alg, i, state.ξ.x, state.free, state.ξ.θ)
-
-    if κ isa Distribution
-
-        retval = rand(rng, κ)
-        if isnegative(retval)# || isinf(retval)
-            @show κ, i, state.ξ.x, state.free, state.ξ.θ
-            throw(ArgumentError("κ must be non-negative and finite!"))
-        end
-        # @show κ, i, state.ξ.x, state.free
-        return retval
-    else
-        θf = state.old_velocity[i]
-        if isnegative(κ)
-            @show κ, i, state.ξ.x, state.free
-            throw(ArgumentError("κ must be non-negative!"))
-        end
-
-        # return -log(rand()) / (κ * abs(θf)) # old approach
-        return rand(rng, Exponential(inv(κ * abs(θf))))
-    end
+    κ isa Real || throw(ArgumentError(
+        "sticky κ for frozen coordinate $i must be a real scalar rate"))
+    isnan(κ) && throw(ArgumentError(
+        "sticky κ for frozen coordinate $i must not be NaN"))
+    isfinite(κ) || throw(ArgumentError(
+        "sticky κ for frozen coordinate $i must be finite"))
+    isnegative(κ) && throw(ArgumentError(
+        "sticky κ for frozen coordinate $i must be nonnegative"))
+    iszero(κ) && return Inf
+    C = _boundary_proposal_clock_constant(flow, state, i)
+    return rand(rng, Exponential(inv(κ * C)))
 end

@@ -1132,11 +1132,11 @@ function _next_positive_variation_envelope_event_time!(rng::Random.AbstractRNG,
             _inc_counter_grid_acceptance_gradient_calls(stats)
             gradτ = _compute_grid_gradient_or_throw!(
                 state_prop, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
-            l_actual = λ(state_prop.ξ, gradτ, flow)
+            l_actual = λ(state_prop, gradτ, flow)
             _inc_counter_grid_acceptance_tests(stats)
             proposal_attempts += 1
 
-            if l_actual > lb_cell * (1 + 1e-10) + 1e-12
+            if _bound_violated(l_actual, lb_cell)
                 _inc_counter_grid_bound_violations(stats)
                 _inc_counter_positive_variation_fallbacks(stats)
                 alg.has_cached_gradient[] = false

@@ -2,7 +2,6 @@
 #
 # this file needs some more thought.
 # a lot of details work only for fullgradient
-# but we can make it more general, so it also works for subsampled gradients
 #
 #
 
@@ -33,16 +32,6 @@ Construct from a log-density `d`. Uses `ADTypes` backend to generate a `FullGrad
 
 Compatibility constructor. Wraps `f` in `FullGradient`.
 """
-struct MarkedDeterministicHVP{C,S} <: Function
-    cv::C
-    stats::S
-end
-
-function (h::MarkedDeterministicHVP)(out, x, v)
-    h.stats === nothing || _inc_counter_∇²f_calls(h.stats)
-    return deterministic_hvp!(out, h.cv, x, v)
-end
-
 struct PDMPModel{G<:GradientStrategy,H,V,J}
     d::Int
     grad::G
@@ -50,12 +39,6 @@ struct PDMPModel{G<:GradientStrategy,H,V,J}
     vhv::V
     joint::J
     function PDMPModel(d::Integer, grad::GradientStrategy, hvp, vhv, grad_inplace::Bool, hvp_inplace::Bool, joint=nothing)
-
-        if grad isa MarkedControlVariate &&
-            !(hvp === nothing || hvp isa MarkedDeterministicHVP)
-            throw(ArgumentError(
-                "a marked model's deterministic HVP must be supplied through MarkedControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
-        end
 
         hvp_new = if hvp === nothing
             nothing
@@ -78,7 +61,6 @@ function maybe_fix_grad(g::GradientStrategy, d::Integer)
     f = g.f
     f isa Base.Fix1 && return g
 
-    # TODO: needs similar handling for SubsampledGradient!
     f isa Function && return FullGradient(Base.Fix1((f), zeros(d)))
 end
 
@@ -96,9 +78,7 @@ PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, noth
 
 function PDMPModel(d::Integer, cv::MarkedControlVariate)
     length(cv.anchor) == d || throw(DimensionMismatch("anchor length must match model dimension"))
-    hvp = cv.deterministic_hvp! === nothing ? nothing :
-        MarkedDeterministicHVP(cv, nothing)
-    return PDMPModel(d, cv, hvp, nothing, true, true)
+    return PDMPModel(d, cv, cv.deterministic_hvp!, nothing, true, true)
 end
 
 PDMPModel(d::Integer, cv::MarkedControlVariate, ::Nothing,
@@ -197,20 +177,17 @@ end
 
 function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
     grad_new = with_stats(model.grad, stats)
-    hvp_new = model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
+    hvp_new = _model_hvp_with_stats(model, grad_new, stats)
     vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
     joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
     PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
 end
 
-function with_stats(model::PDMPModel{<:MarkedControlVariate}, stats::AbstractStatisticCounter)
-    grad_new = with_stats(model.grad, stats)
-    hvp_new = grad_new.deterministic_hvp! === nothing ? nothing :
-        MarkedDeterministicHVP(grad_new, stats)
-    vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
-    joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
-    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, true, joint_new)
-end
+_model_hvp_with_stats(model::PDMPModel, grad, stats) =
+    model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
+_model_hvp_with_stats(model::PDMPModel{<:MarkedControlVariate}, grad, stats) =
+    grad.deterministic_hvp! === nothing ? nothing :
+        WithStatsHVP(InplaceHVP(grad.deterministic_hvp!, zeros(model.d)), stats)
 
 function set_active_set!(model::PDMPModel, free::BitVector)
     length(free) == model.d || throw(DimensionMismatch("active set length $(length(free)) does not match model dimension $(model.d)"))

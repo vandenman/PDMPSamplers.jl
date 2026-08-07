@@ -98,20 +98,19 @@
         d = 3
         flow = DensePreconditionedZigZag(d)
         L = [1.0 0.0 0.0; 0.4 1.0 0.0; -0.2 0.3 1.0]
-        flow.metric.L .= L
-        flow.metric.Linv .= inv(LowerTriangular(L))
-        flow.metric.v_canonical .= [1.0, -1.0, 1.0]
+        set_dense_preconditioner!(flow.metric, L)
+        signs = [1.0, -1.0, 1.0]
 
         x = [0.2, -0.3, 0.5]
         grad = [0.7, -1.2, 0.4]
-        state = PDMPState(0.0, SkeletonPoint(x, flow.metric.L * flow.metric.v_canonical))
+        state = PDMPState(0.0, SkeletonPoint(x, flow.metric.L * signs))
         out = similar(grad)
 
         PDMPSamplers._vv_signed_channels!(out, state, grad, flow, (; z=similar(x)))
 
-        expected = flow.metric.v_canonical .* (transpose(flow.metric.L) * grad)
+        expected = signs .* (transpose(flow.metric.L) * grad)
         @test out ≈ expected
-        @test sum(max.(out, 0.0)) ≈ PDMPSamplers.λ(state.ξ, grad, flow)
+        @test sum(max.(out, 0.0)) ≈ PDMPSamplers.λ(state, grad, flow)
     end
 
     @testset "bound violation routes through fallback instead of accepting proposal" begin

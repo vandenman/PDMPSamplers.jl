@@ -190,9 +190,6 @@ struct GaussianMeanTarget{T<:MvNormal}
     Σ_tot_inv::Symmetric{Float64, Matrix{Float64}}
     # work buffers
     buffer::Vector{Float64}
-    x̄_sub::Vector{Float64}
-    # subsampling state
-    indices::Vector{Int}
 end
 
 # Full negative gradient: ∇f(x) = Σ0⁻¹(x-μ0) + n * Σ⁻¹(x - x̄)
@@ -203,29 +200,12 @@ function neg_gradient!(t::GaussianMeanTarget, out::AbstractVector, x::AbstractVe
     mul!(out, t.Λ, t.buffer, t.n, 1.0)        # + n * Λ * (x - x̄)
 end
 
-# Subsampled negative gradient: replace x̄ with unbiased subsample mean
-function neg_gradient_sub!(t::GaussianMeanTarget, out::AbstractVector, x::AbstractVector)
-    mean!(t.x̄_sub', view(t.obj.X, t.indices, :))   # subsample mean
-    @. t.buffer = x - t.μ0
-    mul!(out, t.Λ0, t.buffer)                 # prior part
-    @. t.buffer = x - t.x̄_sub
-    mul!(out, t.Λ, t.buffer, t.n, 1.0)        # + n * Λ * (x - x̄_sub)
-end
-
 function neg_hvp!(t::GaussianMeanTarget, out::AbstractVector, ::AbstractVector, v::AbstractVector)
     mul!(out, t.Σ_tot_inv, v)
 end
 
-# Same Hessian form (no randomness needed), because Hessian doesn't depend on subsample
-neg_hvp_sub!(t::GaussianMeanTarget, out, x, v) = neg_hvp!(t, out, x, v)
-
 function neg_partial(t::GaussianMeanTarget, x::AbstractVector, i::Integer)
     dot(view(t.Σ_tot_inv, :, i), x) - t.μ0[i]
-end
-
-function resample_indices!(t::GaussianMeanTarget, n::Integer)
-    length(t.indices) != n && resize!(t.indices, n)
-    sample!(eachindex(t.indices), t.indices; replace = false)
 end
 
 function gen_data(::Type{GaussianMeanModel}, d, n, μ = zeros(d), Σ = I(d))
@@ -237,12 +217,10 @@ function gen_data(::Type{GaussianMeanModel}, d, n, μ = zeros(d), Σ = I(d))
     μ0 = obj.prior_μ
     x̄ = vec(mean(obj.X, dims=1))
     buffer = similar(x̄)
-    x̄_sub  = similar(x̄)
     Σ_tot_inv = Λ0 + n .* Λ
-    indices = Vector{Int}(undef, 0)
 
     return GaussianMeanTarget(D, obj, Λ, Λ0, μ0, x̄, n, Σ_tot_inv,
-                              buffer, x̄_sub, indices)
+                              buffer)
 end
 
 
@@ -263,18 +241,10 @@ mutable struct LogisticRegressionTarget
     β_true::Vector{Float64}
     # precomputed
     Λ0::Matrix{Float64}
-    nobs::Int
     # work buffers
     buffer::Vector{Float64}
     η::Vector{Float64}          # length nobs
     p::Vector{Float64}          # length nobs
-    # control variate anchor state
-    β_anchor::Vector{Float64}
-    η_anchor::Vector{Float64}   # η at anchor (length nobs)
-    p_anchor::Vector{Float64}   # p = logistic(η_anchor)
-    G_anchor::Vector{Float64}   # full data gradient data-part at anchor: X'*(p_anchor - y)
-    # subsampling indices
-    indices::Vector{Int}
 end
 
 # --- Full negative log posterior gradient: ∇f(β) = Σ0⁻¹(β-μ0) + X' (σ(Xβ) - y) ---
@@ -288,43 +258,6 @@ function neg_gradient!(t::LogisticRegressionTarget, out::AbstractVector, β::Abs
         t.p[i] = LogExpFunctions.logistic(t.η[i]) - y[i]
     end
     mul!(out, X', t.p, 1.0, 1.0)
-end
-
-# --- Subsampled gradient with control variate ---
-# estimator: prior + G_anchor + (n/m) * ( X_S'*(p_S(β)-y_S) - X_S'*(p_anchor_S - y_S) )
-function neg_gradient_sub_cv!(t::LogisticRegressionTarget, out::AbstractVector, β::AbstractVector)
-    X, y, μ0, Λ0 = t.obj.X, t.obj.y, t.obj.prior_μ, t.Λ0
-
-    # prior
-    t.buffer .= β .- μ0
-    mul!(out, Λ0, t.buffer)
-
-    # add full-data anchor data-part
-    out .+= t.G_anchor
-
-    # minibatch difference
-    m = length(t.indices)
-    iszero(m) && return out
-
-    Xi = @view X[t.indices, :]
-    ηc = view(t.η, eachindex(t.indices))   # temporary storage for η_i
-    pc = view(t.p, eachindex(t.indices))
-    # compute η_i(β) for batch
-    mul!(ηc, Xi, β)                         # η_i = Xi * β
-
-    pc .= LogExpFunctions.logistic.(ηc)     # p_i(β)
-
-    # p_anchor for the batch (cheap indexed access)
-    p0_batch = view(t.p_anchor, t.indices)
-
-    # batch gradients: g_batch = Xi'*(p_i - y_i), g0_batch = Xi'*(p0_batch - y_i)
-    # so diff = Xi'*( (p_i - y_i) - (p0_batch - y_i) ) = Xi'*(p_i - p0_batch)
-    # compute diff = Xi'*(p_i - p0_batch)
-    ηc .= pc .- p0_batch                  # reuse ηi storage for pi - p0
-    mul!(t.buffer, Xi', ηc)               # buffer <- Xi' * (pi - p0_batch)
-
-    scale = (t.nobs / m)
-    out .+= scale .* t.buffer
 end
 
 # --- Full Hessian-vector product: ∇²f(β) v = Σ0⁻¹ v + X' ( w .* (Xv) ), w=p*(1-p) ---
@@ -356,50 +289,6 @@ function neg_vhv(t::LogisticRegressionTarget, β::AbstractVector, v::AbstractVec
     return result
 end
 
-# --- Subsampled Hessian-vector product (no CV here) ---
-function neg_hvp_sub!(t::LogisticRegressionTarget, out::AbstractVector, β::AbstractVector, v::AbstractVector)
-    X, Λ0 = t.obj.X, t.Λ0
-    mul!(out, Λ0, v)
-
-    m = length(t.indices)
-    iszero(m) && return out
-
-    Xi = @view X[t.indices, :]
-    ηc = view(t.η, eachindex(t.indices))
-    pc = view(t.p, eachindex(t.indices))
-
-    mul!(ηc, Xi, β)
-    pc .= LogExpFunctions.logistic.(ηc)
-    pc .= pc .* (1.0 .- pc)    # now pi holds w_i
-    Xv = ηc # rename for clarity
-    mul!(Xv, Xi, v)                # X_i * v for batch
-    Xv .*= pc
-    mul!(t.buffer, Xi', Xv)        # buffer <- X_S' * ( w_S .* (X_S v) )
-    scale = (t.nobs / m)
-    out .+= scale .* t.buffer
-end
-
-function resample_indices!(t::LogisticRegressionTarget, m::Integer)
-    length(t.indices) != m && resize!(t.indices, m)
-    sample!(1:t.nobs, t.indices; replace = false)
-end
-
-# setter to (re)compute anchor; call whenever you want to update the anchor
-function set_anchor!(t::LogisticRegressionTarget, β0::AbstractVector)
-    X, y = t.obj.X, t.obj.y
-    t.β_anchor .= β0
-    mul!(t.η_anchor, X, t.β_anchor)
-    @. t.p_anchor = LogExpFunctions.logistic(t.η_anchor)
-    mul!(t.G_anchor, X', t.p_anchor .- y)
-    return nothing
-end
-
-function anchor_info(t::LogisticRegressionTarget)
-    return (β_anchor = copy(t.β_anchor),
-            p_anchor = copy(t.p_anchor),
-            G_anchor = copy(t.G_anchor))
-end
-
 function gen_data(::Type{LogisticRegressionModel}, d, n,
                   β_true = randn(d),
                   μ0 = zeros(d),
@@ -417,26 +306,12 @@ function gen_data(::Type{LogisticRegressionModel}, d, n,
 
     obj = LogisticRegressionModel(X, y, μ0, Matrix{Float64}(Σ0), Matrix{Float64}(Λ0))
 
-    nobs, d = size(X)
+    _, d = size(X)
     buffer = zeros(d)
     p = similar(η)
 
-    # --- control variate anchor state ---
-    β_anchor = copy(μ0)
-    η_anchor = similar(y, Float64)
-    p_anchor = similar(y, Float64)
-    G_anchor = zeros(d)
-
-    indices = Vector{Int}(undef, 0)
-
     target = LogisticRegressionTarget(
-        obj, β_true, Matrix{Float64}(Λ0), nobs,
-        buffer, similar(η), p,
-        β_anchor, η_anchor, p_anchor, G_anchor,
-        indices)
-
-    # initialize anchor
-    set_anchor!(target, μ0)
+        obj, β_true, Matrix{Float64}(Λ0), buffer, similar(η), p)
 
     return target
 end

@@ -878,7 +878,7 @@ function construct_rate_bound_grid!(
     state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
     iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
 
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
     used_batched_derivatives = _supports_rate_derivatives(provider, flow) && n_time_cells > 0
@@ -1024,7 +1024,7 @@ function construct_rate_bound_grid!(
     N = length(Λ_vals)
     iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
 
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
 

@@ -70,9 +70,13 @@ function _record_grid_schedule!(stats::AbstractStatisticCounter, alg)
     return nothing
 end
 
-function _piecewise_constant_area(pcb::PiecewiseConstantBound)
-    area = 0.0
-    @inbounds for i in eachindex(pcb.Λ_vals)
+@inline _bound_violated(actual, bound) =
+    actual > bound * (1 + 1e-10) + 1e-12
+
+function _piecewise_constant_area(pcb::PiecewiseConstantBound,
+        n_cells::Integer=length(pcb.Λ_vals))
+    area = zero(eltype(pcb.Λ_vals))
+    @inbounds for i in 1:n_cells
         area += pos(pcb.Λ_vals[i]) * (pcb.t_grid[i + 1] - pcb.t_grid[i])
     end
     return area

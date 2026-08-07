@@ -197,35 +197,19 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         PDMPSamplers.compute_gradient!(full, x, out)
         @test stats.∇f_calls == 1
         @test stats.full_gradient_calls == 1
-        @test stats.stochastic_gradient_calls == 0
-
-        sub = PDMPSamplers.with_stats(SubsampledGradient(
-            (out, x) -> (out .= 2 .* x),
-            n -> nothing,
-            trace -> nothing,
-            (out, x) -> (out .= 3 .* x),
-            1,
-            0,
-            true,
-        ), stats)
-        PDMPSamplers.compute_gradient!(sub, x, out)
-        PDMPSamplers.compute_gradient_for_reflection!(sub, x, out)
-        @test stats.∇f_calls == 3
-        @test stats.stochastic_gradient_calls == 1
-        @test stats.full_reflection_gradient_calls == 1
 
         prior = PDMPSamplers.with_stats((out, x) -> copyto!(out, -x), stats, Val(:prior_gradient))
         prior(out, x)
-        @test stats.∇f_calls == 4
+        @test stats.∇f_calls == 2
         @test stats.prior_gradient_calls == 1
 
         fd_probe = PDMPSamplers.WithFDCurvatureStats(
-            PDMPSamplers.with_stats((out, x) -> copyto!(out, x), stats, Val(:stochastic_gradient)),
+            PDMPSamplers.with_stats((out, x) -> copyto!(out, x), stats, Val(:ordinary_full_gradient)),
             stats,
         )
         fd_probe(out, x)
-        @test stats.∇f_calls == 5
-        @test stats.stochastic_gradient_calls == 2
+        @test stats.∇f_calls == 3
+        @test stats.full_gradient_calls == 2
         @test stats.fd_curvature_gradient_calls == 1
 
         hvp = PDMPSamplers.WithStatsHVP((x, v) -> v, stats)
@@ -233,12 +217,10 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         @test stats.∇²f_calls == 1
 
         PDMPSamplers._record_phase_stats!(
-            stats, :main, 0, 0, 0, 0, 0, 0, 0, 0, 0, time_ns())
+            stats, :main, 0, 0, 0, 0, 0, 0, 0, time_ns())
         @test stats.main_gradient_calls == stats.∇f_calls
         @test stats.main_hessian_calls == stats.∇²f_calls
-        @test stats.main_stochastic_gradient_calls == stats.stochastic_gradient_calls
         @test stats.main_full_gradient_calls == stats.full_gradient_calls
-        @test stats.main_full_reflection_gradient_calls == stats.full_reflection_gradient_calls
         @test stats.main_prior_gradient_calls == stats.prior_gradient_calls
         @test stats.main_fd_curvature_gradient_calls == stats.fd_curvature_gradient_calls
         @test stats.main_exact_curvature_calls == stats.∇²f_calls
@@ -258,13 +240,6 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         PDMPSamplers.set_active_set!(CoordinateWiseGradient(coord_rec), free)
         @test full_rec.free == free
         @test coord_rec.free == free
-
-        stoch_rec = ActiveSetRecorder(3)
-        full_sub_rec = ActiveSetRecorder(3)
-        sub = SubsampledGradient(stoch_rec, n -> nothing, tr -> nothing, FullGradient(full_sub_rec), 1, 0, false, 0.25)
-        PDMPSamplers.set_active_set!(sub, free)
-        @test stoch_rec.free == free
-        @test full_sub_rec.free == free
 
         stats = PDMPSamplers.StatisticCounter()
         wrapped_rec = ActiveSetRecorder(3)

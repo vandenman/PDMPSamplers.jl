@@ -259,7 +259,7 @@ end
         flow = ZigZag(d)
         x = [3.0, -2.0, 1.0]
         θ = [1.0, 0.0, -1.0]
-        state = StickyPDMPState(Ref(0.0), SkeletonPoint(copy(x), copy(θ)), BitVector([true, false, true]), zeros(d))
+        state = StickyPDMPState(Ref(0.0), SkeletonPoint(copy(x), copy(θ)), BitVector([true, false, true]))
         cache = (; ∇ϕx=zeros(d))
 
         set_active_set!(model, state.free)
@@ -381,7 +381,6 @@ end
             Ref(0.0),
             SkeletonPoint(zeros(d), zeros(d)),
             falses(d),
-            zeros(d),
         )
         can_stick = BitVector([true, false, true])
 
@@ -596,7 +595,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.7, 0.0, -0.3, 0.0], [1.0, 0.0, -1.0, 0.0]),
             BitVector([true, false, true, false]),
-            zeros(4),
         )
         can_stick = BitVector([true, true, true, false])
         for τ in (0.0, 0.2, 0.75, 1.4)
@@ -629,7 +627,6 @@ end
             Ref(0.0),
             SkeletonPoint(zeros(2), zeros(2)),
             falses(2),
-            zeros(2),
         )
         const_can_stick = trues(2)
         λ0 = PDMPSamplers.rate(const_clock, const_flow, const_state, 0.0, const_can_stick)
@@ -657,7 +654,6 @@ end
             Ref(0.0),
             SkeletonPoint([1.0, 0.0, -0.5], [0.2, 0.0, -0.3]),
             BitVector([true, false, false]),
-            zeros(3),
         )
         indep_can_stick = BitVector([true, true, false])
         @test PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick) ≈
@@ -669,7 +665,7 @@ end
               rand(MersenneTwister(200), Exponential()) / λ_indep rtol=1e-7 atol=1e-8
 
         endpoint_linear = LinearGaussianAggregateClock(DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1]), BernoulliModelPrior([1.0]))
-        endpoint_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0], [0.0]), falses(1), zeros(1))
+        endpoint_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0], [0.0]), falses(1))
         @test PDMPSamplers.rate(endpoint_linear, flow, endpoint_state, 0.0, trues(1)) == Inf
         @test PDMPSamplers.sample_time(MersenneTwister(203), endpoint_linear, flow, endpoint_state, 1.0, trues(1)) == 0.0
         @test PDMPSamplers.sample_label(MersenneTwister(204), endpoint_linear, flow, endpoint_state, trues(1)) == 1
@@ -691,7 +687,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.8, 0.0, -0.2, 0.0], [1.1, 0.0, -0.7, 0.0]),
             BitVector([true, false, true, false]),
-            zeros(4),
         )
         exch_can_stick = BitVector([true, true, true, false])
         for flow_i in (ZigZag(4), BouncyParticle(4))
@@ -713,7 +708,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.8, 0.0, -0.2, 0.0], [1.0, 0.0, -1.0, 0.0]),
             BitVector([true, false, true, false]),
-            zeros(4),
         )
         zero_slope_clock = LinearGaussianAggregateClock(exch_provider, BernoulliModelPrior(fill(0.5, 4)))
         λ_const = PDMPSamplers.rate(zero_slope_clock, flow, zero_slope_state, 0.0, exch_can_stick)
@@ -729,7 +723,6 @@ end
             Ref(0.0),
             SkeletonPoint(zeros(4), zeros(4)),
             falses(4),
-            zeros(4),
         )
         size_prior_subset = ExchangeableModelSizePrior(log.([0.2, 0.3, 0.25, 0.15, 0.1]))
         subset_clock = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, v), size_prior_subset)
@@ -738,7 +731,7 @@ end
         @test subset_rate ≈ full_rate * count(subset_all_inactive) / 4
 
         endpoint_exch = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:2, 1.0, 0.1), BernoulliModelPrior([1.0, 0.0]))
-        endpoint_exch_state = StickyPDMPState(Ref(0.0), SkeletonPoint(zeros(2), zeros(2)), falses(2), zeros(2))
+        endpoint_exch_state = StickyPDMPState(Ref(0.0), SkeletonPoint(zeros(2), zeros(2)), falses(2))
         @test PDMPSamplers.rate(endpoint_exch, flow, endpoint_exch_state, 0.0, trues(2)) == Inf
         @test PDMPSamplers.sample_time(MersenneTwister(205), endpoint_exch, flow, endpoint_exch_state, 1.0, trues(2)) == 0.0
         @test PDMPSamplers.sample_label(MersenneTwister(206), endpoint_exch, flow, endpoint_exch_state, trues(2)) == 1
@@ -762,7 +755,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.0, 0.0, 0.0, 0.2, -0.1], [0.0, 0.0, 0.0, 0.3, -0.2]),
             falses(5),
-            zeros(5),
         )
         can_stick = BitVector([true, false, true, false, false])
 
@@ -814,7 +806,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.7, 0.0, -0.2, 0.4], [1.0, 0.0, -0.5, 0.25]),
             BitVector([true, false, true, true]),
-            zeros(4),
         )
         can_stick = BitVector([true, true, true, false])
         seg = scalar_logscale_gaussian_line_segment(provider, odds, flow, state, can_stick, 2.0)
@@ -871,7 +862,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.5, -0.25], [1.0, -1.0]),
             falses(2),
-            zeros(2),
         )
         can_stick = trues(2)
 
@@ -916,7 +906,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.6, 0.0, -0.3, 0.2], [0.8, 0.0, -0.4, 0.15]),
             BitVector([true, false, true, true]),
-            zeros(4),
         )
         scalar_can_stick = BitVector([true, true, true, false])
         seg = scalar_logscale_gaussian_line_segment(scalar_provider, scalar_odds, scalar_flow, scalar_state, scalar_can_stick, 1.5)
@@ -947,7 +936,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.0, 0.0, 0.0, 0.0], zeros(4)),
             falses(4),
-            zeros(4),
         )
         @test PDMPSamplers.rate(endpoint_scalar_clock, scalar_flow, endpoint_scalar_state, 0.1, scalar_can_stick) == Inf
         @test PDMPSamplers.sample_time(MersenneTwister(19), endpoint_scalar_clock, scalar_flow, endpoint_scalar_state, 1.0, scalar_can_stick) == 0.0
@@ -958,7 +946,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.0, 0.0, 0.0, 0.2], [0.0, 0.0, 0.0, 0.15]),
             BitVector([false, false, false, true]),
-            zeros(4),
         )
         @test PDMPSamplers.sample_time(MersenneTwister(21), default_scalar_clock, scalar_flow, all_frozen_state, Inf, scalar_can_stick) == 0.0
 
@@ -969,7 +956,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.0, 0.0], [0.0, 0.0]),
             falses(2),
-            zeros(2),
         )
         tiny_can_stick = BitVector([true, false])
         tiny_rate = PDMPSamplers.rate(tiny_clock, ZigZag(2), tiny_state, 0.0, tiny_can_stick)
@@ -984,7 +970,6 @@ end
             Ref(0.0),
             SkeletonPoint([0.0, 0.0], [0.0, 1.0]),
             falses(2),
-            zeros(2),
         )
         @test PDMPSamplers.sample_time(MersenneTwister(23), defective_clock, ZigZag(2), defective_state, Inf, tiny_can_stick) == Inf
 
@@ -994,7 +979,6 @@ end
             Ref(0.0),
             SkeletonPoint([-20.0, 0.0, 0.0], [2.0, 0.0, -1.0]),
             BitVector([true, false, true]),
-            zeros(3),
         )
         peak_can_stick = BitVector([true, true, false])
         peak_seg = scalar_logscale_gaussian_line_segment(peak_provider, BernoulliModelPrior(fill(0.5, 2)), ZigZag(3), peak_state, peak_can_stick, Inf)
@@ -1037,7 +1021,7 @@ end
         boomerang_summed = SummedRateClock(boomerang_provider, boomerang_odds; rtol=1e-8, atol=1e-10)
         boomerang_fourier = FourierResidualAggregateClock(boomerang_provider, boomerang_odds; order=6, cells=8, residual_budget=1e-3, allow_slow_fallback=false)
         boomerang_flow = Boomerang(inv([1.0 0.35; 0.35 1.6]), zeros(2), 0.0)
-        boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.45], [0.0, 0.7]), BitVector([false, true]), zeros(2))
+        boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.45], [0.0, 0.7]), BitVector([false, true]))
         boomerang_can_stick = trues(2)
         @test PDMPSamplers.rate(boomerang_fourier, boomerang_flow, boomerang_state, 0.35, boomerang_can_stick) ≈
               PDMPSamplers.rate(boomerang_summed, boomerang_flow, boomerang_state, 0.35, boomerang_can_stick)
@@ -1069,7 +1053,7 @@ end
         @test boomerang_fourier_diagnostics.min_envelope >= 0
         @test_throws ArgumentError PDMPSamplers.sample_time(MersenneTwister(25), boomerang_fourier, boomerang_flow, boomerang_state, Inf, boomerang_can_stick)
 
-        no_inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.2, 0.45], [0.3, 0.7]), trues(2), zeros(2))
+        no_inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.2, 0.45], [0.3, 0.7]), trues(2))
         PDMPSamplers.reset_thinning_diagnostics!(boomerang_fourier)
         @test PDMPSamplers.sample_time(MersenneTwister(26), boomerang_fourier, boomerang_flow, no_inactive_state, 1.2, boomerang_can_stick) == Inf
         @test PDMPSamplers.thinning_diagnostics(boomerang_fourier).rate_evaluations == 0
@@ -1085,7 +1069,7 @@ end
         lowrank_fourier_flow.Γ.Λ .= [0.6]
         PDMPSamplers.lowrank_precompute!(lowrank_fourier_flow.Γ)
         lowrank_fourier = FourierResidualAggregateClock(boomerang_provider, boomerang_odds; order=6, cells=8, residual_budget=1e-3, allow_slow_fallback=false)
-        lowrank_fourier_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, -0.35], [0.0, -0.5]), BitVector([false, true]), zeros(2))
+        lowrank_fourier_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, -0.35], [0.0, -0.5]), BitVector([false, true]))
         lowrank_env, _ = PDMPSamplers._build_fourier_residual_envelope(lowrank_fourier, lowrank_fourier_flow, lowrank_fourier_state, 0.9, boomerang_can_stick)
         for t in range(0.0, 0.9; length=129)
             @test PDMPSamplers._fourier_envelope_rate(lowrank_env, t) + 1e-10 >=
@@ -1101,7 +1085,7 @@ end
             order=6, cells=8, residual_budget=1e-3, allow_slow_fallback=false)
         logscale_boomerang_summed = SummedRateClock(logscale_boomerang_provider, logscale_boomerang_odds)
         logscale_boomerang_flow = Boomerang(Diagonal([1.0, 1.4, 0.8]), zeros(3), 0.0)
-        logscale_boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.35, 0.2], [0.0, 0.4, 0.3]), BitVector([false, true, true]), zeros(3))
+        logscale_boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.35, 0.2], [0.0, 0.4, 0.3]), BitVector([false, true, true]))
         logscale_boomerang_can_stick = BitVector([true, true, false])
         logscale_env, _ = PDMPSamplers._build_fourier_residual_envelope(
             logscale_boomerang_clock, logscale_boomerang_flow, logscale_boomerang_state, 1.1, logscale_boomerang_can_stick)
@@ -1158,7 +1142,7 @@ end
             DenseGaussianSlab([0.0], reshape([1.0], 1, 1), 1:1),
             BernoulliModelPrior([1e-20]))
         tiny_state = StickyPDMPState(
-            Ref(0.0), SkeletonPoint([0.0], [0.0]), falses(1), zeros(1))
+            Ref(0.0), SkeletonPoint([0.0], [0.0]), falses(1))
         @test isfinite(PDMPSamplers.sample_time(
             MersenneTwister(202), tiny_clock, ZigZag(1), tiny_state, Inf, trues(1)))
         scalar_alg = AggregateSticky(GridThinningStrategy(), scalar_clock, BitVector([true, true, false]))
@@ -1201,27 +1185,25 @@ end
         _, _, adaptive_boomerang_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(126), adaptive_boomerang, model, alg, 0.0, ξ)
         @test adaptive_boomerang_internal isa PDMPSamplers.AggregateStickyLoopState
         @test PDMPSamplers.unstick_rate_constant(boomerang, 1) ≈ sqrt(2 / π) / 2
-        inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]), zeros(d))
-        θ_boundary = PDMPSamplers.draw_boundary_velocity!(MersenneTwister(128), inactive_state, boomerang, 1)
+        inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]))
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(128), inactive_state, boomerang, 1)
+        θ_boundary = inactive_state.ξ.θ[1]
         @test isfinite(θ_boundary)
-        @test inactive_state.ξ.θ[2] == 0.1
-        @test inactive_state.old_velocity[1] == 0.0
+        @test isfinite(inactive_state.ξ.θ[2])
         boomerang_rate = PDMPSamplers.rate(linear_clock, boomerang, inactive_state, 0.0, trues(d))
         @test boomerang_rate ≈ (sqrt(2 / π) / 2) * pdf(Normal(), 0.0)
 
         Σ_dense = [1.0 0.4; 0.4 2.0]
         dense_boomerang = Boomerang(inv(Σ_dense), zeros(d), 0.0)
-        dense_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]), zeros(d))
-        μ_cond, σ_cond = PDMPSamplers._boomerang_boundary_velocity_params(dense_boomerang, dense_state, 1)
-        @test μ_cond ≈ Σ_dense[1, 2] / Σ_dense[2, 2] * dense_state.ξ.θ[2]
-        @test σ_cond^2 ≈ Σ_dense[1, 1] - Σ_dense[1, 2]^2 / Σ_dense[2, 2]
+        dense_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]))
         dense_rate = PDMPSamplers.rate(clock, dense_boomerang, dense_state, 0.0, trues(d))
-        dense_constant = PDMPSamplers._abs_normal_mean(μ_cond, σ_cond)
+        dense_constant = sqrt(2 / π) * sqrt(Σ_dense[1, 1])
         @test dense_rate ≈ dense_constant * pdf(Normal(), 0.0)
         @test PDMPSamplers.rate(linear_clock, dense_boomerang, dense_state, 0.0, trues(d)) ≈ dense_rate
-        dense_θ = PDMPSamplers.draw_boundary_velocity!(MersenneTwister(129), dense_state, dense_boomerang, 1)
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(129), dense_state, dense_boomerang, 1)
+        dense_θ = dense_state.ξ.θ[1]
         @test isfinite(dense_θ)
-        @test dense_state.ξ.θ[2] == 0.75
+        @test isfinite(dense_state.ξ.θ[2])
         _, _, dense_boomerang_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(127), dense_boomerang, model, alg, 0.0, ξ)
         @test dense_boomerang_internal isa PDMPSamplers.AggregateStickyLoopState
 
@@ -1232,17 +1214,15 @@ end
         lrp.Λ .= [0.8]
         PDMPSamplers.lowrank_precompute!(lrp)
         Σ_lowrank = Diagonal(lrp.D) + lrp.V * Diagonal(lrp.Λ) * lrp.V'
-        lowrank_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, -0.2], [0.0, -0.4]), BitVector([false, true]), zeros(d))
-        μ_lowrank, σ_lowrank = PDMPSamplers._boomerang_boundary_velocity_params(lowrank_boomerang, lowrank_state, 1)
-        @test μ_lowrank ≈ Σ_lowrank[1, 2] / Σ_lowrank[2, 2] * lowrank_state.ξ.θ[2]
-        @test σ_lowrank^2 ≈ Σ_lowrank[1, 1] - Σ_lowrank[1, 2]^2 / Σ_lowrank[2, 2]
-        @test PDMPSamplers.rate(clock, lowrank_boomerang, lowrank_state, 0.0, trues(d)) ≈ PDMPSamplers._abs_normal_mean(μ_lowrank, σ_lowrank) * pdf(Normal(), 0.0)
-        @test isfinite(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(130), lowrank_state, lowrank_boomerang, 1))
+        lowrank_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, -0.2], [0.0, -0.4]), BitVector([false, true]))
+        @test PDMPSamplers.rate(clock, lowrank_boomerang, lowrank_state, 0.0, trues(d)) ≈ sqrt(2 / π) * sqrt(Σ_lowrank[1, 1]) * pdf(Normal(), 0.0)
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(130), lowrank_state, lowrank_boomerang, 1)
+        @test isfinite(lowrank_state.ξ.θ[1])
         _, _, lowrank_boomerang_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(128), lowrank_boomerang, model, alg, 0.0, ξ)
         @test lowrank_boomerang_internal isa PDMPSamplers.AggregateStickyLoopState
 
         adapted_flow = AdaptiveBoomerang(d; λref=0.0, scheme=:fullrank)
-        adapted_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]), zeros(d))
+        adapted_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]))
         adapted_alg = PDMPSamplers._to_internal(alg, MersenneTwister(140), adapted_flow, model, adapted_state,
             PDMPSamplers.add_gradient_to_cache(PDMPSamplers.initialize_cache(MersenneTwister(141), adapted_flow, model.grad, alg, 0.0, adapted_state.ξ), adapted_state.ξ),
             PDMPSamplers.StatisticCounter())
@@ -1267,15 +1247,16 @@ end
 
         precond_zz = PreconditionedZigZag(d; scale=[2.0, 0.5])
         @test PDMPSamplers.unstick_rate_constant(precond_zz, 1) == 2.0
-        all_inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint(zeros(d), zeros(d)), falses(d), zeros(d))
+        all_inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint(zeros(d), zeros(d)), falses(d))
         precond_zz_weights = zeros(d)
         PDMPSamplers._boundary_logweights_with_velocity!(precond_zz_weights, clock, precond_zz, all_inactive_state, trues(d))
         @test precond_zz_weights ≈ logpdf(Normal(), 0.0) .+ log.([2.0, 0.5])
         @test PDMPSamplers.rate(clock, precond_zz, all_inactive_state, 0.0, trues(d)) ≈ pdf(Normal(), 0.0) * 2.5
         @test PDMPSamplers.rate(linear_clock, precond_zz, all_inactive_state, 0.0, trues(d)) ≈ PDMPSamplers.rate(clock, precond_zz, all_inactive_state, 0.0, trues(d))
         @test PDMPSamplers.sample_time(MersenneTwister(138), linear_clock, precond_zz, all_inactive_state, 1.0, trues(d)) isa Real
-        precond_zz_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]), zeros(d))
-        @test abs(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(131), precond_zz_state, precond_zz, 1)) == 2.0
+        precond_zz_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]))
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(131), precond_zz_state, precond_zz, 1)
+        @test abs(precond_zz_state.ξ.θ[1]) == 2.0
         _, _, precond_zz_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(127), precond_zz, model, alg, 0.0, ξ)
         @test precond_zz_internal isa PDMPSamplers.AggregateStickyLoopState
 
@@ -1283,21 +1264,19 @@ end
         @test PDMPSamplers.unstick_rate_constant(precond_bps, 1) ≈ 2sqrt(2 / π)
         @test PDMPSamplers.rate(clock, precond_bps, all_inactive_state, 0.0, trues(d)) ≈ sqrt(2 / π) * pdf(Normal(), 0.0) * 2.5
         @test PDMPSamplers.rate(linear_clock, precond_bps, all_inactive_state, 0.0, trues(d)) ≈ PDMPSamplers.rate(clock, precond_bps, all_inactive_state, 0.0, trues(d))
-        precond_bps_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]), zeros(d))
-        precond_bps_draw = PDMPSamplers.draw_boundary_velocity!(MersenneTwister(132), precond_bps_state, precond_bps, 1)
+        precond_bps_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]))
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(132), precond_bps_state, precond_bps, 1)
+        precond_bps_draw = precond_bps_state.ξ.θ[1]
         @test isfinite(precond_bps_draw)
         _, _, precond_bps_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(133), precond_bps, model, alg, 0.0, ξ)
         @test precond_bps_internal isa PDMPSamplers.AggregateStickyLoopState
-        @test isempty(precond_bps_state.boundary_scratch.covariance)
 
         identity_bps = PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), BouncyParticle(d, 0.0))
         identity_bps_state = StickyPDMPState(
             Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]),
-            BitVector([false, true]), zeros(d))
-        @test PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(
-            identity_bps, identity_bps_state, 1) == (0.0, 1.0)
+            BitVector([false, true]))
         @test PDMPSamplers.rate(clock, identity_bps, identity_bps_state, 0.0, trues(d)) > 0
-        @test isempty(identity_bps_state.boundary_scratch.covariance)
+        @test PDMPSamplers._boundary_proposal_clock_constant(identity_bps, identity_bps_state, 1) ≈ sqrt(2 / π)
 
         copied_state = copy(precond_bps_state)
         @test copied_state.boundary_scratch !== precond_bps_state.boundary_scratch
@@ -1309,72 +1288,53 @@ end
 
         dense_bps = DensePreconditionedBPS(d; refresh_rate=0.0)
         Σ_dense_precond = [1.0 0.3; 0.3 1.6]
-        dense_bps.metric.L .= cholesky(Symmetric(Σ_dense_precond)).L
-        dense_bps.metric.Linv .= inv(LowerTriangular(dense_bps.metric.L))
+        set_dense_preconditioner!(dense_bps.metric,
+            cholesky(Symmetric(Σ_dense_precond)).L)
         @test PDMPSamplers.unstick_rate_constant(dense_bps, 1) ≈ sqrt(2 / π) * sqrt(Σ_dense_precond[1, 1])
-        dense_bps_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]), zeros(d))
-        μ_dense_bps, σ_dense_bps = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(dense_bps, dense_bps_state, 1)
-        @test μ_dense_bps ≈ Σ_dense_precond[1, 2] / Σ_dense_precond[2, 2] * dense_bps_state.ξ.θ[2]
-        @test σ_dense_bps^2 ≈ Σ_dense_precond[1, 1] - Σ_dense_precond[1, 2]^2 / Σ_dense_precond[2, 2]
-        @test isfinite(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(134), dense_bps_state, dense_bps, 1))
+        dense_bps_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]))
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(134), dense_bps_state, dense_bps, 1)
+        @test isfinite(dense_bps_state.ξ.θ[1])
 
         precond_boomerang = PreconditionedDynamics(DiagonalPreconditioner([2.0, 0.5]), boomerang)
-        precond_boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]), zeros(d))
+        precond_boomerang_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]))
         @test PDMPSamplers.unstick_rate_constant(precond_boomerang, 1) ≈ sqrt(2 / π)
-        μ_precond_boomerang, σ_precond_boomerang = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(precond_boomerang, precond_boomerang_state, 1)
-        @test μ_precond_boomerang ≈ 0.0
-        @test σ_precond_boomerang^2 ≈ 1.0
         identity_boomerang = PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), boomerang)
-        identity_params = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(identity_boomerang, inactive_state, 1)
-        boomerang_params = PDMPSamplers._boomerang_boundary_velocity_params(boomerang, inactive_state, 1)
-        @test identity_params[1] ≈ boomerang_params[1]
-        @test identity_params[2] ≈ boomerang_params[2]
-        @test inactive_state.boundary_scratch.covariance_work === nothing
-        @test isfinite(PDMPSamplers.draw_boundary_velocity!(MersenneTwister(135), precond_boomerang_state, precond_boomerang, 1))
+        @test PDMPSamplers._boundary_proposal_clock_constant(identity_boomerang, inactive_state, 1) ≈
+              PDMPSamplers._boundary_proposal_clock_constant(boomerang, inactive_state, 1)
+        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(135), precond_boomerang_state, precond_boomerang, 1)
+        @test isfinite(precond_boomerang_state.ξ.θ[1])
 
         dense_preconditioner = PDMPSamplers.DensePreconditioner(d)
-        dense_preconditioner.L .= [1.1 0.0; 0.4 0.7]
-        dense_preconditioner.Linv .= inv(LowerTriangular(dense_preconditioner.L))
+        set_dense_preconditioner!(dense_preconditioner, [1.1 0.0; 0.4 0.7])
         dense_preconditioned_boomerang = PreconditionedDynamics(dense_preconditioner, dense_boomerang)
         Σ_preconditioned_boomerang = dense_preconditioner.L * Σ_dense * dense_preconditioner.L'
-        dense_preconditioned_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]), zeros(d))
-        μ_dense_preconditioned, σ_dense_preconditioned = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(dense_preconditioned_boomerang, dense_preconditioned_state, 1)
-        @test μ_dense_preconditioned ≈ Σ_preconditioned_boomerang[1, 2] / Σ_preconditioned_boomerang[2, 2] * dense_preconditioned_state.ξ.θ[2]
-        @test σ_dense_preconditioned^2 ≈ Σ_preconditioned_boomerang[1, 1] - Σ_preconditioned_boomerang[1, 2]^2 / Σ_preconditioned_boomerang[2, 2]
+        dense_preconditioned_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.75]), BitVector([false, true]))
+        PDMPSamplers._boundary_proposal_clock_constant(dense_preconditioned_boomerang, dense_preconditioned_state, 1)
         @test PDMPSamplers.unstick_rate_constant(dense_preconditioned_boomerang, 1) ≈ sqrt(2 / π) * sqrt(Σ_preconditioned_boomerang[1, 1])
-        scratch = dense_preconditioned_state.boundary_scratch
-        cached_generation = scratch.covariance_generation
-        @test scratch.active_factor_valid
-        @test scratch.conditional_std_valid[1]
-        @test scratch.covariance_work !== nothing
-        @test scratch.covariance ≈ Σ_preconditioned_boomerang
-        PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(dense_preconditioned_boomerang, dense_preconditioned_state, 1)
-        @test scratch.covariance_generation == cached_generation
-        cached_std = scratch.conditional_std[1]
-        dense_preconditioned_state.ξ.θ[2] = 0.9
-        μ_new_velocity, σ_new_velocity = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(
-            dense_preconditioned_boomerang, dense_preconditioned_state, 1)
-        @test μ_new_velocity ≈ Σ_preconditioned_boomerang[1, 2] / Σ_preconditioned_boomerang[2, 2] * 0.9
-        @test σ_new_velocity == cached_std
-        dense_preconditioned_state.ξ.θ[2] = 0.75
+        @test PDMPSamplers._boundary_proposal_clock_constant(
+            dense_preconditioned_boomerang, dense_preconditioned_state, 1) ≈
+            sqrt(2 / π) * sqrt(Σ_preconditioned_boomerang[1, 1])
 
         old_l11 = dense_preconditioner.L[1, 1]
-        dense_preconditioner.L[1, 1] = old_l11 + 0.2
+        updated_factor = Matrix(dense_preconditioner.L)
+        updated_factor[1, 1] = old_l11 + 0.2
+        set_dense_preconditioner!(dense_preconditioner, updated_factor)
         Σ_updated = dense_preconditioner.L * Σ_dense * dense_preconditioner.L'
-        PDMPSamplers._invalidate_boundary_velocity_cache!(dense_preconditioned_state)
-        μ_updated, σ_updated = PDMPSamplers._preconditioned_gaussian_boundary_velocity_params(
-            dense_preconditioned_boomerang, dense_preconditioned_state, 1)
-        @test scratch.covariance_generation != cached_generation
-        @test scratch.covariance ≈ Σ_updated
-        @test μ_updated ≈ Σ_updated[1, 2] / Σ_updated[2, 2] * dense_preconditioned_state.ξ.θ[2]
-        @test σ_updated^2 ≈ Σ_updated[1, 1] - Σ_updated[1, 2]^2 / Σ_updated[2, 2]
-        dense_preconditioner.L[1, 1] = old_l11
+        @test PDMPSamplers._boundary_proposal_clock_constant(
+            dense_preconditioned_boomerang, dense_preconditioned_state, 1) ≈
+            sqrt(2 / π) * sqrt(Σ_updated[1, 1])
+        updated_factor[1, 1] = old_l11
+        set_dense_preconditioner!(dense_preconditioner, updated_factor)
 
         dense_zz = DensePreconditionedZigZag(d)
         non_grid_alg = AggregateSticky(ThinningStrategy(GlobalBounds(1.0, d)), clock, trues(d))
         @test_throws ArgumentError PDMPSamplers.initialize_state(MersenneTwister(125), ZigZag(d), model, non_grid_alg, 0.0, ξ)
-        @test_throws ArgumentError PDMPSamplers.initialize_state(MersenneTwister(136), dense_zz, model, alg, 0.0, ξ)
-        @test_throws ArgumentError PDMPSamplers.unstick_rate_constant(dense_zz, 1)
-        @test_throws ArgumentError PDMPSamplers.draw_boundary_velocity!(MersenneTwister(137), state, dense_zz, 1)
+        _, _, dense_zz_internal, _, _ = PDMPSamplers.initialize_state(
+            MersenneTwister(136), dense_zz, model, alg, 0.0, ξ)
+        @test dense_zz_internal isa PDMPSamplers.AggregateStickyLoopState
+        dense_zz_state = StickyPDMPState(Ref(0.0),
+            SkeletonPoint([0.0, 0.5], [0.0, 0.0]), BitVector([false, true]))
+        @test PDMPSamplers._boundary_proposal_clock_constant(
+            dense_zz, dense_zz_state, 1) > 0
     end
 end

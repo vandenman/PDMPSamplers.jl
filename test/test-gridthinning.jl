@@ -348,10 +348,10 @@ end
         @test all(isnan, PDMPSamplers._metric_scale_extrema(flow))
         @test PDMPSamplers._metric_scale_extrema(PreconditionedZigZag(3; scale=[0.5, 2.0, 1.0])) == (0.5, 2.0)
         dense_bps = DensePreconditionedBPS(2)
-        dense_bps.metric.L .= [2.0 0.0; 0.1 3.0]
+        set_dense_preconditioner!(dense_bps.metric, [2.0 0.0; 0.1 3.0])
         @test PDMPSamplers._metric_scale_extrema(dense_bps) == (2.0, 3.0)
         dense_zz = DensePreconditionedZigZag(2)
-        dense_zz.metric.L .= [4.0 0.0; 0.2 1.5]
+        set_dense_preconditioner!(dense_zz.metric, [4.0 0.0; 0.2 1.5])
         @test PDMPSamplers._metric_scale_extrema(dense_zz) == (1.5, 4.0)
 
         t_grid = [0.0, 0.5, 1.0]
@@ -1353,11 +1353,9 @@ end
 
         L = [1.0 0.0 0.0; 0.25 1.1 0.0; -0.2 0.15 0.9]
         dense = PDMPSamplers.DensePreconditioner(d)
-        dense.L .= L
-        dense.Linv .= inv(LowerTriangular(L))
+        set_dense_preconditioner!(dense, L)
         flow = PDMPSamplers.PreconditionedDynamics(dense, ZigZag(d))
         v = [1.0, -1.0, 1.0]
-        copyto!(flow.metric.v_canonical, v)
         θ = L * v
         zz_state = PDMPState(0.0, SkeletonPoint([0.3, -0.4, 0.2], θ))
         @test PDMPSamplers._rate_aggregation(flow) === :componentwise
@@ -1368,18 +1366,16 @@ end
         Hθ_z = L' * θ
         @test vec(G[:, 1]) ≈ v .* η
         @test vec(dG[:, 1]) ≈ v .* Hθ_z
-        @test sum(max.(G[:, 1], 0.0)) ≈ PDMPSamplers.λ(zz_state.ξ, zz_state.ξ.x, flow)
+        @test sum(max.(G[:, 1], 0.0)) ≈ PDMPSamplers.λ(zz_state, zz_state.ξ.x, flow)
     end
 
     @testset "dense preconditioned ZigZag bounded aggregate dominates rate" begin
         d = 3
         L = [1.0 0.0 0.0; 0.2 1.0 0.0; -0.1 0.3 0.8]
         dense = PDMPSamplers.DensePreconditioner(d)
-        dense.L .= L
-        dense.Linv .= inv(LowerTriangular(L))
+        set_dense_preconditioner!(dense, L)
         flow = PDMPSamplers.PreconditionedDynamics(dense, ZigZag(d))
         v = [1.0, -1.0, 1.0]
-        copyto!(flow.metric.v_canonical, v)
         θ = L * v
         state = PDMPState(0.0, SkeletonPoint([-0.4, 0.25, -0.1], θ))
         grad = x -> copy(x)
@@ -1396,7 +1392,7 @@ end
         for t in range(0.0, 1.0; length=31)
             st = copy(state)
             move_forward_time!(st, t, flow)
-            @test PDMPSamplers.λ(st.ξ, st.ξ.x, flow) <= pab(t) + 1e-12
+            @test PDMPSamplers.λ(st, st.ξ.x, flow) <= pab(t) + 1e-12
         end
     end
 
@@ -1612,7 +1608,8 @@ end
         boom = Boomerang(d)
         ξ = SkeletonPoint(randn(d), randn(d))
         free = BitVector([true, false, true])
-        state = StickyPDMPState(0.0, ξ, free, randn(d))
+        state = StickyPDMPState(0.0, ξ, free)
+        state.ξ.θ[.!free] .= 0.0
         ∇U = randn(d)
         Hv = randn(d)
         result = PDMPSamplers.∂λ∂t(state, ∇U, Hv, boom)
@@ -1624,7 +1621,8 @@ end
         lr_boom = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
         ξ = SkeletonPoint(randn(d), randn(d))
         free = BitVector([true, false, true])
-        state = StickyPDMPState(0.0, ξ, free, randn(d))
+        state = StickyPDMPState(0.0, ξ, free)
+        state.ξ.θ[.!free] .= 0.0
         ∇U = randn(d)
         Hv = randn(d)
         result = PDMPSamplers.∂λ∂t(state, ∇U, Hv, lr_boom)
@@ -2195,63 +2193,6 @@ end
         stats.refreshment_events = 2
         PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
         @test isnan(alg.constant_bound_rate[])
-    end
-
-    @testset "Subsampled gradient grid adaptation branches" begin
-        d = 3
-        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        strat = GridThinningStrategy(; N=20, t_max=2.0)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
-
-        grad_sub = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            0,
-            false;
-            resample_dt=0.1,
-        )
-
-        alg.t_max[] = 10.0
-        PDMPSamplers._adapt_grid_t_max!(alg, 0.2, grad_sub)
-        @test alg.t_max[] ≈ 4.0
-
-        old_tmax = alg.t_max[]
-        PDMPSamplers._shrink_t_max_on_rejection!(alg, alg.pcb, 0.01, grad_sub)
-        @test alg.t_max[] == old_tmax
-    end
-
-    @testset "Subsampled early stopping is fixed-batch capability gated" begin
-        grad_default = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            0,
-            false;
-            resample_dt=0.1,
-        )
-        grad_fixed = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            0,
-            false;
-            resample_dt=0.1,
-            fixed_batch_within_event=true,
-        )
-
-        @test grad_default.fixed_batch_within_event === false
-        @test grad_fixed.fixed_batch_within_event === true
-        @test isinf(PDMPSamplers._adjust_early_stop(grad_default, 2.5))
-        @test PDMPSamplers._adjust_early_stop(grad_fixed, 2.5) == 2.5
-        @test copy(grad_fixed).fixed_batch_within_event === true
-        @test PDMPSamplers.with_stats(grad_fixed, PDMPSamplers.StatisticCounter()).fixed_batch_within_event === true
     end
 
     if RUN_EXTENDED_GRID_SMOKE_TESTS

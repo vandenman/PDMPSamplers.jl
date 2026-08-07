@@ -145,7 +145,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
     if alg.has_cached_gradient[]
         _inc_counter_grid_cached_endpoint_reuses(stats)
         y_left = shared_node ? Float64(dot(alg.cached_gradient, state_.ξ.θ)) :
-            pos(λ(state_.ξ, alg.cached_gradient, flow))
+            pos(λ(state_, alg.cached_gradient, flow))
         alg.has_cached_gradient[] = false
         alg.has_cached_rate_derivative[] = false
     else
@@ -273,7 +273,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
             ∇ϕx = _compute_grid_gradient_or_throw!(
                 state2_, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
 
-            l_actual = λ(state2_.ξ, ∇ϕx, flow)
+            l_actual = λ(state2_, ∇ϕx, flow)
             signed_actual = shared_node ? Float64(dot(∇ϕx, state2_.ξ.θ)) : Float64(l_actual)
             _inc_counter_grid_acceptance_tests(stats)
             proposal_attempts += 1
@@ -283,7 +283,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
             min_tightness = min(min_tightness, tightness)
             max_tightness = max(max_tightness, tightness)
 
-            if l_actual > lb_proposal * (1 + 1e-10) + 1e-12
+            if _bound_violated(l_actual, lb_proposal)
                 _inc_counter_lazy_fallback_bound_violation(stats)
                 _inc_counter_grid_bound_violations(stats)
                 if alg.bound_violation === :throw

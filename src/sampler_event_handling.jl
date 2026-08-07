@@ -101,7 +101,7 @@ function _handle_global_event_impl!(
         else
             ∇ϕx = _compute_reflection_gradient!(state, gradient_strategy, flow, cache, meta, alg, τ, wrap_boundary)
 
-            if accept_reflection_event(rng, alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
+            if accept_reflection_event(rng, alg, state, ∇ϕx, flow, τ, cache, meta)
                 _inc_counter_reflections_accepted(stats)
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
                 needs_saving = true
@@ -120,17 +120,27 @@ function _handle_global_event_impl!(
     elseif event_type == :sticky
         _inc_counter_sticky_events(stats)
         i = meta.i
-        position_will_snap = state.free[i]
-        stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
-        if position_will_snap &&
+        was_free = state.free[i]
+        transition_accepted = stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
+        if transition_accepted
+            if was_free
+                _inc_counter_sticky_freezes(stats)
+            else
+                _inc_counter_sticky_unfreezes(stats)
+            end
+        elseif !was_free
+            _inc_counter_sticky_unfreeze_rejections(stats)
+        end
+        if transition_accepted &&
             alg isa Union{StickyLoopState,AggregateStickyLoopState} &&
             alg.inner_alg_state isa GridAdaptiveState
             _invalidate_cached_gradient!(alg.inner_alg_state)
         end
-        set_active_set!(model_or_gradient, state.free)
+        transition_accepted && set_active_set!(model_or_gradient, state.free)
         validate_state(state, flow, "after stick_or_unstick!")
-        needs_saving = true
-        if isfactorized(flow)
+        needs_saving = transition_accepted
+        transition_accepted || _set_counter_last_rejected(stats, true)
+        if isfactorized(flow) && !_is_sticky_loop_state(alg)
             saving_args = i
         end
 
@@ -142,6 +152,7 @@ function _handle_global_event_impl!(
     end
 
     _check_sticky_times!(alg, state)
+    _is_sticky_loop_state(alg) && (saving_args = nothing)
     return needs_saving, saving_args
 end
 

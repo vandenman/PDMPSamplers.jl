@@ -97,7 +97,7 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
 
     state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
     iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
     used_batched_rate_derivatives = _supports_constant_grid_rate_derivatives(flow, grad_and_hess_or_grad_and_hvp) &&

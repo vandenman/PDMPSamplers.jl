@@ -19,30 +19,12 @@ refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
 function reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
 
     θ = ξ.θ
-    # Single-pass weighted sampling: compute cumulative sum on-the-fly
-    total_rate = zero(eltype(∇ϕ))
-    for i in eachindex(θ)
-        total_rate += λ_i(i, ξ, ∇ϕ[i], flow)
-    end
-    if ispositive(total_rate)
-        u = rand(rng) * total_rate
-        cumsum = zero(total_rate)
-        i₀ = firstindex(θ)
-        for i in eachindex(θ)
-            cumsum += λ_i(i, ξ, ∇ϕ[i], flow)
-            if cumsum >= u
-                i₀ = i
-                break
-            end
-        end
-    else
-        i₀ = rand(rng, eachindex(θ))
-    end
+    i₀ = _rand_posdot_index(rng, θ, ∇ϕ)
     θ[i₀] = -θ[i₀]
     return i₀
 end
 
-λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag)   = sum(i->λ_i(i, ξ, ∇ϕ[i], flow), eachindex(ξ.θ))
+λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, ::ZigZag) = posdot(ξ.θ, ∇ϕ)
 λ_i(i::Integer, ξ::SkeletonPoint, ∇ϕ_i::Real, ::ZigZag) = pos(ξ.θ[i] * ∇ϕ_i)
 
 function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input::AbstractVector, ::ZigZag)

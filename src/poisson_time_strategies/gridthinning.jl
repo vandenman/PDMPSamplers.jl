@@ -245,18 +245,21 @@ end
 
 _validate_grid_model(::ContinuousDynamics, ::PDMPModel) = nothing
 
-function _validate_grid_model(::ContinuousDynamics,
-    ::PDMPModel{<:SubsampledGradient})
-    throw(ArgumentError(
-        "SubsampledGradient's event-scoped batch lifecycle is not exact with GridThinning; use MarkedControlVariate"))
-end
-
-function _validate_grid_model(flow::ContinuousDynamics,
-    ::PDMPModel{<:MarkedControlVariate})
-    flow isa Union{BouncyParticle,ZigZag} || throw(ArgumentError(
-        "MarkedControlVariate GridThinning currently supports only ordinary BouncyParticle and ZigZag dynamics; got $(typeof(flow))"))
+_validate_marked_grid_envelope(::ContinuousDynamics, ::SeparableResidualEnvelope) = nothing
+_validate_marked_grid_envelope(flow::PreconditionedDynamics,
+        envelope::SeparableResidualEnvelope) =
+    _validate_marked_grid_envelope(flow.dynamics, envelope)
+function _validate_marked_grid_envelope(::AnyBoomerang,
+        envelope::SeparableResidualEnvelope)
+    envelope.component_cell_scales! === nothing && throw(ArgumentError(
+        "MarkedControlVariate GridThinning requires an explicit certified " *
+        "component_cell_scales! callback for Boomerang trajectories"))
     return nothing
 end
+
+_validate_grid_model(flow::ContinuousDynamics,
+    model::PDMPModel{<:MarkedControlVariate}) =
+        _validate_marked_grid_envelope(flow, model.grad.envelope)
 
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     _validate_grid_model(flow, model)
@@ -286,9 +289,6 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
 end
 
 _adjust_early_stop(::GradientStrategy, est::Float64) = est
-_adjust_early_stop(grad::SubsampledGradient, est::Float64) =
-    grad.fixed_batch_within_event ? est : Inf
-
 function _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64,
     max_horizon_event::Symbol=:horizon_hit)
     if τ_refresh <= t_max && τ_refresh <= max_horizon

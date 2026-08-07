@@ -1,5 +1,6 @@
 function unstick_rate_constant end
-function draw_boundary_velocity! end
+function draw_stratum_velocity! end
+function propose_boundary_velocity! end
 
 function _boomerang_covariance_entry(flow::AnyBoomerang, i::Integer, j::Integer)
     ΣL = flow.ΣL
@@ -15,300 +16,132 @@ function _boomerang_covariance_entry(flow::LowRankMutableBoomerang, i::Integer, 
     return value
 end
 
-function _materialize_boomerang_covariance!(dest::AbstractMatrix{Float64}, flow::AnyBoomerang)
-    mul!(dest, flow.ΣL, transpose(flow.ΣL))
-    return dest
-end
-
-function _materialize_boomerang_covariance!(dest::AbstractMatrix{Float64}, flow::LowRankMutableBoomerang)
-    lrp = flow.Γ
-    @inbounds for j in axes(dest, 2), i in axes(dest, 1)
-        value = i == j ? lrp.D[i] : 0.0
-        for k in eachindex(lrp.Λ)
-            value += lrp.V[i, k] * lrp.Λ[k] * lrp.V[j, k]
-        end
-        dest[i, j] = value
-    end
-    return dest
-end
-
-function _materialize_metric_covariance!(dest::AbstractMatrix{Float64}, ::IdentityPreconditioner)
-    fill!(dest, 0.0)
-    @inbounds for i in axes(dest, 1)
-        dest[i, i] = 1.0
-    end
-    return dest
-end
-
-function _materialize_metric_covariance!(dest::AbstractMatrix{Float64}, metric::DiagonalPreconditioner)
-    fill!(dest, 0.0)
-    @inbounds for i in axes(dest, 1)
-        dest[i, i] = abs2(metric.scale[i])
-    end
-    return dest
-end
-
-function _materialize_metric_covariance!(dest::AbstractMatrix{Float64}, metric::DensePreconditioner)
-    mul!(dest, metric.L, transpose(metric.L))
-    return dest
-end
-
-function _materialize_boundary_covariance!(scratch::BoundaryVelocityScratch, flow::AnyBoomerang)
-    return _materialize_boomerang_covariance!(scratch.covariance, flow)
-end
-
-function _materialize_boundary_covariance!(
-    scratch::BoundaryVelocityScratch,
-    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle},
-)
-    return _materialize_metric_covariance!(scratch.covariance, flow.metric)
-end
-
-function _materialize_boundary_covariance!(
-    scratch::BoundaryVelocityScratch,
-    flow::PreconditionedDynamics{IdentityPreconditioner,<:AnyBoomerang},
-)
-    return _materialize_boomerang_covariance!(scratch.covariance, flow.dynamics)
-end
-
-function _materialize_boundary_covariance!(
-    scratch::BoundaryVelocityScratch,
-    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:AnyBoomerang},
-)
-    covariance = _materialize_boomerang_covariance!(scratch.covariance, flow.dynamics)
-    scale = flow.metric.scale
-    @inbounds for j in axes(covariance, 2), i in axes(covariance, 1)
-        covariance[i, j] *= scale[i] * scale[j]
-    end
-    return covariance
-end
-
-function _materialize_boundary_covariance!(
-    scratch::BoundaryVelocityScratch,
-    flow::PreconditionedDynamics{DensePreconditioner,<:AnyBoomerang},
-)
-    d = length(scratch.active)
-    inner_cov = scratch.covariance_work
-    if inner_cov === nothing || size(inner_cov) != (d, d)
-        inner_cov = Matrix{Float64}(undef, d, d)
-        scratch.covariance_work = inner_cov
-    end
-    _materialize_boomerang_covariance!(inner_cov, flow.dynamics)
-    mul!(scratch.ΣAA, flow.metric.L, inner_cov)
-    mul!(scratch.covariance, scratch.ΣAA, transpose(flow.metric.L))
-    return scratch.covariance
-end
-
-function _invalidate_boundary_velocity_cache!(state::StickyPDMPState)
-    scratch = state.boundary_scratch
-    scratch.covariance_valid = false
-    scratch.active_factor_valid = false
-    fill!(scratch.conditional_std_valid, false)
+function _invalidate_active_stratum_cache!(state::AbstractPDMPState)
+    state.boundary_scratch.active_factor_valid = false
     return state
 end
 
-function _prepare_boundary_velocity_cache!(
-    flow::Union{
-        AnyBoomerang,
-        PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}},
-    },
-    state::StickyPDMPState,
-)
-    d = length(state.free)
-    scratch = _ensure_boundary_scratch!(state.boundary_scratch, d)
-    covariance_changed = !scratch.covariance_valid || scratch.covariance_source !== flow
-    if covariance_changed
-        _materialize_boundary_covariance!(scratch, flow)
-        scratch.covariance_source = flow
-        scratch.covariance_generation += one(UInt)
-        scratch.covariance_valid = true
-        scratch.active_factor_valid = false
-        fill!(scratch.conditional_std_valid, false)
-    end
+function _invalidate_boundary_velocity_cache!(state::AbstractPDMPState)
+    scratch = state.boundary_scratch
+    scratch.active_factor_valid = false
+    scratch.factor_source = nothing
+    scratch.factor_generation = zero(UInt)
+    return state
+end
 
-    active_changed = !scratch.active_factor_valid || scratch.cached_free != state.free
-    if active_changed
-        copyto!(scratch.cached_free, state.free)
-        k = 0
-        @inbounds for i in eachindex(state.free)
-            if state.free[i]
-                k += 1
-                scratch.active[k] = i
-            end
+function _copy_compatible_boundary_cache!(dest::BoundaryVelocityScratch,
+        src::BoundaryVelocityScratch)
+    d = length(src.cached_free)
+    _ensure_product_boundary_scratch!(dest, d)
+    copyto!(view(dest.canonical_signs, 1:d), view(src.canonical_signs, 1:d))
+    copyto!(view(dest.proposal_signs, 1:d), view(src.proposal_signs, 1:d))
+    src.active_factor_valid || return (dest.active_factor_valid = false; dest)
+
+    compatible = dest.active_factor_valid &&
+        dest.factor_source === src.factor_source &&
+        dest.factor_generation == src.factor_generation &&
+        dest.active_count == src.active_count &&
+        view(dest.cached_free, 1:d) == view(src.cached_free, 1:d)
+    if !compatible
+        _ensure_boundary_scratch!(dest, d)
+        k = src.active_count
+        copyto!(view(dest.active, 1:k), view(src.active, 1:k))
+        copyto!(view(dest.cached_free, 1:d), view(src.cached_free, 1:d))
+        copyto!(view(dest.ΣAA, 1:k, 1:k), view(src.ΣAA, 1:k, 1:k))
+        dest.active_count = k
+        dest.factor_source = src.factor_source
+        dest.factor_generation = src.factor_generation
+        dest.active_factor_valid = true
+    end
+    return dest
+end
+
+_boundary_generation(::ContinuousDynamics) = zero(UInt)
+_boundary_generation(flow::PreconditionedDynamics{DensePreconditioner}) =
+    flow.metric.generation
+
+_coordinate_active(::PDMPState, ::Integer, ::Integer) = true
+_coordinate_active(state::StickyPDMPState, j::Integer, activating::Integer) =
+    state.free[j] || j == activating
+
+function _fill_active_stratum!(scratch::BoundaryVelocityScratch,
+        state::AbstractPDMPState, activating::Integer)
+    d = length(state.ξ)
+    k = 0
+    changed = scratch.active_count > d
+    @inbounds for j in 1:d
+        active = _coordinate_active(state, j, activating)
+        changed |= scratch.cached_free[j] != active
+        scratch.cached_free[j] = active
+        if active
+            k += 1
+            scratch.active[k] = j
         end
-        scratch.active_count = k
-        fill!(scratch.conditional_std_valid, false)
+    end
+    changed |= scratch.active_count != k
+    scratch.active_count = k
+    return changed
+end
+
+function _prepare_dense_zigzag_stratum!(flow::DensePreconditionedZigZag,
+        state::AbstractPDMPState, activating::Integer=0)
+    d = length(state.ξ)
+    scratch = _ensure_boundary_scratch!(state.boundary_scratch, d)
+    generation = _boundary_generation(flow)
+    active_changed = _fill_active_stratum!(scratch, state, activating)
+    factor_changed = scratch.factor_source !== flow ||
+        scratch.factor_generation != generation
+    if factor_changed || active_changed || !scratch.active_factor_valid
+        k = scratch.active_count
         if ispositive(k)
             @inbounds for b in 1:k, a in 1:k
-                scratch.ΣAA[a, b] = scratch.covariance[scratch.active[a], scratch.active[b]]
+                ia = scratch.active[a]
+                ib = scratch.active[b]
+                scratch.ΣAA[a, b] = dot(view(flow.metric.L, ia, :),
+                                               view(flow.metric.L, ib, :))
             end
             cholesky!(Symmetric(view(scratch.ΣAA, 1:k, 1:k), :L); check=true)
         end
+        scratch.factor_source = flow
+        scratch.factor_generation = generation
         scratch.active_factor_valid = true
-    end
-
-    k = scratch.active_count
-    if ispositive(k)
-        solved_θ = view(scratch.solved_θ, 1:k)
-        @inbounds for a in 1:k
-            solved_θ[a] = state.ξ.θ[scratch.active[a]]
-        end
-        _solve_cached_active!(solved_θ, scratch, k)
     end
     return scratch
 end
 
-function _solve_cached_active!(out::AbstractVector, scratch::BoundaryVelocityScratch, k::Int)
-    L = LowerTriangular(view(scratch.ΣAA, 1:k, 1:k))
-    ldiv!(L, out)
-    ldiv!(adjoint(L), out)
-    return out
+function _prepare_product_stratum!(state::AbstractPDMPState, activating::Integer=0)
+    scratch = _ensure_product_boundary_scratch!(
+        state.boundary_scratch, length(state.ξ))
+    _fill_active_stratum!(scratch, state, activating)
+    return scratch
 end
 
-function _conditional_boundary_velocity_params_prepared(
-    state::StickyPDMPState,
-    i::Integer,
-    context::AbstractString,
-)
-    scratch = state.boundary_scratch
-    covariance = scratch.covariance
-    σ2 = covariance[i, i]
-    ispositive(σ2) || throw(ArgumentError("$context boundary velocity variance must be positive, got $σ2"))
+_prepare_stratum!(flow::DensePreconditionedZigZag, state::AbstractPDMPState,
+    activating::Integer=0) = _prepare_dense_zigzag_stratum!(flow, state, activating)
+_prepare_stratum!(::ZigZag, state::AbstractPDMPState, activating::Integer=0) =
+    _prepare_product_stratum!(state, activating)
+_prepare_stratum!(::PreconditionedDynamics{<:Union{IdentityPreconditioner,
+    DiagonalPreconditioner},<:ZigZag}, state::AbstractPDMPState,
+    activating::Integer=0) = _prepare_product_stratum!(state, activating)
 
-    # Aggregate unstick clocks and boundary draws call this while i is inactive,
-    # so every inactive label shares the same cached active-block factorization.
-    if state.free[i]
-        scratch.active_factor_valid = false
-        fill!(scratch.conditional_std_valid, false)
-        return _conditional_boundary_velocity_params(
-            (a, b) -> covariance[a, b], state, i, context)
-    end
+_prepare_stratum!(::Union{BouncyParticle,AnyBoomerang,
+    PreconditionedDynamics{<:AbstractPreconditioner,
+        <:Union{BouncyParticle,AnyBoomerang}}}, state::AbstractPDMPState,
+    activating::Integer=0) = _prepare_product_stratum!(state, activating)
 
-    k = scratch.active_count
-    iszero(k) && return 0.0, sqrt(σ2)
-    ΣiA = scratch.ΣiA
-    solved_θ = view(scratch.solved_θ, 1:k)
-    @inbounds for a in 1:k
-        ia = scratch.active[a]
-        ΣiA[a] = covariance[i, ia]
-    end
-    ΣiA_view = view(ΣiA, 1:k)
-    μ = dot(ΣiA_view, solved_θ)
-    if !scratch.conditional_std_valid[i]
-        solved_cross = view(scratch.solved_cross, 1:k)
-        copyto!(solved_cross, ΣiA_view)
-        _solve_cached_active!(solved_cross, scratch, k)
-        σ2_cond = σ2 - dot(ΣiA_view, solved_cross)
-        ispositive(σ2_cond) ||
-            throw(ArgumentError("$context conditional boundary velocity variance must be positive, got $σ2_cond"))
-        scratch.conditional_std[i] = sqrt(σ2_cond)
-        scratch.conditional_std_valid[i] = true
-    end
-    return μ, scratch.conditional_std[i]
-end
-
-_stdnormal_pdf(z::Real) = exp(-0.5 * abs2(z)) / sqrt(2π)
-
-function _normal_first_moment_between(μ::Real, σ::Real, a::Real, b::Real)
-    a < b || return 0.0
-    za = (Float64(a) - Float64(μ)) / Float64(σ)
-    zb = (Float64(b) - Float64(μ)) / Float64(σ)
-    Φdiff = Distributions.normcdf(zb) - Distributions.normcdf(za)
-    return Float64(μ) * Φdiff + Float64(σ) * (_stdnormal_pdf(za) - _stdnormal_pdf(zb))
-end
-
-function _abs_normal_moment_between(μ::Real, σ::Real, a::Real, b::Real)
-    a < b || return 0.0
-    b <= 0 && return -_normal_first_moment_between(μ, σ, a, b)
-    a >= 0 && return _normal_first_moment_between(μ, σ, a, b)
-    return -_normal_first_moment_between(μ, σ, a, 0.0) + _normal_first_moment_between(μ, σ, 0.0, b)
-end
-
-_abs_normal_mean(μ::Real, σ::Real) = _abs_normal_moment_between(μ, σ, -Inf, Inf)
-_abs_tilted_normal_cdf(μ::Real, σ::Real, x::Real, normalizer::Real) = _abs_normal_moment_between(μ, σ, -Inf, x) / normalizer
-
-function _rand_abs_tilted_normal(rng::Random.AbstractRNG, μ::Real, σ::Real)
+function _rand_abs_tilted_normal(rng::Random.AbstractRNG, σ::Real)
     ispositive(σ) || throw(ArgumentError("σ must be positive"))
-    if iszero(μ)
-        magnitude = Float64(σ) * sqrt(rand(rng, Exponential(2.0)))
-        return rand(rng, Bool) ? magnitude : -magnitude
-    end
-
-    normalizer = _abs_normal_mean(μ, σ)
-    target = rand(rng)
-    lo = Float64(μ) - Float64(σ)
-    hi = Float64(μ) + Float64(σ)
-    step = Float64(σ)
-    while _abs_tilted_normal_cdf(μ, σ, lo, normalizer) > target
-        step *= 2
-        lo -= step
-    end
-    step = Float64(σ)
-    while _abs_tilted_normal_cdf(μ, σ, hi, normalizer) < target
-        step *= 2
-        hi += step
-    end
-    for _ in 1:80
-        mid = 0.5 * (lo + hi)
-        if _abs_tilted_normal_cdf(μ, σ, mid, normalizer) < target
-            lo = mid
-        else
-            hi = mid
-        end
-    end
-    return 0.5 * (lo + hi)
-end
-
-function _conditional_boundary_velocity_params(cov_entry, state::StickyPDMPState, i::Integer, context::AbstractString)
-    σ2 = cov_entry(i, i)
-    ispositive(σ2) || throw(ArgumentError("$context boundary velocity variance must be positive, got $σ2"))
-    scratch = _ensure_boundary_scratch!(state.boundary_scratch, length(state.free))
-    active = scratch.active
-    k = 0
-    @inbounds for j in eachindex(state.free)
-        if state.free[j] && j != i
-            k += 1
-            active[k] = j
-        end
-    end
-    iszero(k) && return 0.0, sqrt(σ2)
-
-    ΣAA = scratch.ΣAA
-    ΣiA = scratch.ΣiA
-    θA = scratch.θA
-    @inbounds for a in 1:k
-        ia = active[a]
-        ΣiA[a] = cov_entry(i, ia)
-        θA[a] = state.ξ.θ[ia]
-        for b in 1:k
-            ΣAA[a, b] = cov_entry(ia, active[b])
-        end
-    end
-    F = cholesky!(Symmetric(view(ΣAA, 1:k, 1:k)); check=true)
-    solved_θ = view(scratch.solved_θ, 1:k)
-    solved_cross = view(scratch.solved_cross, 1:k)
-    copyto!(solved_θ, view(θA, 1:k))
-    copyto!(solved_cross, view(ΣiA, 1:k))
-    ldiv!(F, solved_θ)
-    ldiv!(F, solved_cross)
-    ΣiA_view = view(ΣiA, 1:k)
-    μ = dot(ΣiA_view, solved_θ)
-    σ2_cond = σ2 - dot(ΣiA_view, solved_cross)
-    ispositive(σ2_cond) || throw(ArgumentError("$context conditional boundary velocity variance must be positive, got $σ2_cond"))
-    return μ, sqrt(σ2_cond)
-end
-
-function _boomerang_boundary_velocity_params(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
-    _prepare_boundary_velocity_cache!(flow, state)
-    return _conditional_boundary_velocity_params_prepared(state, i, "Boomerang")
+    magnitude = Float64(σ) * sqrt(rand(rng, Exponential(2.0)))
+    return rand(rng, Bool) ? magnitude : -magnitude
 end
 
 """
     unstick_rate_constant(flow, i)
 
-Return the boundary velocity normalizing constant used by aggregate sticky
-clocks for coordinate `i`. For Boomerang this is the unconditional normalizer
-`E(abs(Vᵢ))` for the Gaussian reference velocity marginal.
+Return `E(abs(Vᵢ))` under the full-stratum invariant velocity law. This
+state-free helper is only defined when that quantity is also the exact sticky
+proposal-clock constant. State-dependent clocks use
+`_boundary_proposal_clock_constant(flow, state, i)`.
 """
 unstick_rate_constant(::ZigZag, ::Integer) = 1.0
 unstick_rate_constant(::BouncyParticle, ::Integer) = sqrt(2 / π)
@@ -323,8 +156,9 @@ function _preconditioned_boomerang_covariance_entry(flow::PreconditionedDynamics
     metric = flow.metric
     inner = flow.dynamics
     total = 0.0
-    @inbounds for a in axes(metric.L, 2), b in axes(metric.L, 2)
-        total += metric.L[i, a] * _boomerang_covariance_entry(inner, a, b) * metric.L[j, b]
+    L = metric.L
+    @inbounds for a in axes(L, 2), b in axes(L, 2)
+        total += L[i, a] * _boomerang_covariance_entry(inner, a, b) * L[j, b]
     end
     return total
 end
@@ -340,107 +174,313 @@ function _preconditioned_gaussian_covariance_entry(flow::PreconditionedDynamics{
     return _preconditioned_boomerang_covariance_entry(flow, i, j)
 end
 
-function _preconditioned_gaussian_boundary_velocity_params(flow::PreconditionedDynamics, state::StickyPDMPState, i::Integer)
-    _prepare_boundary_velocity_cache!(flow, state)
-    return _conditional_boundary_velocity_params_prepared(state, i, "preconditioned")
-end
-
-_preconditioned_gaussian_boundary_velocity_params(
-    ::PreconditionedDynamics{IdentityPreconditioner,<:BouncyParticle},
-    ::StickyPDMPState,
-    ::Integer,
-) = (0.0, 1.0)
-
-_preconditioned_gaussian_boundary_velocity_params(
-    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-    ::StickyPDMPState,
-    i::Integer,
-) = (0.0, abs(Float64(flow.metric.scale[i])))
-
 unstick_rate_constant(flow::PreconditionedDynamics{<:IdentityPreconditioner,<:ZigZag}, i::Integer) =
     unstick_rate_constant(flow.dynamics, i)
 unstick_rate_constant(flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}, i::Integer) =
     abs(flow.metric.scale[i])
-unstick_rate_constant(::DensePreconditionedZigZag, ::Integer) =
-    throw(ArgumentError("AggregateSticky does not support dense-preconditioned ZigZag coordinate boundary laws"))
 unstick_rate_constant(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}}, i::Integer) =
     sqrt(2 / π) * sqrt(_preconditioned_gaussian_covariance_entry(flow, i, i))
 
-_unstick_rate_constant(flow::ContinuousDynamics, ::StickyPDMPState, i::Integer) = unstick_rate_constant(flow, i)
-_prepare_boundary_velocity_cache!(::ContinuousDynamics, ::StickyPDMPState) = nothing
-_prepare_boundary_velocity_cache!(
-    ::PreconditionedDynamics{IdentityPreconditioner,<:BouncyParticle},
-    ::StickyPDMPState,
-) = nothing
-_prepare_boundary_velocity_cache!(
-    ::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-    ::StickyPDMPState,
-) = nothing
-_unstick_rate_constant_prepared(flow::ContinuousDynamics, state::StickyPDMPState, i::Integer) =
-    _unstick_rate_constant(flow, state, i)
-function _unstick_rate_constant(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
-    μ, σ = _boomerang_boundary_velocity_params(flow, state, i)
-    return _abs_normal_mean(μ, σ)
-end
-function _unstick_rate_constant_prepared(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
-    μ, σ = _conditional_boundary_velocity_params_prepared(state, i, "Boomerang")
-    return _abs_normal_mean(μ, σ)
-end
-function _unstick_rate_constant(flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}}, state::StickyPDMPState, i::Integer)
-    μ, σ = _preconditioned_gaussian_boundary_velocity_params(flow, state, i)
-    return _abs_normal_mean(μ, σ)
-end
-function _unstick_rate_constant_prepared(
-    flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}},
-    state::StickyPDMPState,
-    i::Integer,
-)
-    μ, σ = _conditional_boundary_velocity_params_prepared(state, i, "preconditioned")
-    return _abs_normal_mean(μ, σ)
-end
-_unstick_rate_constant_prepared(
-    ::PreconditionedDynamics{IdentityPreconditioner,<:BouncyParticle},
-    ::StickyPDMPState,
-    ::Integer,
-) = sqrt(2 / π)
-_unstick_rate_constant_prepared(
-    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-    ::StickyPDMPState,
-    i::Integer,
-) = sqrt(2 / π) * abs(Float64(flow.metric.scale[i]))
-
-function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, ::ZigZag, i::Integer)
-    state.ξ.θ[i] = rand(rng, (-1.0, 1.0))
-    state.old_velocity[i] = 0.0
-    return state.ξ.θ[i]
+function _install_active_velocity!(state::AbstractPDMPState,
+        scratch::BoundaryVelocityScratch)
+    fill!(state.ξ.θ, 0.0)
+    @inbounds for a in 1:scratch.active_count
+        state.ξ.θ[scratch.active[a]] = scratch.θA[a]
+    end
+    return state
 end
 
-function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, ::BouncyParticle, i::Integer)
-    magnitude = sqrt(rand(rng, Exponential(2.0)))
-    state.ξ.θ[i] = rand(rng, Bool) ? magnitude : -magnitude
-    state.old_velocity[i] = 0.0
-    return state.ξ.θ[i]
+function _draw_product_zigzag!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+        flow, scale)
+    scratch = _prepare_stratum!(flow, state)
+    fill!(state.ξ.θ, 0.0)
+    @inbounds for a in 1:scratch.active_count
+        i = scratch.active[a]
+        state.ξ.θ[i] = rand(rng, Bool) ? scale(i) : -scale(i)
+    end
+    return state
 end
 
-function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::AnyBoomerang, i::Integer)
-    μ, σ = _boomerang_boundary_velocity_params(flow, state, i)
-    state.ξ.θ[i] = _rand_abs_tilted_normal(rng, μ, σ)
-    state.old_velocity[i] = 0.0
-    return state.ξ.θ[i]
+draw_stratum_velocity!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+    flow::ZigZag) = _draw_product_zigzag!(rng, state, flow, _ -> 1.0)
+draw_stratum_velocity!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+    flow::PreconditionedDynamics{IdentityPreconditioner,<:ZigZag}) =
+    _draw_product_zigzag!(rng, state, flow, _ -> 1.0)
+draw_stratum_velocity!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) =
+    _draw_product_zigzag!(rng, state, flow, i -> abs(Float64(flow.metric.scale[i])))
+
+function _draw_dense_zigzag!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+        flow::DensePreconditionedZigZag, activating::Integer=0;
+        proposal::Bool=false)
+    scratch = _prepare_stratum!(flow, state, activating)
+    k = scratch.active_count
+    signs = proposal ? scratch.proposal_signs : scratch.canonical_signs
+    @inbounds for a in 1:k
+        signs[a] = rand(rng, Bool) ? 1.0 : -1.0
+    end
+    mul!(view(scratch.θA, 1:k),
+         LowerTriangular(view(scratch.ΣAA, 1:k, 1:k)), view(signs, 1:k))
+    proposal || _install_active_velocity!(state, scratch)
+    return scratch
 end
-function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::PreconditionedDynamics{<:IdentityPreconditioner,<:ZigZag}, i::Integer)
-    return draw_boundary_velocity!(rng, state, flow.dynamics, i)
+
+draw_stratum_velocity!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+    flow::DensePreconditionedZigZag) = (_draw_dense_zigzag!(rng, state, flow); state)
+
+_sample_full_gaussian!(rng, velocity, scratch, ::BouncyParticle) =
+    randn!(rng, velocity)
+
+function _sample_full_gaussian!(rng, velocity, scratch,
+        flow::LowRankMutableBoomerang)
+    lowrank_sample!(rng, velocity, flow.Γ)
 end
-function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}, i::Integer)
-    state.ξ.θ[i] = rand(rng, (-abs(flow.metric.scale[i]), abs(flow.metric.scale[i])))
-    state.old_velocity[i] = 0.0
-    return state.ξ.θ[i]
+
+function _sample_full_gaussian!(rng, velocity, scratch, flow::AnyBoomerang)
+    randn!(rng, scratch.solved_θ)
+    mul!(velocity, flow.ΣL, scratch.solved_θ)
+    return velocity
 end
-draw_boundary_velocity!(::Random.AbstractRNG, ::StickyPDMPState, ::DensePreconditionedZigZag, ::Integer) =
-    throw(ArgumentError("AggregateSticky does not support dense-preconditioned ZigZag coordinate boundary laws"))
-function draw_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}}, i::Integer)
-    μ, σ = _preconditioned_gaussian_boundary_velocity_params(flow, state, i)
-    state.ξ.θ[i] = _rand_abs_tilted_normal(rng, μ, σ)
-    state.old_velocity[i] = 0.0
-    return state.ξ.θ[i]
+
+function _sample_full_gaussian!(rng, velocity, scratch,
+        flow::PreconditionedDynamics{IdentityPreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}})
+    return _sample_full_gaussian!(rng, velocity, scratch, flow.dynamics)
+end
+
+function _sample_full_gaussian!(rng, velocity, scratch,
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}})
+    _sample_full_gaussian!(rng, velocity, scratch, flow.dynamics)
+    velocity .*= flow.metric.scale
+    return velocity
+end
+
+function _sample_full_gaussian!(rng, velocity, scratch,
+        flow::PreconditionedDynamics{DensePreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}})
+    _sample_full_gaussian!(rng, scratch.θA, scratch, flow.dynamics)
+    mul!(velocity, flow.metric.L, scratch.θA)
+    return velocity
+end
+
+function _draw_gaussian_stratum!(rng::Random.AbstractRNG,
+        state::AbstractPDMPState, flow::ContinuousDynamics, activating::Integer=0)
+    scratch = _prepare_stratum!(flow, state, activating)
+    _sample_full_gaussian!(rng, state.ξ.θ, scratch, flow)
+    @inbounds for i in eachindex(state.ξ.θ)
+        _coordinate_active(state, i, activating) || (state.ξ.θ[i] = 0.0)
+    end
+    return scratch
+end
+
+draw_stratum_velocity!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+    flow::Union{BouncyParticle,AnyBoomerang}) =
+    (_draw_gaussian_stratum!(rng, state, flow); state)
+draw_stratum_velocity!(rng::Random.AbstractRNG, state::AbstractPDMPState,
+    flow::PreconditionedDynamics{<:AbstractPreconditioner,
+        <:Union{BouncyParticle,AnyBoomerang}}) =
+    (_draw_gaussian_stratum!(rng, state, flow); state)
+
+_gaussian_covariance_entry(::BouncyParticle, i::Integer, j::Integer) =
+    i == j ? 1.0 : 0.0
+_gaussian_covariance_entry(flow::AnyBoomerang, i::Integer, j::Integer) =
+    _boomerang_covariance_entry(flow, i, j)
+_gaussian_covariance_entry(flow::PreconditionedDynamics{<:AbstractPreconditioner,
+    <:Union{BouncyParticle,AnyBoomerang}}, i::Integer, j::Integer) =
+    _preconditioned_gaussian_covariance_entry(flow, i, j)
+
+_boundary_proposal_clock_constant(flow::Union{ZigZag,BouncyParticle,AnyBoomerang,
+        PreconditionedDynamics{<:Union{IdentityPreconditioner,DiagonalPreconditioner},<:ZigZag},
+        PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}}},
+    ::StickyPDMPState, i::Integer) = unstick_rate_constant(flow, i)
+
+function _dense_boundary_row_bound(flow::DensePreconditionedZigZag,
+        state::StickyPDMPState, i::Integer)
+    scratch = _prepare_stratum!(flow, state, i)
+    p = findfirst(==(i), view(scratch.active, 1:scratch.active_count))
+    p === nothing && error("activated coordinate is absent from dense stratum")
+    return sum(abs, view(scratch.ΣAA, p, 1:p)), p
+end
+_boundary_proposal_clock_constant(flow::DensePreconditionedZigZag,
+    state::StickyPDMPState, i::Integer) = first(_dense_boundary_row_bound(flow, state, i))
+
+function _propose_product_boundary!(rng::Random.AbstractRNG,
+        state::StickyPDMPState, flow, i::Integer, scale)
+    scratch = _prepare_product_stratum!(state, i)
+    fill!(state.ξ.θ, 0.0)
+    @inbounds for a in 1:scratch.active_count
+        j = scratch.active[a]
+        state.ξ.θ[j] = rand(rng, Bool) ? scale(j) : -scale(j)
+    end
+    return true
+end
+
+propose_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::ZigZag, i::Integer) =
+    _propose_product_boundary!(rng, state, flow, i, _ -> 1.0)
+propose_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::PreconditionedDynamics{IdentityPreconditioner,<:ZigZag}, i::Integer) =
+    _propose_product_boundary!(rng, state, flow, i, _ -> 1.0)
+propose_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}, i::Integer) =
+    _propose_product_boundary!(rng, state, flow, i,
+        j -> abs(Float64(flow.metric.scale[j])))
+
+function propose_boundary_velocity!(rng::Random.AbstractRNG,
+        state::StickyPDMPState, flow::DensePreconditionedZigZag, i::Integer)
+    scratch = _draw_dense_zigzag!(rng, state, flow, i; proposal=true)
+    A, p = _dense_boundary_row_bound(flow, state, i)
+    speed = abs(dot(view(scratch.ΣAA, p, 1:p),
+                    view(scratch.proposal_signs, 1:p)))
+    if rand(rng) * A > speed
+        return false
+    end
+    copyto!(view(scratch.canonical_signs, 1:scratch.active_count),
+            view(scratch.proposal_signs, 1:scratch.active_count))
+    _install_active_velocity!(state, scratch)
+    return true
+end
+
+function _gaussian_covariance_mul!(out, ::BouncyParticle, x, scratch)
+    copyto!(out, x)
+    return out
+end
+
+function _gaussian_covariance_mul!(out, flow::LowRankMutableBoomerang, x,
+        scratch)
+    lrp = flow.Γ
+    coeff = scratch.proposal_signs
+    r = length(lrp.Λ)
+    mul!(view(coeff, 1:r), transpose(lrp.V), x)
+    @inbounds for k in 1:r
+        coeff[k] *= lrp.Λ[k]
+    end
+    @inbounds for j in eachindex(out)
+        value = lrp.D[j] * x[j]
+        for k in 1:r
+            value += lrp.V[j, k] * coeff[k]
+        end
+        out[j] = value
+    end
+    return out
+end
+
+function _gaussian_covariance_mul!(out, flow::AnyBoomerang, x, scratch)
+    mul!(scratch.solved_θ, transpose(flow.ΣL), x)
+    mul!(out, flow.ΣL, scratch.solved_θ)
+    return out
+end
+
+function _gaussian_covariance_mul!(out,
+        flow::PreconditionedDynamics{IdentityPreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}}, x, scratch)
+    return _gaussian_covariance_mul!(out, flow.dynamics, x, scratch)
+end
+
+function _gaussian_covariance_mul!(out,
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}}, x, scratch)
+    scale = flow.metric.scale
+    @inbounds for j in eachindex(x)
+        scratch.θA[j] = scale[j] * x[j]
+    end
+    _gaussian_covariance_mul!(out, flow.dynamics, scratch.θA, scratch)
+    @inbounds for j in eachindex(out)
+        out[j] *= scale[j]
+    end
+    return out
+end
+
+function _gaussian_covariance_mul!(out,
+        flow::PreconditionedDynamics{DensePreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}}, x, scratch)
+    mul!(scratch.θA, transpose(flow.metric.L), x)
+    _gaussian_covariance_mul!(scratch.solved_cross, flow.dynamics,
+                              scratch.θA, scratch)
+    mul!(scratch.proposal_signs, flow.metric.L, scratch.solved_cross)
+    copyto!(out, scratch.proposal_signs)
+    return out
+end
+
+function _gaussian_covariance_column!(out, flow, i::Integer, scratch)
+    fill!(scratch.canonical_signs, 0.0)
+    scratch.canonical_signs[i] = 1.0
+    _gaussian_covariance_mul!(out, flow, scratch.canonical_signs, scratch)
+    return out
+end
+
+function propose_boundary_velocity!(rng::Random.AbstractRNG,
+        state::StickyPDMPState,
+        flow::Union{BouncyParticle,AnyBoomerang,
+            PreconditionedDynamics{<:AbstractPreconditioner,
+                <:Union{BouncyParticle,AnyBoomerang}}}, i::Integer)
+    scratch = _prepare_stratum!(flow, state, i)
+    k = scratch.active_count
+    p = findfirst(==(i), view(scratch.active, 1:k))
+    p === nothing && error("activated coordinate is absent from Gaussian stratum")
+
+    # W is an ordinary draw from ψ_F. Replacing W_i by its |v_i|-tilted
+    # marginal and applying the Gaussian conditional correction draws Q_Fi.
+    _sample_full_gaussian!(rng, state.ξ.θ, scratch, flow)
+    _gaussian_covariance_column!(scratch.solved_cross, flow, i, scratch)
+    σ2 = scratch.solved_cross[i]
+    old_i = state.ξ.θ[i]
+    new_i = _rand_abs_tilted_normal(rng, sqrt(σ2))
+    delta = (new_i - old_i) / σ2
+    @inbounds for j in eachindex(state.ξ.θ)
+        if _coordinate_active(state, j, i)
+            state.ξ.θ[j] += scratch.solved_cross[j] * delta
+        else
+            state.ξ.θ[j] = 0.0
+        end
+    end
+    return true
+end
+
+function _dense_zigzag_stratum!(state::StickyPDMPState,
+        flow::DensePreconditionedZigZag)
+    scratch = _prepare_stratum!(flow, state)
+    k = scratch.active_count
+    if ispositive(k)
+        @inbounds for a in 1:k
+            scratch.solved_θ[a] = state.ξ.θ[scratch.active[a]]
+        end
+        ldiv!(LowerTriangular(view(scratch.ΣAA, 1:k, 1:k)),
+              view(scratch.solved_θ, 1:k))
+        @inbounds for a in 1:k
+            scratch.canonical_signs[a] =
+                ifelse(scratch.solved_θ[a] < 0, -1.0, 1.0)
+        end
+    end
+    return scratch
+end
+
+function reflect!(::Random.AbstractRNG, state::StickyPDMPState,
+        gradient::AbstractVector,
+        flow::PreconditionedDynamics{<:AbstractPreconditioner,
+            <:Union{BouncyParticle,AnyBoomerang}}, cache)
+    scratch = _prepare_stratum!(flow, state)
+    k = scratch.active_count
+    z = scratch.solved_cross
+    fill!(scratch.canonical_signs, 0.0)
+    @inbounds for a in 1:k
+        ia = scratch.active[a]
+        scratch.canonical_signs[ia] = gradient[ia]
+    end
+    _gaussian_covariance_mul!(z, flow, scratch.canonical_signs, scratch)
+    numerator = zero(eltype(state.ξ.θ))
+    denominator = zero(eltype(state.ξ.θ))
+    @inbounds for a in 1:k
+        ia = scratch.active[a]
+        numerator += state.ξ.θ[ia] * gradient[ia]
+        denominator += gradient[ia] * z[ia]
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * numerator / denominator
+    @inbounds for a in 1:k
+        ia = scratch.active[a]
+        state.ξ.θ[ia] -= coefficient * z[ia]
+    end
+    return nothing
 end

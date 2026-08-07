@@ -164,28 +164,14 @@ function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::Grad
         end
     end
 end
-function _adapt_grid_t_max!(alg::GridAdaptiveState, τ_accepted::Float64, ::SubsampledGradient)
-    alg.schedule_frozen[] && return nothing
-    t_max = alg.t_max[]
-    if τ_accepted < 0.05 * t_max
-        new_t_max = max(20.0 * τ_accepted, 0.5)
-        if new_t_max < t_max
-            alg.t_max[] = new_t_max
-            recompute_time_grid!(alg)
-        end
-    end
-end
-
 function _shrink_t_max_on_rejection!(alg::GridAdaptiveState, pcb::PiecewiseConstantBound, cumulative_exp::Float64, ::GradientStrategy)
     alg.schedule_frozen[] && return nothing
-    total_integral = sum(i -> pos(pcb.Λ_vals[i]) * (pcb.t_grid[i+1] - pcb.t_grid[i]), 1:alg.N[])
+    total_integral = _piecewise_constant_area(pcb, alg.N[])
     if total_integral > 0 && cumulative_exp < 0.1 * total_integral
         alg.t_max[] = max(alg.t_max[] * alg.α⁻, 0.1)
         recompute_time_grid!(alg)
     end
 end
-_shrink_t_max_on_rejection!(::GridAdaptiveState, ::PiecewiseConstantBound, ::Float64, ::SubsampledGradient) = nothing
-
 _reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
 
 function _maybe_activate_constant_bound!(

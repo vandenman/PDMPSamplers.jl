@@ -48,7 +48,7 @@ function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, a
             # end
             # @assert !any(isnan, state_s.ξ.x)
             # @assert !any(isnan, state_s.ξ.θ)
-            result = λ(state_s.ξ, ∇ϕ, flow)
+            result = λ(state_s, ∇ϕ, flow)
             # @assert !isnan(result)
             return result
         end

@@ -183,22 +183,17 @@ initialize_flow_state!(::AbstractPDMPState, ::ContinuousDynamics) = nothing
 
 function Base.copy(model::PDMPModel)
     grad_new = copy(model.grad)
-    hvp_new = model.hvp === nothing ? nothing : _copy_callable(model.hvp)
+    hvp_new = _copy_model_hvp(model, grad_new)
     vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
     joint_new = model.joint === nothing ? nothing : _copy_callable(model.joint)
     return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
 end
 
-function Base.copy(model::PDMPModel{<:MarkedControlVariate})
-    # Reconstruct the generated HVP from the chain-local control variate.
-    # Copying model.hvp directly would retain the closure over model.grad.
-    grad_new = copy(model.grad)
-    hvp_new = grad_new.deterministic_hvp! === nothing ? nothing :
-        MarkedDeterministicHVP(grad_new, nothing)
-    vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
-    joint_new = model.joint === nothing ? nothing : _copy_callable(model.joint)
-    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, true, joint_new)
-end
+_copy_model_hvp(model::PDMPModel, grad) =
+    model.hvp === nothing ? nothing : _copy_callable(model.hvp)
+_copy_model_hvp(model::PDMPModel{<:MarkedControlVariate}, grad) =
+    grad.deterministic_hvp! === nothing ? nothing :
+        InplaceHVP(grad.deterministic_hvp!, zeros(model.d))
 
 function _update_progress!(progress::Bool, prg, tstop::Base.RefValue{Float64}, T::Float64, progress_stops::Int, state::AbstractPDMPState)
     if progress && state.t[] > tstop[]
@@ -214,9 +209,7 @@ function _record_phase_stats!(
     events_start::Int,
     grad_start::Int,
     hess_start::Int,
-    stochastic_grad_start::Int,
     full_grad_start::Int,
-    full_reflection_grad_start::Int,
     prior_grad_start::Int,
     fd_curvature_grad_start::Int,
     potential_start::Int,
@@ -228,9 +221,7 @@ function _record_phase_stats!(
         _inc_counter_warmup_events(stats, _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats) - events_start)
         _inc_counter_warmup_gradient_calls(stats, _get_counter_∇f_calls(stats) - grad_start)
         _inc_counter_warmup_hessian_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
-        _inc_counter_warmup_stochastic_gradient_calls(stats, _get_counter_stochastic_gradient_calls(stats) - stochastic_grad_start)
         _inc_counter_warmup_full_gradient_calls(stats, _get_counter_full_gradient_calls(stats) - full_grad_start)
-        _inc_counter_warmup_full_reflection_gradient_calls(stats, _get_counter_full_reflection_gradient_calls(stats) - full_reflection_grad_start)
         _inc_counter_warmup_prior_gradient_calls(stats, _get_counter_prior_gradient_calls(stats) - prior_grad_start)
         _inc_counter_warmup_fd_curvature_gradient_calls(stats, _get_counter_fd_curvature_gradient_calls(stats) - fd_curvature_grad_start)
         _inc_counter_warmup_potential_calls(stats, _get_counter_potential_calls(stats) - potential_start)
@@ -249,9 +240,7 @@ function _record_phase_stats!(
         _inc_counter_main_events(stats, _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats) - events_start)
         _inc_counter_main_gradient_calls(stats, _get_counter_∇f_calls(stats) - grad_start)
         _inc_counter_main_hessian_calls(stats, _get_counter_∇²f_calls(stats) - hess_start)
-        _inc_counter_main_stochastic_gradient_calls(stats, _get_counter_stochastic_gradient_calls(stats) - stochastic_grad_start)
         _inc_counter_main_full_gradient_calls(stats, _get_counter_full_gradient_calls(stats) - full_grad_start)
-        _inc_counter_main_full_reflection_gradient_calls(stats, _get_counter_full_reflection_gradient_calls(stats) - full_reflection_grad_start)
         _inc_counter_main_prior_gradient_calls(stats, _get_counter_prior_gradient_calls(stats) - prior_grad_start)
         _inc_counter_main_fd_curvature_gradient_calls(stats, _get_counter_fd_curvature_gradient_calls(stats) - fd_curvature_grad_start)
         _inc_counter_main_potential_calls(stats, _get_counter_potential_calls(stats) - potential_start)
@@ -276,9 +265,7 @@ function _record_phase_stats!(
     events_start::Int,
     grad_start::Int,
     hess_start::Int,
-    stochastic_grad_start::Int,
     full_grad_start::Int,
-    full_reflection_grad_start::Int,
     prior_grad_start::Int,
     fd_curvature_grad_start::Int,
     potential_start::Int,
@@ -296,8 +283,7 @@ function _record_phase_stats!(
         endpoint_derivative_points_loaded=0,
     )
     return _record_phase_stats!(
-        stats, phase, events_start, grad_start, hess_start, stochastic_grad_start,
-        full_grad_start, full_reflection_grad_start, prior_grad_start,
+        stats, phase, events_start, grad_start, hess_start, full_grad_start, prior_grad_start,
         fd_curvature_grad_start, potential_start, grid_start, time_start)
 end
 
@@ -328,9 +314,7 @@ function _run_phase!(
     phase_events_start = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
     phase_grad_start = _get_counter_∇f_calls(stats)
     phase_hess_start = _get_counter_∇²f_calls(stats)
-    phase_stochastic_grad_start = _get_counter_stochastic_gradient_calls(stats)
     phase_full_grad_start = _get_counter_full_gradient_calls(stats)
-    phase_full_reflection_grad_start = _get_counter_full_reflection_gradient_calls(stats)
     phase_prior_grad_start = _get_counter_prior_gradient_calls(stats)
     phase_fd_curvature_grad_start = _get_counter_fd_curvature_gradient_calls(stats)
     phase_potential_start = _get_counter_potential_calls(stats)
@@ -352,8 +336,7 @@ function _run_phase!(
             _set_counter_stop_reason(stats, stop_reason(criterion, state, trace_manager, stats))
             _record_phase_stats!(
                 stats, phase, phase_events_start, phase_grad_start, phase_hess_start,
-                phase_stochastic_grad_start, phase_full_grad_start, phase_full_reflection_grad_start,
-                phase_prior_grad_start, phase_fd_curvature_grad_start, phase_potential_start,
+                phase_full_grad_start, phase_prior_grad_start, phase_fd_curvature_grad_start, phase_potential_start,
                 phase_grid_start, phase_time_start)
             return nothing
         end
@@ -362,7 +345,6 @@ function _run_phase!(
         update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, model_.grad, trace_manager; phase, stats)
-        model_.grad isa SubsampledGradient && _invalidate_cached_gradient!(alg_)
         _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats)
 
         if phase === :main
@@ -614,7 +596,6 @@ function initialize_state(rng::Random.AbstractRNG, flow::ContinuousDynamics, mod
     cache = add_gradient_to_cache(initialize_cache(rng, flow, model.grad, alg, t, ξ), ξ)
     model_ = with_stats(model, stats)
     alg_ = _to_internal(alg, rng, flow, model_, state, cache, stats)
-    model_.grad isa SubsampledGradient && model_.grad.resample_indices!(model_.grad.nsub)
     return state, model_, alg_, cache, stats
 end
 initialize_state(flow::ContinuousDynamics, model::PDMPModel, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint) = initialize_state(Random.default_rng(), flow, model, alg, t₀, ξ₀)

@@ -196,10 +196,6 @@ function _support_boundary_probe_is_valid(grad::FullGradient, model::PDMPModel, 
     end
 end
 
-function _support_boundary_probe_is_valid(grad::SubsampledGradient, model::PDMPModel, ctx::BoundaryContext, t::Float64)
-    return _support_boundary_probe_is_valid(grad.full, model, ctx, t)
-end
-
 function _support_boundary_probe_is_valid(grad::CoordinateWiseGradient, model::PDMPModel, ctx::BoundaryContext, t::Float64)
     x = Vector{Float64}(undef, model.d)
     @. x = ctx.x0 + t * ctx.v
@@ -275,10 +271,6 @@ function _localize_support_boundary!(grad::FullGradient, model::PDMPModel, ctx::
     end
 
     return _localization_from_bracket(t_lo, t_hi, opts)
-end
-
-function _localize_support_boundary!(grad::SubsampledGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
-    return _localize_support_boundary!(grad.full, model, ctx, opts)
 end
 
 function _localize_support_boundary!(grad::CoordinateWiseGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)

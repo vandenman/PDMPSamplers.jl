@@ -269,6 +269,33 @@
 
 end
 
+@testset "Sticky full-rank and low-rank adaptation stationarity" begin
+    for (seed, scheme) in ((0xaf41, :fullrank), (0xaf42, :lowrank))
+        Random.seed!(seed)
+        d = 4
+        D, κ, target = gen_data(
+            SpikeAndSlabDist{BetaBernoulli,ZeroMeanIsoNormal}, d)
+        flow = AdaptiveBoomerang(d; λref=0.5, scheme,
+            rank=(scheme === :lowrank ? 2 : min(d - 1, 5)))
+        initial = SkeletonPoint(0.2 .* randn(d),
+            PDMPSamplers.initialize_velocity(flow, d))
+        model = PDMPModel(d,
+            FullGradient(Base.Fix1(neg_gradient!, target)),
+            Base.Fix1(neg_hvp!, target))
+        trace, stats = pdmp_sample(initial, flow, model,
+            Sticky(GridThinningStrategy(), κ, trues(d)),
+            0.0, 50_000.0, 5_000.0; seed, progress=show_progress,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+
+        @test stats.grid_resets_from_dynamics_adaptation > 0
+        @test stats.sticky_freezes > 100
+        @test stats.sticky_unfreezes > 100
+        @test all(isfinite, flow.μ)
+        scheme === :lowrank && @test flow.Γ isa PDMPSamplers.LowRankPrecision
+        test_approximation(trace, D; elapsed=stats.elapsed_time)
+    end
+end
+
 @testset "Adaptive Boomerang (Phase 2: fullrank)" begin
 
     # ──────────────────────────────────────────────────────────────────────
