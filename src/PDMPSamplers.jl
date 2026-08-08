@@ -1,6 +1,6 @@
 module PDMPSamplers
 
-using LinearAlgebra, Random, Statistics
+using LinearAlgebra, Random, SparseArrays, Statistics
 using Distributions
 using StatsBase
 using DataStructures: PriorityQueue, dequeue_pair!, enqueue!
@@ -171,6 +171,7 @@ export
     DenseGaussianSlab,
     IndependentZeroMeanGaussianSlab,
     IndependentZeroMeanLogscaleGaussianSlab,
+    LogLinearGaussianScaleSlab,
     CallbackGaussianSlab,
     ExchangeableGaussianSlab,
     ZeroMeanExchangeableGaussianSlab,

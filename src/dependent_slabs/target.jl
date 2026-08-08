@@ -1,24 +1,24 @@
 """
-    DependentSlabTarget(d, posterior_grad!, prior_grad!, slab_provider, model_prior;
+    DependentSlabTarget(d, posterior_grad!, slab_provider, model_prior;
                         initial_free=trues(d))
 
 Gradient target for dependent-slab sticky samplers. The returned callable writes
-`posterior_grad - slab_prior_grad + active_slab_neggrad` into `out` and
-synchronizes its active beta set through `set_active_set!`. The prior callback
-must be the slab-prior negative gradient only, before active-set conditioning;
-nuisance-prior terms must remain in `posterior_grad!`.
+`posterior_grad - all_active_slab_neggrad + active_slab_neggrad` into `out` and
+synchronizes its active beta set through `set_active_set!`. The full posterior
+must contain the complete coherent slab represented by `slab_provider`.
+Likelihood and nuisance-prior terms are therefore preserved exactly.
 """
-mutable struct DependentSlabTarget{PG,RG,S<:AbstractSlabPrior,O<:AbstractModelPrior} <: Function
+mutable struct DependentSlabTarget{PG,S<:AbstractSlabPrior,O<:AbstractModelPrior} <: Function
     d::Int
     posterior_grad!::PG
-    prior_grad!::RG
     slab_provider::S
     model_prior::O
     free::BitVector
     post_buf::Vector{Float64}
-    prior_buf::Vector{Float64}
+    all_active_slab_buf::Vector{Float64}
     slab_buf::Vector{Float64}
     active_beta::BitVector
+    all_active_beta::BitVector
 end
 
 # Internal finite-difference curvature hook used when dependent-slab targets need HVPs.
@@ -39,7 +39,6 @@ end
 function DependentSlabTarget(
     d::Integer,
     posterior_grad!,
-    prior_grad!,
     slab_provider::AbstractSlabPrior,
     model_prior::AbstractModelPrior;
     initial_free::BitVector=trues(Int(d)),
@@ -54,7 +53,6 @@ function DependentSlabTarget(
     return DependentSlabTarget(
         d_int,
         posterior_grad!,
-        prior_grad!,
         slab_provider,
         model_prior,
         copy(initial_free),
@@ -62,6 +60,7 @@ function DependentSlabTarget(
         zeros(d_int),
         zeros(d_int),
         falses(length(indices)),
+        trues(length(indices)),
     )
 end
 
@@ -69,7 +68,6 @@ function Base.copy(target::DependentSlabTarget)
     copied = DependentSlabTarget(
         target.d,
         _copy_callable(target.posterior_grad!),
-        _copy_callable(target.prior_grad!),
         _copy_callable(target.slab_provider),
         _copy_callable(target.model_prior);
         initial_free=copy(target.free),
@@ -92,7 +90,7 @@ function set_active_set!(target::DependentSlabTarget, free::BitVector)
     length(free) == target.d || throw(DimensionMismatch("active set length $(length(free)) does not match target dimension $(target.d)"))
     copyto!(target.free, free)
     set_active_set!(target.posterior_grad!, free)
-    set_active_set!(target.prior_grad!, free)
+    set_active_set!(target.slab_provider, free)
     return nothing
 end
 
@@ -118,9 +116,10 @@ function (target::DependentSlabTarget)(out::AbstractVector, x::AbstractVector)
     end
 
     _evaluate_negative_gradient!(target.posterior_grad!, target.post_buf, x)
-    _evaluate_negative_gradient!(target.prior_grad!, target.prior_buf, x)
+    active_prior_grad!(target.slab_provider, target.all_active_slab_buf, x,
+        target.all_active_beta)
     active_prior_grad!(target.slab_provider, target.slab_buf, x, target.active_beta)
-    @. out = target.post_buf - target.prior_buf + target.slab_buf
+    @. out = target.post_buf - target.all_active_slab_buf + target.slab_buf
     return out
 end
 

@@ -588,14 +588,14 @@ function _prepare_exponential_sum_cache!(clock::ExponentialSumAggregateClock, fl
         i = indices[j]
         cache.active_beta[j] = state.free[i]
         cache.stickable_beta[j] = can_stick[i]
-        cache.slopes[j] = state.ξ.θ[provider.logscale_indices[j]]
+        cache.slopes[j] = _independent_log_scale_slope(provider, state.ξ.θ, j)
         cache.logc[j] = -Inf
     end
     @inbounds for j in eachindex(indices)
         i = indices[j]
         if cache.stickable_beta[j] && !cache.active_beta[j]
             logρ = log_model_add_odds(clock.model_prior, cache.active_beta, j)
-            log_s0 = provider.log_base_scales[j] + state.ξ.x[provider.logscale_indices[j]]
+            log_s0 = _independent_log_scale(provider, state.ξ.x, j)
             cache.logc[j] = logCv_phi0 + logρ - log_s0
         end
     end

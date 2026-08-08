@@ -244,17 +244,38 @@ end
         @test_throws DimensionMismatch active_prior_grad!(logscale, fill(NaN, 4), logscale_x, logscale_active)
         @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
               -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
+
+        structured = LogLinearGaussianScaleSlab(
+            indices, [1, 3], log.([2.0, 3.0, 4.0]),
+            [1.0 0.0; 0.5 0.5; 0.0 1.0])
+        structured_out = zeros(length(logscale_x))
+        active_prior_grad!(structured, structured_out, logscale_x, logscale_active)
+        expected_structured = zeros(length(logscale_x))
+        for j in (1, 2)
+            beta = logscale_x[indices[j]]
+            ell = structured.log_base_scales[j] +
+                dot(structured.logscale_design[j, :], logscale_x[[1, 3]])
+            z = beta^2 * exp(-2ell)
+            expected_structured[indices[j]] += beta * exp(-2ell)
+            expected_structured[[1, 3]] .+= structured.logscale_design[j, :] .* (1 - z)
+        end
+        @test structured_out ≈ expected_structured
+        @test conditional_logdensity_zero(structured, logscale_x,
+            logscale_active, 3) ≈ -0.5 * log(2π) -
+                (structured.log_base_scales[3] + logscale_x[3])
+        structured_clock = ExponentialSumAggregateClock(
+            structured, BernoulliModelPrior(fill(0.5, 3)))
+        @test structured_clock isa ExponentialSumAggregateClock
         @test_throws ArgumentError IndependentZeroMeanLogscaleGaussianSlab([1, 2], [2, 3], zeros(2))
         @test_throws ArgumentError GlobalLogscaleExchangeableGaussianSlab([1, 2], 2, 1.0, 0.1)
     end
 
     @testset "DependentSlabTarget active-set synchronization at state transitions" begin
         d = 3
-        posterior_grad!(out, x) = (fill!(out, 0.0); out)
-        prior_grad!(out, x) = (fill!(out, 0.0); out)
+        posterior_grad!(out, x) = (out .= [x[1], x[2], 0.0]; out)
         slab = DenseGaussianSlab(zeros(2), Matrix(I, 2, 2), [1, 2])
         odds = BernoulliModelPrior([0.5, 0.5])
-        target = DependentSlabTarget(d, posterior_grad!, prior_grad!, slab, odds)
+        target = DependentSlabTarget(d, posterior_grad!, slab, odds)
         model = PDMPModel(target)
         flow = ZigZag(d)
         x = [3.0, -2.0, 1.0]
@@ -282,21 +303,20 @@ end
         @test target_copy.free != target.free
 
         nuisance_posterior_grad!(out, x) = (out .= [x[1], 2x[2]]; out)
-        slab_only_prior_grad!(out, x) = (out .= [x[1], 0.0]; out)
         one_beta_slab = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
-        nuisance_target = DependentSlabTarget(2, nuisance_posterior_grad!, slab_only_prior_grad!, one_beta_slab, BernoulliModelPrior([0.5]);
+        nuisance_target = DependentSlabTarget(2, nuisance_posterior_grad!, one_beta_slab, BernoulliModelPrior([0.5]);
             initial_free=BitVector([false, true]))
         nuisance_out = fill(NaN, 2)
         nuisance_target(nuisance_out, [3.0, 4.0])
         @test nuisance_out ≈ [0.0, 8.0]
 
-        strategy_target = DependentSlabTarget(d, FullGradient((out, x) -> copyto!(out, 2 .* x)), prior_grad!, slab, odds)
+        strategy_target = DependentSlabTarget(d, FullGradient((out, x) -> copyto!(out, 2 .* x)), slab, odds)
         strategy_out = zeros(d)
         strategy_x = [1.0, -2.0, 3.0]
         strategy_target(strategy_out, strategy_x)
-        @test strategy_out ≈ [3.0, -6.0, 6.0]
+        @test strategy_out ≈ [2.0, -4.0, 6.0]
 
-        hvp_target = DependentSlabTarget(d, posterior_grad!, prior_grad!, slab, odds; initial_free=BitVector([true, false, true]))
+        hvp_target = DependentSlabTarget(d, posterior_grad!, slab, odds; initial_free=BitVector([true, false, true]))
         hvp_model = PDMPModel(hvp_target; hvp=true)
         hvp_x = [3.0, -2.0, 1.0]
         hvp_v = [0.7, -0.4, 0.2]
@@ -311,7 +331,7 @@ end
         # target in PDMPModel, not only the gradient target.
         transition_slab = DenseGaussianSlab(zeros(2), Matrix(I, 2, 2), 1:2)
         transition_target = DependentSlabTarget(
-            2, (out, x) -> fill!(out, 0.0), (out, x) -> fill!(out, 0.0),
+            2, (out, x) -> copyto!(out, x),
             transition_slab, BernoulliModelPrior(fill(0.5, 2));
             initial_free=trues(2),
         )
@@ -352,17 +372,16 @@ end
     @testset "Arbitrary slab target baseline" begin
         d = 3
         posterior_grad!(out, x) = (copyto!(out, x); out)
-        prior_grad!(out, x) = (fill!(out, 0.5); out)
         provider = ArbitrarySlabBoundary([1, 3];
             active_prior_neggrad! = (out, x, active) -> (fill!(out, 0.0); active[1] && (out[1] = 2x[1]); active[2] && (out[3] = 3x[3]); out),
             log_q_zero! = (x, active, j) -> logpdf(Normal(), 0.0),
         )
-        target = DependentSlabTarget(d, posterior_grad!, prior_grad!, provider, BernoulliModelPrior(fill(0.5, 2));
-            initial_free=BitVector([true, false, true]))
+        target = DependentSlabTarget(d, posterior_grad!, provider, BernoulliModelPrior(fill(0.5, 2));
+            initial_free=BitVector([true, false, false]))
         out = fill(NaN, d)
         x = [1.0, 2.0, -1.0]
         target(out, x)
-        @test out ≈ x .- 0.5 .+ [2.0, 0.0, -3.0]
+        @test out ≈ [1.0, 2.0, 2.0]
         @test PDMPModel(target) isa PDMPModel
     end
 

@@ -198,7 +198,7 @@ Exact aggregate clock for independent zero-mean Gaussian slabs whose log
 standard deviations are affine along linear-flow trajectories. The aggregate
 rate has the form `sum_j c_j * exp(-r_j * t)`.
 """
-struct ExponentialSumAggregateClock{P<:IndependentZeroMeanLogscaleGaussianSlab,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
+struct ExponentialSumAggregateClock{P<:AbstractLogLinearIndependentGaussianSlab,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
     slab_provider::P
     model_prior::O
     rtol::T
@@ -230,7 +230,7 @@ function LinearGaussianAggregateClock(
 end
 
 function ExponentialSumAggregateClock(
-    slab_provider::IndependentZeroMeanLogscaleGaussianSlab,
+    slab_provider::AbstractLogLinearIndependentGaussianSlab,
     model_prior::AbstractModelPrior;
     rtol::Real=1e-8,
     atol::Real=1e-10,
@@ -264,6 +264,8 @@ default can select a compatible residual sampler; in particular,
 Boomerang-family flows use a Fourier residual clock for global-logscale slabs.
 """
 default_aggregate_unstick_clock(provider::IndependentZeroMeanLogscaleGaussianSlab, model_prior::AbstractModelPrior) =
+    ExponentialSumAggregateClock(provider, model_prior)
+default_aggregate_unstick_clock(provider::LogLinearGaussianScaleSlab, model_prior::AbstractModelPrior) =
     ExponentialSumAggregateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab, model_prior::AbstractModelPrior) =
     ChebyshevResidualAggregateClock(provider, model_prior; allow_slow_fallback=false)
@@ -436,6 +438,33 @@ function boundary_logweights!(
         if stickable_beta[j] && !active_beta[j]
             out[j] = log_model_add_odds(model_prior, active_beta, j) +
                      log_boundary_density_zero(provider, x, active_beta, j)
+        end
+    end
+    return out
+end
+
+
+function boundary_logweights!(
+    out::AbstractVector,
+    provider::AbstractLogLinearIndependentGaussianSlab,
+    model_prior::AbstractModelPrior,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    indices = beta_indices(provider)
+    m = length(indices)
+    length(out) == m || throw(DimensionMismatch(
+        "out length $(length(out)) does not match beta dimension $m"))
+    length(active_beta) == m || throw(DimensionMismatch(
+        "active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    length(stickable_beta) == m || throw(DimensionMismatch(
+        "stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
+    fill!(out, -Inf)
+    @inbounds for j in eachindex(indices)
+        if stickable_beta[j] && !active_beta[j]
+            out[j] = log_model_add_odds(model_prior, active_beta, j) -
+                0.5 * log2π - _independent_log_scale(provider, x, j)
         end
     end
     return out

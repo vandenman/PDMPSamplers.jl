@@ -347,7 +347,11 @@ set_active_set!(ws::WithFDCurvatureStats, free::BitVector) = set_active_set!(ws.
 
 set_active_set!(strategy::FullGradient, free::BitVector) = set_active_set!(strategy.f, free)
 set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_set!(strategy.f, free)
-set_active_set!(::MarkedControlVariate, ::BitVector) = nothing
+function set_active_set!(strategy::MarkedControlVariate, free::BitVector)
+    set_active_set!(strategy.deterministic_gradient!, free)
+    set_active_set!(strategy.residual_oracle, free)
+    return nothing
+end
 
 # Main entry point: compute gradient from state
 function compute_gradient!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
