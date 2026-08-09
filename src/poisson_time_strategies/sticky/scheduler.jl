@@ -237,8 +237,8 @@ function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:G
 end
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG,
-        model::PDMPModel{<:MarkedControlVariate}, flow::ContinuousDynamics,
-        inner_alg_state::MarkedThinningState, state::StickyPDMPState, cache,
+        model::PDMPModel{<:SubsampledControlVariate}, flow::ContinuousDynamics,
+        inner_alg_state::SubsamplingThinningState, state::StickyPDMPState, cache,
         stats::AbstractStatisticCounter, max_horizon::Float64,
         detect_boundaries::Bool=false)
     return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,

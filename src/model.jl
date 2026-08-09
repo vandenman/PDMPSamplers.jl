@@ -76,18 +76,18 @@ end
 
 PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true, true)
 
-function PDMPModel(d::Integer, cv::MarkedControlVariate)
+function PDMPModel(d::Integer, cv::SubsampledControlVariate)
     length(cv.anchor) == d || throw(DimensionMismatch("anchor length must match model dimension"))
     return PDMPModel(d, cv, cv.deterministic_hvp!, nothing, true, true)
 end
 
-PDMPModel(d::Integer, cv::MarkedControlVariate, ::Nothing,
+PDMPModel(d::Integer, cv::SubsampledControlVariate, ::Nothing,
     grad_inplace=true, hvp_inplace=true) = PDMPModel(d, cv)
 
-function PDMPModel(::Integer, ::MarkedControlVariate, hvp,
+function PDMPModel(::Integer, ::SubsampledControlVariate, hvp,
     grad_inplace=true, hvp_inplace=true)
     throw(ArgumentError(
-        "a marked model's deterministic HVP must be supplied through MarkedControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
+        "a subsampling model's deterministic HVP must be supplied through SubsampledControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
 end
 
 function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADType, needs_hvp::Bool=false)
@@ -185,7 +185,7 @@ end
 
 _model_hvp_with_stats(model::PDMPModel, grad, stats) =
     model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
-_model_hvp_with_stats(model::PDMPModel{<:MarkedControlVariate}, grad, stats) =
+_model_hvp_with_stats(model::PDMPModel{<:SubsampledControlVariate}, grad, stats) =
     grad.deterministic_hvp! === nothing ? nothing :
         WithStatsHVP(InplaceHVP(grad.deterministic_hvp!, zeros(model.d)), stats)
 

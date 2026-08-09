@@ -191,7 +191,7 @@ end
 
 _copy_model_hvp(model::PDMPModel, grad) =
     model.hvp === nothing ? nothing : _copy_callable(model.hvp)
-_copy_model_hvp(model::PDMPModel{<:MarkedControlVariate}, grad) =
+_copy_model_hvp(model::PDMPModel{<:SubsampledControlVariate}, grad) =
     grad.deterministic_hvp! === nothing ? nothing :
         InplaceHVP(grad.deterministic_hvp!, zeros(model.d))
 

@@ -24,7 +24,7 @@ function _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
     flow::ContinuousDynamics,
-    alg::MarkedThinningState,
+    alg::SubsamplingThinningState,
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
@@ -32,14 +32,14 @@ function _next_event_time_for_step(
     max_horizon::Real,
 )
     throw(ArgumentError(
-        "support-boundary detection is not yet supported by MarkedControlVariate ThinningStrategy"))
+        "support-boundary detection is not yet supported by SubsampledControlVariate ThinningStrategy"))
 end
 
 function _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
     flow::ContinuousDynamics,
-    alg::MarkedThinningState,
+    alg::SubsamplingThinningState,
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,

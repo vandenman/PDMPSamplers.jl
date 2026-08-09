@@ -88,19 +88,19 @@ function _has_integrable_segment(trace)
     return second_event !== nothing
 end
 
-# Marked anchor banks select at every event boundary, including the main
+# Subsampling anchor banks select at every event boundary, including the main
 # phase, but populate new entries only from warmup traces. The callbacks take
-# the chain-local MarkedControlVariate explicitly so copied/statistics-wrapped
+# the chain-local SubsampledControlVariate explicitly so copied/statistics-wrapped
 # models cannot accidentally refresh another chain's provider.
-mutable struct MarkedAnchorBankAdapter{F1,F2} <: AbstractAdapter
+mutable struct SubsamplingAnchorBankAdapter{F1,F2} <: AbstractAdapter
     select_fn!::F1
     update_fn!::F2
     update_dt::Float64
     last_update::Float64
 end
 
-function adapt!(::Random.AbstractRNG, ad::MarkedAnchorBankAdapter, state, flow,
-        grad::MarkedControlVariate, trace_mgr; phase::Symbol=:warmup, kwargs...)
+function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, flow,
+        grad::SubsampledControlVariate, trace_mgr; phase::Symbol=:warmup, kwargs...)
     ad.select_fn!(grad, state.ξ.x, phase)
     if phase === :warmup && state.t[] - ad.last_update >= ad.update_dt
         trace = get_warmup_trace(trace_mgr)

@@ -3,42 +3,45 @@ struct ThinningStrategy{T<:BoundStrategy} <: PoissonTimeStrategy
 end
 _to_internal(x::ThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, args...) = x
 
-struct MarkedThinningState{A<:ThinningStrategy,S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeStrategy
+struct SubsamplingThinningState{A<:ThinningStrategy,S<:AbstractPDMPState,V<:AbstractVector} <: PoissonTimeStrategy
     strategy::A
     candidate::S
     empty_gradient::V
 end
 
 function _to_internal(strategy::ThinningStrategy, ::Random.AbstractRNG,
-        flow::ContinuousDynamics, model::PDMPModel{<:MarkedControlVariate},
+        flow::ContinuousDynamics, model::PDMPModel{<:SubsampledControlVariate},
         state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
-    _validate_marked_thinning_envelope(flow, model.grad.envelope)
-    return MarkedThinningState(strategy, copy(state), similar(state.ξ.x, 0))
+    _validate_subsampling_thinning_envelope(flow, model.grad.envelope)
+    return SubsamplingThinningState(strategy, copy(state), similar(state.ξ.x, 0))
 end
 
-_validate_marked_thinning_envelope(flow::PreconditionedDynamics, envelope) =
-    _validate_marked_thinning_envelope(flow.dynamics, envelope)
-function _validate_marked_thinning_envelope(::AnyBoomerang, envelope)
+_validate_subsampling_thinning_envelope(flow::PreconditionedDynamics, envelope) =
+    _validate_subsampling_thinning_envelope(flow.dynamics, envelope)
+function _validate_subsampling_thinning_envelope(::AnyBoomerang, envelope)
     envelope.component_cell_scales! === nothing && throw(ArgumentError(
-        "MarkedControlVariate ThinningStrategy requires an explicit certified " *
+        "SubsampledControlVariate ThinningStrategy requires an explicit certified " *
         "component_cell_scales! callback for Boomerang trajectories"))
     return nothing
 end
-function _validate_marked_thinning_envelope(
+function _validate_subsampling_thinning_envelope(
         ::Union{BouncyParticle,ZigZag}, envelope)
     _validate_unbounded_linear_scales(envelope.component_scales!)
     return nothing
 end
-_validate_unbounded_linear_scales(::Any) = nothing
+_validate_unbounded_linear_scales(::Any) = throw(ArgumentError(
+    "SubsampledControlVariate ThinningStrategy requires certified affine " *
+    "component scales on an unbounded linear trajectory"))
+_validate_unbounded_linear_scales(::CertifiedAffineComponentScales) = nothing
 function _validate_unbounded_linear_scales(provider::TrajectoryComponentScales)
     any(ispositive, provider.growth_rates) && throw(ArgumentError(
-        "MarkedControlVariate ThinningStrategy cannot dominate positive " *
+        "SubsampledControlVariate ThinningStrategy cannot dominate positive " *
         "trajectory growth on an unbounded linear path with its affine clock; " *
         "use GridThinningStrategy"))
     return nothing
 end
-_validate_marked_thinning_envelope(flow::ContinuousDynamics, envelope) = throw(ArgumentError(
-    "MarkedControlVariate ThinningStrategy has no trajectory geometry for $(typeof(flow))"))
+_validate_subsampling_thinning_envelope(flow::ContinuousDynamics, envelope) = throw(ArgumentError(
+    "SubsampledControlVariate ThinningStrategy has no trajectory geometry for $(typeof(flow))"))
 
 function initialize_cache(rng::Random.AbstractRNG, flow::ZigZag, ::CoordinateWiseGradient, thinningstrategy::ThinningStrategy, t::Real, ξ::SkeletonPoint)
     pq = PriorityQueue{Int,Float64}()
@@ -146,30 +149,30 @@ function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:GlobalGradientSt
 
 end
 
-function _marked_thinning_residual_coefficients(
+function _subsampling_thinning_residual_coefficients(
         envelope::SeparableResidualEnvelope, state::AbstractPDMPState,
         flow::ContinuousDynamics)
-    return _marked_thinning_residual_coefficients(
+    return _subsampling_thinning_residual_coefficients(
         envelope, state, flow, flow)
 end
 
-function _marked_thinning_residual_coefficients(envelope, state, flow, ::AnyBoomerang)
+function _subsampling_thinning_residual_coefficients(envelope, state, flow, ::AnyBoomerang)
     scales = component_cell_scales!(envelope.cell_scales, envelope, state,
         flow, zero(state.t[]), 2π)
     return dot(scales, envelope.totals), 0.0
 end
 
-_marked_thinning_residual_coefficients(envelope, state, flow,
+_subsampling_thinning_residual_coefficients(envelope, state, flow,
         wrapped::PreconditionedDynamics) =
-    _marked_thinning_residual_coefficients(
+    _subsampling_thinning_residual_coefficients(
         envelope, state, flow, wrapped.dynamics)
 
-_marked_thinning_residual_coefficients(envelope, state, flow,
+_subsampling_thinning_residual_coefficients(envelope, state, flow,
         ::Union{BouncyParticle,ZigZag}) =
-    _marked_linear_residual_coefficients(
+    _subsampling_linear_residual_coefficients(
         envelope, state, flow, envelope.component_scales!)
 
-function _marked_linear_residual_coefficients(envelope, state, flow,
+function _subsampling_linear_residual_coefficients(envelope, state, flow,
         provider::TrajectoryComponentScales)
     displacement0, velocity = trajectory_geometry_bounds(
         flow, state, provider.anchor, 0.0)
@@ -178,7 +181,7 @@ function _marked_linear_residual_coefficients(envelope, state, flow,
         velocity * norm(state.ξ.θ) * total_weight
 end
 
-function _marked_linear_residual_coefficients(envelope, state, flow,
+function _subsampling_linear_residual_coefficients(envelope, state, flow,
         provider::DampedHCVComponentScales)
     displacement0, velocity = trajectory_geometry_bounds(
         flow, state, provider.anchor, 0.0)
@@ -188,35 +191,40 @@ function _marked_linear_residual_coefficients(envelope, state, flow,
         velocity * norm(state.ξ.θ) * totals[1]
 end
 
-_marked_linear_residual_coefficients(envelope, state, flow, provider) =
-    _generic_marked_linear_residual_coefficients(envelope, state, flow)
+_subsampling_linear_residual_coefficients(envelope, state, flow, provider) =
+    throw(ArgumentError("SubsampledControlVariate ThinningStrategy requires " *
+        "certified affine component scales on an unbounded linear trajectory"))
 
-function _generic_marked_linear_residual_coefficients(envelope, state, flow)
+_subsampling_linear_residual_coefficients(envelope, state, flow,
+        provider::CertifiedAffineComponentScales) =
+    _generic_subsampling_linear_residual_coefficients(envelope, state, flow)
+
+function _generic_subsampling_linear_residual_coefficients(envelope, state, flow)
     B0 = total_residual_bound(envelope, state, flow, 0.0)
     B1 = total_residual_bound(envelope, state, flow, 1.0)
     return B0, pos(B1 - B0)
 end
 
-function _marked_bound_violation(::MarkedThinningState, stats,
+function _subsampling_bound_violation(::SubsamplingThinningState, stats,
         actual, bound, kind)
     _bound_violated(actual, bound) || return false
     _inc_counter_grid_bound_violations(stats)
-    throw(ErrorException("marked ThinningStrategy $(kind) bound violated: " *
+    throw(ErrorException("subsampling ThinningStrategy $(kind) bound violated: " *
         "actual=$(actual), bound=$(bound); the invalid proposal was discarded"))
 end
 
 function next_event_time(rng::Random.AbstractRNG,
-        model::PDMPModel{<:MarkedControlVariate}, flow::ContinuousDynamics,
-        alg::MarkedThinningState, state::AbstractPDMPState, cache,
+        model::PDMPModel{<:SubsampledControlVariate}, flow::ContinuousDynamics,
+        alg::SubsamplingThinningState, state::AbstractPDMPState, cache,
         stats::AbstractStatisticCounter, max_horizon::Real=Inf,
         include_refresh::Bool=true, max_horizon_event::Symbol=:horizon_hit)
     cv = model.grad
     a, b = ab(state, alg.strategy, flow, cache)
-    B_a, B_b = _marked_thinning_residual_coefficients(cv.envelope, state, flow)
+    B_a, B_b = _subsampling_thinning_residual_coefficients(cv.envelope, state, flow)
     roof_a = pos(a) + B_a
     roof_b = pos(b) + B_b
     all(isfinite, (roof_a, roof_b)) || throw(ArgumentError(
-        "marked ThinningStrategy requires finite affine envelope coefficients"))
+        "subsampling ThinningStrategy requires finite affine envelope coefficients"))
 
     refresh = if include_refresh && ispositive(refresh_rate(flow))
         Random.randexp(rng) / refresh_rate(flow)
@@ -235,40 +243,40 @@ function next_event_time(rng::Random.AbstractRNG,
             return limit, limit_event, default_meta
         end
 
-        _inc_counter_marked_cell_roof_proposals(stats)
+        _inc_counter_subsampling_cell_roof_proposals(stats)
         D = pos(a + b * τ)
         B = total_residual_bound(cv.envelope, state, flow, τ)
         roof = roof_a + roof_b * τ
-        _marked_bound_violation(alg, stats, D + B, roof, :aggregate)
+        _subsampling_bound_violation(alg, stats, D + B, roof, :aggregate)
         aggregate = D + B
         if !ispositive(aggregate) || rand(rng) * roof > aggregate
             continue
         end
-        _inc_counter_marked_aggregate_accepts(stats)
+        _inc_counter_subsampling_aggregate_accepts(stats)
 
-        result = _evaluate_marked_candidate!(
+        result = _evaluate_subsampling_candidate!(
             rng, cv, flow, state, alg.candidate, cache, stats, alg, τ, D, B)
         if result.accepted
-            _inc_counter_marked_final_reflections(stats)
+            _inc_counter_subsampling_final_reflections(stats)
             return τ, :reflect, GradientMeta(result.G)
         end
     end
 end
 
 function next_event_time(rng::Random.AbstractRNG,
-        model::PDMPModel{<:MarkedControlVariate}, flow::ContinuousDynamics,
-        alg::MarkedThinningState, state::AbstractPDMPState, cache,
+        model::PDMPModel{<:SubsampledControlVariate}, flow::ContinuousDynamics,
+        alg::SubsamplingThinningState, state::AbstractPDMPState, cache,
         stats::AbstractStatisticCounter, max_horizon::Real,
         include_refresh::Bool, max_horizon_event::Symbol,
         detect_boundaries::Bool)
     detect_boundaries && throw(ArgumentError(
-        "support-boundary detection is not yet supported by MarkedControlVariate ThinningStrategy"))
+        "support-boundary detection is not yet supported by SubsampledControlVariate ThinningStrategy"))
     return next_event_time(rng, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event)
 end
 
-accept_reflection_event(::Random.AbstractRNG, ::MarkedThinningState, args...) = true
-accept_reflection_event(::MarkedThinningState, args...) = true
+accept_reflection_event(::Random.AbstractRNG, ::SubsamplingThinningState, args...) = true
+accept_reflection_event(::SubsamplingThinningState, args...) = true
 
 function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGradient}, ::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, ::AbstractStatisticCounter)
     pq = cache.pq # rename for clarity

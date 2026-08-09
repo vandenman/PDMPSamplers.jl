@@ -397,17 +397,17 @@
         PDMPSamplers.adapt!(seq, nothing, nothing, nothing, nothing)
     end
 
-    @testset "marked anchor-bank selection continues after warmup" begin
+    @testset "subsampling anchor-bank selection continues after warmup" begin
         state = PDMPState(10.0, SkeletonPoint([1.0], [0.0]))
         trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 5.0)
         envelope = TrajectoryResidualEnvelope(ones(1, 1), [0.0])
-        grad = MarkedControlVariate(
+        grad = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             envelope, [0.0], 1)
         selected = Ref(0)
         updated = Ref(0)
-        ad = PDMPSamplers.MarkedAnchorBankAdapter(
+        ad = PDMPSamplers.SubsamplingAnchorBankAdapter(
             (cv, x, phase) -> (selected[] += phase === :main),
             (cv, trace) -> (updated[] += 1),
             1.0, 0.0)

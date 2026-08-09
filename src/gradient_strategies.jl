@@ -32,12 +32,17 @@ end
 Base.copy(g::FullGradient) = FullGradient(_copy_callable(g.f))
 
 """
-    SeparableResidualEnvelope(weights, component_scales!)
+    SeparableResidualEnvelope(weights, component_scales!;
+                              component_cell_scales! = nothing,
+                              certified_affine = false)
 
 An additive residual-rate envelope with
 `b_i(t) = sum(weights[r, i] * c_r(t), r)`. `component_scales!` is called as
-`component_scales!(out, state, flow, t)`. Along a linear GridThinning or marked
-`ThinningStrategy` trajectory each scale must be affine in `t`.
+`component_scales!(out, state, flow, t)`. An arbitrary pointwise callback must
+also provide `component_cell_scales!`, which certifies a bound over every closed
+grid cell. Set `certified_affine=true` only when every component scale is known
+to be affine in `t`; endpoint maxima are then a valid cell certificate and the
+same affine callback may be used by `ThinningStrategy` on linear trajectories.
 
 The resulting `b_i(t)` must dominate the observation's perturbation of the
 chosen dynamics' event rate. For BPS this is
@@ -55,8 +60,14 @@ struct SeparableResidualEnvelope{F,C}
     cell_scales::Vector{Float64}
 end
 
+"""Internal wrapper recording the caller's explicit affine certification."""
+struct CertifiedAffineComponentScales{F}
+    callback::F
+end
+(provider::CertifiedAffineComponentScales)(args...) = provider.callback(args...)
+
 function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
-        component_cell_scales! = nothing)
+        component_cell_scales! = nothing, certified_affine::Bool=false)
     isempty(weights) && throw(ArgumentError("residual envelope weights must be nonempty"))
     any(x -> !isfinite(x) || x < 0, weights) &&
         throw(ArgumentError("residual envelope weights must be finite and nonnegative"))
@@ -66,7 +77,13 @@ function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
         ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
         for r in axes(stored_weights, 1)
     ]
-    return SeparableResidualEnvelope(stored_weights, component_scales!,
+    component_cell_scales! === nothing && !certified_affine && throw(ArgumentError(
+        "arbitrary residual-envelope component scales require an explicit certified " *
+        "component_cell_scales! callback; set certified_affine=true only for " *
+        "component scales that are affine in time"))
+    stored_scales = certified_affine ?
+        CertifiedAffineComponentScales(component_scales!) : component_scales!
+    return SeparableResidualEnvelope(stored_weights, stored_scales,
         component_cell_scales!, totals,
         tables, zeros(Float64, size(stored_weights, 1)),
         zeros(Float64, size(stored_weights, 1)))
@@ -82,15 +99,17 @@ struct DampedHCVComponentScales
     damping::Float64
 end
 
-_stored_marked_anchor(anchor::Vector{Float64}) = anchor
-_stored_marked_anchor(anchor::AbstractVector) = collect(Float64, anchor)
+_stored_subsampling_anchor(anchor::Vector{Float64}) = anchor
+_stored_subsampling_anchor(anchor::AbstractVector) = collect(Float64, anchor)
 
 _trajectory_scale_anchor(::Any) = nothing
 _trajectory_scale_anchor(scales::TrajectoryComponentScales) = scales.anchor
 _trajectory_scale_anchor(scales::DampedHCVComponentScales) = scales.anchor
+_trajectory_scale_anchor(scales::CertifiedAffineComponentScales) =
+    _trajectory_scale_anchor(scales.callback)
 _trajectory_scale_anchor(envelope::SeparableResidualEnvelope) =
     _trajectory_scale_anchor(envelope.component_scales!)
-function _marked_anchor_owner(envelope::SeparableResidualEnvelope, fallback)
+function _subsampling_anchor_owner(envelope::SeparableResidualEnvelope, fallback)
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     return trajectory_anchor === nothing ? fallback : trajectory_anchor
 end
@@ -112,7 +131,7 @@ function TrajectoryResidualEnvelope(weights::AbstractMatrix,
         "growth_rates must have one entry per envelope component"))
     any(x -> !isfinite(x) || x < 0, growth) && throw(ArgumentError(
         "growth_rates must be finite and nonnegative"))
-    scales = TrajectoryComponentScales(_stored_marked_anchor(anchor), growth)
+    scales = TrajectoryComponentScales(_stored_subsampling_anchor(anchor), growth)
     return SeparableResidualEnvelope(weights, scales;
         component_cell_scales! = scales)
 end
@@ -137,17 +156,17 @@ function DampedHCVResidualEnvelope(first_order_weights::AbstractVector,
         "HCV damping must be finite and positive"))
     weights = permutedims(hcat(first_order_weights, remainder_weights))
     scales = DampedHCVComponentScales(
-        _stored_marked_anchor(anchor), Float64(damping))
+        _stored_subsampling_anchor(anchor), Float64(damping))
     return SeparableResidualEnvelope(weights, scales;
         component_cell_scales! = scales)
 end
 
 """
-    MarkedControlVariate(deterministic_gradient!, residual_oracle, envelope,
+    SubsampledControlVariate(deterministic_gradient!, residual_oracle, envelope,
                          anchor, m; deterministic_hvp! = nothing,
                          refresh_anchor! = nothing)
 
-Exact marked-minibatch gradient strategy for `GridThinningStrategy` and
+Exact subsampling-minibatch gradient strategy for `GridThinningStrategy` and
 `ThinningStrategy`. The residual oracle is called as
 `oracle(out, x, subset, frozen_anchor)` and returns the unscaled sum of
 observation residual gradients for precisely `subset`. Julia owns the `N/m`
@@ -161,7 +180,7 @@ type stable. Changing envelope `weights`
 requires reconstructing the envelope because `totals` and `alias_tables` are
 derived from them.
 """
-mutable struct MarkedControlVariate{F,O,E<:SeparableResidualEnvelope,H,R} <: GlobalGradientStrategy
+mutable struct SubsampledControlVariate{F,O,E<:SeparableResidualEnvelope,H,R} <: GlobalGradientStrategy
     deterministic_gradient!::F
     residual_oracle::O
     envelope::E
@@ -174,7 +193,7 @@ mutable struct MarkedControlVariate{F,O,E<:SeparableResidualEnvelope,H,R} <: Glo
     sampling_map::Dict{Int,Int}
 end
 
-function MarkedControlVariate(deterministic_gradient!, residual_oracle,
+function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
     envelope::SeparableResidualEnvelope, anchor::AbstractVector, m::Integer;
     deterministic_hvp! = nothing, refresh_anchor! = nothing)
     N = size(envelope.weights, 2)
@@ -183,62 +202,62 @@ function MarkedControlVariate(deterministic_gradient!, residual_oracle,
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     if trajectory_anchor !== nothing
         trajectory_anchor == requested_anchor || throw(ArgumentError(
-            "TrajectoryResidualEnvelope and MarkedControlVariate anchors must match"))
+            "TrajectoryResidualEnvelope and SubsampledControlVariate anchors must match"))
     end
-    active_anchor = _marked_anchor_owner(envelope, requested_anchor)
-    return MarkedControlVariate(deterministic_gradient!, residual_oracle, envelope,
+    active_anchor = _subsampling_anchor_owner(envelope, requested_anchor)
+    return SubsampledControlVariate(deterministic_gradient!, residual_oracle, envelope,
         active_anchor, deterministic_hvp!, refresh_anchor!, Int(m),
         Vector{Int}(undef, m), zeros(Float64, length(active_anchor)), Dict{Int,Int}())
 end
 
-function _validate_marked_anchor(envelope::SeparableResidualEnvelope, anchor)
+function _validate_subsampling_anchor(envelope::SeparableResidualEnvelope, anchor)
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     trajectory_anchor === nothing || trajectory_anchor == anchor || throw(ArgumentError(
-        "marked residual envelope does not match the active anchor"))
+        "subsampling residual envelope does not match the active anchor"))
     return nothing
 end
 
-function _validated_refreshed_envelope(cv::MarkedControlVariate,
+function _validated_refreshed_envelope(cv::SubsampledControlVariate,
         envelope::SeparableResidualEnvelope, requested)
     typeof(envelope) === typeof(cv.envelope) || throw(ArgumentError(
         "anchor-refresh provider must return the same concrete envelope type; " *
-        "reconstruct the MarkedControlVariate to change callback types"))
-    _validate_marked_anchor(envelope, requested)
+        "reconstruct the SubsampledControlVariate to change callback types"))
+    _validate_subsampling_anchor(envelope, requested)
     return envelope
 end
-_validated_refreshed_envelope(cv::MarkedControlVariate, value, requested) = throw(ArgumentError(
+_validated_refreshed_envelope(cv::SubsampledControlVariate, value, requested) = throw(ArgumentError(
     "anchor-refresh provider must return a SeparableResidualEnvelope"))
 
-function refresh_anchor!(cv::MarkedControlVariate, anchor::AbstractVector)
+function refresh_anchor!(cv::SubsampledControlVariate, anchor::AbstractVector)
     callback = cv.refresh_anchor_callback!
     callback === nothing && throw(ArgumentError(
-        "this MarkedControlVariate has no anchor-refresh provider"))
+        "this SubsampledControlVariate has no anchor-refresh provider"))
     length(anchor) == length(cv.anchor) || throw(DimensionMismatch(
-        "new marked anchor has the wrong dimension"))
+        "new subsampling anchor has the wrong dimension"))
     requested = collect(Float64, anchor)
     new_envelope = _validated_refreshed_envelope(cv, callback(requested), requested)
     cv.envelope = new_envelope
-    cv.anchor = _marked_anchor_owner(new_envelope, requested)
+    cv.anchor = _subsampling_anchor_owner(new_envelope, requested)
     return cv
 end
 
-function _reconstruct_marked(cv::MarkedControlVariate;
+function _reconstruct_subsampling(cv::SubsampledControlVariate;
         deterministic_gradient! = cv.deterministic_gradient!,
         residual_oracle = cv.residual_oracle,
         envelope = deepcopy(cv.envelope),
         deterministic_hvp! = cv.deterministic_hvp!,
         refresh_anchor_callback! = cv.refresh_anchor_callback!)
-    return MarkedControlVariate(deterministic_gradient!, residual_oracle,
+    return SubsampledControlVariate(deterministic_gradient!, residual_oracle,
         envelope, copy(cv.anchor), cv.m;
         deterministic_hvp! = deterministic_hvp!,
         refresh_anchor! = refresh_anchor_callback!)
 end
 
-function Base.copy(cv::MarkedControlVariate)
+function Base.copy(cv::SubsampledControlVariate)
     cv.refresh_anchor_callback! === nothing || throw(ArgumentError(
-        "an anchor-managed MarkedControlVariate cannot be copied safely; " *
+        "an anchor-managed SubsampledControlVariate cannot be copied safely; " *
         "construct one provider and model per chain"))
-    return _reconstruct_marked(cv;
+    return _reconstruct_subsampling(cv;
         deterministic_gradient! = _copy_callable(cv.deterministic_gradient!),
         residual_oracle = _copy_callable(cv.residual_oracle),
         deterministic_hvp! = _copy_callable(cv.deterministic_hvp!),
@@ -265,8 +284,10 @@ function component_cell_scales!(out, envelope::SeparableResidualEnvelope,
         state, flow, left, right)
     callback = envelope.component_cell_scales!
     if callback === nothing
-        # The original public constructor requires affine component scales.
-        # Their maximum on a closed cell is attained at an endpoint.
+        envelope.component_scales! isa CertifiedAffineComponentScales ||
+            throw(ArgumentError("endpoint cell bounds require certified affine component scales"))
+        # The caller explicitly certified affine scales, whose maximum on a
+        # closed cell is attained at an endpoint.
         envelope.component_scales!(envelope.scales, state, flow, left)
         envelope.component_scales!(envelope.cell_scales, state, flow, right)
         @inbounds for r in eachindex(out, envelope.scales, envelope.cell_scales)
@@ -286,7 +307,7 @@ end
 total_residual_bound(envelope::SeparableResidualEnvelope, state, t) =
     total_residual_bound(envelope, state, nothing, t)
 
-deterministic_gradient!(out, cv::MarkedControlVariate, x) = cv.deterministic_gradient!(out, x)
+deterministic_gradient!(out, cv::SubsampledControlVariate, x) = cv.deterministic_gradient!(out, x)
 
 struct CoordinateWiseGradient{F} <: CoordinateWiseGradientStrategy
     f::F
@@ -306,8 +327,8 @@ function (ws::WithResidualStats)(args...)
     return ws.f(args...)
 end
 
-function with_stats(cv::MarkedControlVariate, stats::AbstractStatisticCounter)
-    return _reconstruct_marked(cv;
+function with_stats(cv::SubsampledControlVariate, stats::AbstractStatisticCounter)
+    return _reconstruct_subsampling(cv;
         deterministic_gradient! = WithStats(
             cv.deterministic_gradient!, stats, Val(:deterministic_gradient)),
         residual_oracle = WithResidualStats(cv.residual_oracle, stats))
@@ -347,7 +368,7 @@ set_active_set!(ws::WithFDCurvatureStats, free::BitVector) = set_active_set!(ws.
 
 set_active_set!(strategy::FullGradient, free::BitVector) = set_active_set!(strategy.f, free)
 set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_set!(strategy.f, free)
-function set_active_set!(strategy::MarkedControlVariate, free::BitVector)
+function set_active_set!(strategy::SubsampledControlVariate, free::BitVector)
     set_active_set!(strategy.deterministic_gradient!, free)
     set_active_set!(strategy.residual_oracle, free)
     return nothing
@@ -379,7 +400,7 @@ function compute_gradient!(strategy::FullGradient, x, out)
     return out
 end
 
-function compute_gradient!(strategy::MarkedControlVariate, x, out)
+function compute_gradient!(strategy::SubsampledControlVariate, x, out)
     deterministic_gradient!(out, strategy, x)
     return out
 end
@@ -394,5 +415,5 @@ function compute_gradient_for_reflection!(strategy::FullGradient, x, out)
     return out
 end
 
-compute_gradient_for_reflection!(strategy::MarkedControlVariate, x, out) =
+compute_gradient_for_reflection!(strategy::SubsampledControlVariate, x, out) =
     compute_gradient!(strategy, x, out)

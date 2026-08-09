@@ -574,25 +574,25 @@ end
     )
 end
 
-@counter_struct mutable struct MarkedThinningCounter <: AbstractStatisticCounter
-    marked_cell_roof_proposals::Int
-    marked_aggregate_accepts::Int
-    marked_subset_evaluations::Int
-    marked_final_reflections::Int
+@counter_struct mutable struct SubsamplingCounter <: AbstractStatisticCounter
+    subsampling_cell_roof_proposals::Int
+    subsampling_aggregate_accepts::Int
+    subsampling_subset_evaluations::Int
+    subsampling_final_reflections::Int
 end
 
-@counter_ops MarkedThinningCounter begin
+@counter_ops SubsamplingCounter begin
     inc(
-        marked_cell_roof_proposals,
-        marked_aggregate_accepts,
-        marked_subset_evaluations,
-        marked_final_reflections,
+        subsampling_cell_roof_proposals,
+        subsampling_aggregate_accepts,
+        subsampling_subset_evaluations,
+        subsampling_final_reflections,
     )
     get_sum(
-        marked_cell_roof_proposals,
-        marked_aggregate_accepts,
-        marked_subset_evaluations,
-        marked_final_reflections,
+        subsampling_cell_roof_proposals,
+        subsampling_aggregate_accepts,
+        subsampling_subset_evaluations,
+        subsampling_final_reflections,
     )
 end
 
@@ -941,7 +941,7 @@ end
     GradientCallCounter,
     RunSummaryCounter,
     GridThinningCounter,
-    MarkedThinningCounter,
+    SubsamplingCounter,
     ConstantBoundCounter,
     StickyStatsCounter,
     AffineBoundCounter,

@@ -163,52 +163,93 @@ end
 
 Conditionally independent zero-mean Gaussian coefficients with
 `log(sd) = log_base_scales + logscale_design * x[logscale_indices]`.
-The design is stored sparsely and may share any number of log-scale coordinates
-between coefficients. This is the structured provider used for node-shared
-OMRF slabs without constructing an edge-by-edge covariance matrix.
+The design is stored once in compact row-major sparse form and may share any
+number of log-scale coordinates between coefficients. This is the structured
+provider used for node-shared OMRF slabs without constructing an edge-by-edge
+covariance matrix.
 """
 struct LogLinearGaussianScaleSlab <: AbstractLogLinearIndependentGaussianSlab
     beta_indices::Vector{Int}
     logscale_indices::Vector{Int}
     log_base_scales::Vector{Float64}
-    logscale_design::SparseMatrixCSC{Float64,Int}
-    row_columns::Vector{Vector{Int}}
-    row_values::Vector{Vector{Float64}}
-    function LogLinearGaussianScaleSlab(
+    rowptr::Vector{Int}
+    colidx::Vector{Int}
+    nzval::Vector{Float64}
+end
+
+function _validate_loglinear_slab_indices(beta_indices, logscale_indices,
+        log_base_scales)
+    p, q = length(beta_indices), length(logscale_indices)
+    p > 0 || throw(ArgumentError("beta_indices must be non-empty"))
+    q > 0 || throw(ArgumentError("logscale_indices must be non-empty"))
+    length(log_base_scales) == p || throw(DimensionMismatch(
+        "log_base_scales length $(length(log_base_scales)) does not match beta dimension $p"))
+    all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
+    all(>(0), logscale_indices) || throw(ArgumentError("logscale_indices must be positive"))
+    allunique(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
+    allunique(logscale_indices) || throw(ArgumentError("logscale_indices must be unique"))
+    isempty(intersect(Int.(beta_indices), Int.(logscale_indices))) || throw(ArgumentError(
+        "logscale_indices must be disjoint from beta_indices"))
+    return p, q
+end
+
+function LogLinearGaussianScaleSlab(
         beta_indices::AbstractVector{<:Integer},
         logscale_indices::AbstractVector{<:Integer},
         log_base_scales::AbstractVector{<:Real},
-        logscale_design::AbstractMatrix{<:Real},
-    )
-        p = length(beta_indices)
-        q = length(logscale_indices)
-        p > 0 || throw(ArgumentError("beta_indices must be non-empty"))
-        q > 0 || throw(ArgumentError("logscale_indices must be non-empty"))
-        length(log_base_scales) == p || throw(DimensionMismatch(
-            "log_base_scales length $(length(log_base_scales)) does not match beta dimension $p"))
-        size(logscale_design) == (p, q) || throw(DimensionMismatch(
-            "logscale_design has size $(size(logscale_design)), expected ($p, $q)"))
-        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-        all(>(0), logscale_indices) || throw(ArgumentError("logscale_indices must be positive"))
-        allunique(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-        allunique(logscale_indices) || throw(ArgumentError("logscale_indices must be unique"))
-        isempty(intersect(Int.(beta_indices), Int.(logscale_indices))) || throw(ArgumentError(
-            "logscale_indices must be disjoint from beta_indices"))
-        B = sparse(Float64.(logscale_design))
-        all(isfinite, nonzeros(B)) || throw(ArgumentError(
-            "logscale_design entries must be finite"))
-        row_columns = [Int[] for _ in 1:p]
-        row_values = [Float64[] for _ in 1:p]
-        for column in 1:q
-            for ptr in nzrange(B, column)
-                row = rowvals(B)[ptr]
-                push!(row_columns[row], column)
-                push!(row_values[row], nonzeros(B)[ptr])
-            end
-        end
-        new(Vector{Int}(beta_indices), Vector{Int}(logscale_indices),
-            Vector{Float64}(log_base_scales), B, row_columns, row_values)
+        logscale_design::AbstractMatrix{<:Real})
+    p, q = _validate_loglinear_slab_indices(
+        beta_indices, logscale_indices, log_base_scales)
+    size(logscale_design) == (p, q) || throw(DimensionMismatch(
+        "logscale_design has size $(size(logscale_design)), expected ($p, $q)"))
+    B = sparse(Float64.(logscale_design))
+    all(isfinite, nonzeros(B)) || throw(ArgumentError(
+        "logscale_design entries must be finite"))
+    rowptr = zeros(Int, p + 1)
+    for column in 1:q, ptr in nzrange(B, column)
+        rowptr[rowvals(B)[ptr] + 1] += 1
     end
+    cumsum!(rowptr, rowptr)
+    rowptr .+= 1
+    colidx = Vector{Int}(undef, nnz(B))
+    nzval = Vector{Float64}(undef, nnz(B))
+    nextptr = copy(rowptr)
+    for column in 1:q, ptr in nzrange(B, column)
+        row = rowvals(B)[ptr]
+        destination = nextptr[row]
+        colidx[destination] = column
+        nzval[destination] = nonzeros(B)[ptr]
+        nextptr[row] += 1
+    end
+    return LogLinearGaussianScaleSlab(Vector{Int}(beta_indices),
+        Vector{Int}(logscale_indices), Vector{Float64}(log_base_scales),
+        rowptr, colidx, nzval)
+end
+
+function LogLinearGaussianScaleSlab(
+        beta_indices::AbstractVector{<:Integer},
+        logscale_indices::AbstractVector{<:Integer},
+        log_base_scales::AbstractVector{<:Real},
+        rowptr::AbstractVector{<:Integer},
+        colidx::AbstractVector{<:Integer},
+        nzval::AbstractVector{<:Real})
+    p, q = _validate_loglinear_slab_indices(
+        beta_indices, logscale_indices, log_base_scales)
+    length(rowptr) == p + 1 || throw(DimensionMismatch(
+        "rowptr must have beta dimension + 1 entries"))
+    first(rowptr) == 1 || throw(ArgumentError("rowptr must use one-based indexing"))
+    last(rowptr) == length(colidx) + 1 || throw(DimensionMismatch(
+        "rowptr endpoint must equal the number of nonzeros + 1"))
+    length(colidx) == length(nzval) || throw(DimensionMismatch(
+        "colidx and nzval lengths must match"))
+    all(i -> 1 <= i <= q, colidx) || throw(ArgumentError(
+        "sparse design column indices must lie in 1:logscale dimension"))
+    all(isfinite, nzval) || throw(ArgumentError(
+        "logscale_design entries must be finite"))
+    all(diff(rowptr) .>= 0) || throw(ArgumentError("rowptr must be nondecreasing"))
+    return LogLinearGaussianScaleSlab(Vector{Int}(beta_indices),
+        Vector{Int}(logscale_indices), Vector{Float64}(log_base_scales),
+        Vector{Int}(rowptr), Vector{Int}(colidx), Vector{Float64}(nzval))
 end
 
 """
@@ -256,7 +297,8 @@ Base.copy(provider::IndependentZeroMeanLogscaleGaussianSlab) =
     IndependentZeroMeanLogscaleGaussianSlab(copy(provider.beta_indices), copy(provider.logscale_indices), copy(provider.log_base_scales))
 Base.copy(provider::LogLinearGaussianScaleSlab) =
     LogLinearGaussianScaleSlab(copy(provider.beta_indices), copy(provider.logscale_indices),
-        copy(provider.log_base_scales), copy(provider.logscale_design))
+        copy(provider.log_base_scales), copy(provider.rowptr),
+        copy(provider.colidx), copy(provider.nzval))
 Base.copy(provider::GlobalLogscaleExchangeableGaussianSlab) =
     GlobalLogscaleExchangeableGaussianSlab(copy(provider.beta_indices), provider.logscale_index, provider.u, provider.v; mean=provider.mean, logscale_offset=provider.logscale_offset)
 
@@ -363,10 +405,9 @@ end
 @inline function _loglinear_log_scale(provider::LogLinearGaussianScaleSlab,
         x::AbstractVector, j::Int)
     value = provider.log_base_scales[j]
-    columns = provider.row_columns[j]
-    values = provider.row_values[j]
-    @inbounds for k in eachindex(columns)
-        value += values[k] * x[provider.logscale_indices[columns[k]]]
+    @inbounds for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
+        value += provider.nzval[ptr] *
+            x[provider.logscale_indices[provider.colidx[ptr]]]
     end
     return value
 end
@@ -382,10 +423,9 @@ end
 @inline function _independent_log_scale_slope(provider::LogLinearGaussianScaleSlab,
         velocity::AbstractVector, j::Int)
     value = 0.0
-    columns = provider.row_columns[j]
-    values = provider.row_values[j]
-    @inbounds for k in eachindex(columns)
-        value += values[k] * velocity[provider.logscale_indices[columns[k]]]
+    @inbounds for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
+        value += provider.nzval[ptr] *
+            velocity[provider.logscale_indices[provider.colidx[ptr]]]
     end
     return value
 end
@@ -824,11 +864,9 @@ function active_prior_grad!(provider::LogLinearGaussianScaleSlab,
         inv_s2 = exp(-2 * _loglinear_log_scale(provider, x, j))
         beta_scaled = beta^2 * inv_s2
         out[indices[j]] = beta * inv_s2
-        columns = provider.row_columns[j]
-        values = provider.row_values[j]
-        for k in eachindex(columns)
-            out[provider.logscale_indices[columns[k]]] +=
-                values[k] * (1 - beta_scaled)
+        for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
+            out[provider.logscale_indices[provider.colidx[ptr]]] +=
+                provider.nzval[ptr] * (1 - beta_scaled)
         end
     end
     return out

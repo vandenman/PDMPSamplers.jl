@@ -245,21 +245,21 @@ end
 
 _validate_grid_model(::ContinuousDynamics, ::PDMPModel) = nothing
 
-_validate_marked_grid_envelope(::ContinuousDynamics, ::SeparableResidualEnvelope) = nothing
-_validate_marked_grid_envelope(flow::PreconditionedDynamics,
+_validate_subsampling_grid_envelope(::ContinuousDynamics, ::SeparableResidualEnvelope) = nothing
+_validate_subsampling_grid_envelope(flow::PreconditionedDynamics,
         envelope::SeparableResidualEnvelope) =
-    _validate_marked_grid_envelope(flow.dynamics, envelope)
-function _validate_marked_grid_envelope(::AnyBoomerang,
+    _validate_subsampling_grid_envelope(flow.dynamics, envelope)
+function _validate_subsampling_grid_envelope(::AnyBoomerang,
         envelope::SeparableResidualEnvelope)
     envelope.component_cell_scales! === nothing && throw(ArgumentError(
-        "MarkedControlVariate GridThinning requires an explicit certified " *
+        "SubsampledControlVariate GridThinning requires an explicit certified " *
         "component_cell_scales! callback for Boomerang trajectories"))
     return nothing
 end
 
 _validate_grid_model(flow::ContinuousDynamics,
-    model::PDMPModel{<:MarkedControlVariate}) =
-        _validate_marked_grid_envelope(flow, model.grad.envelope)
+    model::PDMPModel{<:SubsampledControlVariate}) =
+        _validate_subsampling_grid_envelope(flow, model.grad.envelope)
 
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     _validate_grid_model(flow, model)
@@ -389,7 +389,7 @@ end
 struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
-    marked_bound::PiecewiseAffineBound{Float64}
+    subsampling_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
     α⁺::Float64

@@ -1,10 +1,11 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
-function _marked_fixture(weights, m; scales=ones(size(weights, 1)))
+function _subsampling_fixture(weights, m; scales=ones(size(weights, 1)))
     envelope = SeparableResidualEnvelope(weights,
-        (out, state, flow, t) -> copyto!(out, scales))
+        (out, state, flow, t) -> copyto!(out, scales);
+        certified_affine=true)
     oracle = (out, x, subset, anchor) -> fill!(out, 0.0)
-    return MarkedControlVariate((out, x) -> fill!(out, 0.0), oracle,
+    return SubsampledControlVariate((out, x) -> fill!(out, 0.0), oracle,
         envelope, [0.0], m)
 end
 
@@ -52,22 +53,41 @@ function (f::_SwitchingScale)(out, state, flow, t)
     out[1] = f.calls <= f.switch_after ? f.low : f.high
 end
 
-@testset "Marked subsampled event process" begin
+@testset "Subsampling subsampled event process" begin
+    @testset "public API has no legacy terminology" begin
+        legacy_term = "mark" * "ed"
+        @test all(name -> !occursin(legacy_term, lowercase(String(name))),
+            names(PDMPSamplers; all=false, imported=false))
+        for type in (SubsampledControlVariate,
+                PDMPSamplers.SubsamplingThinningState,
+                PDMPSamplers.SubsamplingCounter,
+                PDMPSamplers.SubsamplingAnchorBankAdapter)
+            @test all(name -> !occursin(legacy_term, lowercase(String(name))),
+                fieldnames(type))
+        end
+    end
+
     @testset "residual-envelope derived caches are constructed coherently" begin
         envelope = SeparableResidualEnvelope(
             [1.0 2.0; 3.0 4.0],
-            (out, state, flow, t) -> fill!(out, 1.0))
+            (out, state, flow, t) -> fill!(out, 1.0);
+            certified_affine=true)
         @test envelope.weights == [1.0 2.0; 3.0 4.0]
         @test envelope.totals == [3.0, 7.0]
         @test all(!isnothing, envelope.alias_tables)
         @test length(envelope.scales) == 2
 
         affine = SeparableResidualEnvelope(ones(1, 1),
-            (out, state, flow, t) -> (out[1] = t))
+            (out, state, flow, t) -> (out[1] = t);
+            certified_affine=true)
         state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
         PDMPSamplers.component_cell_scales!(affine.cell_scales, affine,
             state, BouncyParticle(1, 0.0), 1.0, 2.0)
         @test affine.cell_scales == [2.0]
+
+        nonaffine = (out, state, flow, t) -> (out[1] = 1 - (2t - 1)^2)
+        @test_throws ArgumentError SeparableResidualEnvelope(
+            ones(1, 1), nonaffine)
     end
 
     @testset "trajectory residual geometry dominates every supported flow" begin
@@ -166,8 +186,9 @@ end
     @testset "chain-local deterministic HVP" begin
         provider = _CopyTrackedHVP(0)
         envelope = SeparableResidualEnvelope(zeros(1, 1),
-            (out, state, flow, t) -> (out[1] = 0.0))
-        cv = MarkedControlVariate((out, x) -> copyto!(out, x),
+            (out, state, flow, t) -> (out[1] = 0.0);
+            certified_affine=true)
+        cv = SubsampledControlVariate((out, x) -> copyto!(out, x),
             (out, x, subset, anchor) -> fill!(out, 0.0), envelope, [0.0], 1;
             deterministic_hvp! = provider)
         @test_throws ArgumentError PDMPModel(1, cv,
@@ -180,8 +201,9 @@ end
 
     @testset "support-boundary detection is explicit" begin
         envelope = SeparableResidualEnvelope(zeros(1, 1),
-            (out, state, flow, t) -> (out[1] = 0.0))
-        cv = MarkedControlVariate((out, x) -> copyto!(out, x),
+            (out, state, flow, t) -> (out[1] = 0.0);
+            certified_affine=true)
+        cv = SubsampledControlVariate((out, x) -> copyto!(out, x),
             (out, x, subset, anchor) -> fill!(out, 0.0), envelope, [0.0], 1;
             deterministic_hvp! = ((out, x, v) -> copyto!(out, v)))
         model = PDMPModel(1, cv)
@@ -218,10 +240,11 @@ end
         # Exercise the production candidate loop, not only the scalar laws.
         weights = reshape([0.5, 1.5], 1, :)
         envelope = SeparableResidualEnvelope(weights,
-            (out, state, flow, t) -> (out[1] = 1.0))
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
         oracle = (out, x, subset, anchor) ->
             (out[1] = only(subset) == 1 ? 0.5 : 1.5)
-        cv = MarkedControlVariate((out, x) -> (out[1] = 0.0), oracle,
+        cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0), oracle,
             envelope, [0.0], 1;
             deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
         flow = BouncyParticle(1, 0.0)
@@ -248,7 +271,7 @@ end
             (zeros(2, 4), [1.0, 2.0], 2, 0.8),
         )
         for (weights, scales, m, D) in cases
-            cv = _marked_fixture(weights, m; scales)
+            cv = _subsampling_fixture(weights, m; scales)
             B = PDMPSamplers.total_residual_bound(cv.envelope, state, 0.0)
             subsets = _enumerated_subsets(size(weights, 2), m)
             counts = Dict(S => 0 for S in subsets)
@@ -279,12 +302,14 @@ end
     @testset "candidate lifecycle and stored reflection gradient" begin
         subsets_seen = Int[]
         weights = reshape([5.0, 15.0], 1, :)
-        envelope = SeparableResidualEnvelope(weights, (out, state, flow, t) -> (out[1] = 1.0))
+        envelope = SeparableResidualEnvelope(weights,
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
         oracle = function (out, x, subset, anchor)
             push!(subsets_seen, only(subset))
             out[1] = only(subset) == 1 ? 0.5 : 1.5
         end
-        cv = MarkedControlVariate((out, x) -> (out[1] = 0.0), oracle,
+        cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0), oracle,
             envelope, [7.0], 1;
             deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
         model = PDMPModel(1, cv)
@@ -312,13 +337,14 @@ end
         @test state.ξ.θ ≈ [-1.0]
     end
 
-    @testset "marked ThinningStrategy event law and lifecycle" begin
+    @testset "subsampling ThinningStrategy event law and lifecycle" begin
         weights = reshape([0.5, 1.5], 1, :)
         envelope = SeparableResidualEnvelope(weights,
-            (out, state, flow, t) -> (out[1] = 1.0))
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
         oracle = (out, x, subset, anchor) ->
             (out[1] = only(subset) == 1 ? 0.5 : 1.5)
-        cv = MarkedControlVariate((out, x) -> (out[1] = 0.0), oracle,
+        cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0), oracle,
             envelope, [0.0], 1;
             deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
         flow = BouncyParticle(1, 0.0)
@@ -350,12 +376,13 @@ end
         subsets_seen = Int[]
         rejection_envelope = SeparableResidualEnvelope(
             reshape([5.0, 15.0], 1, :),
-            (out, state, flow, t) -> (out[1] = 1.0))
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
         rejection_oracle = function (out, x, subset, anchor)
             push!(subsets_seen, only(subset))
             out[1] = only(subset) == 1 ? 0.5 : 1.5
         end
-        rejection_cv = MarkedControlVariate(
+        rejection_cv = SubsampledControlVariate(
             (out, x) -> (out[1] = 0.0), rejection_oracle,
             rejection_envelope, [0.0], 1)
         rejection_rng = Random.Xoshiro(0x7a12)
@@ -372,8 +399,9 @@ end
         @test rejection_stats.residual_oracle_calls == length(subsets_seen)
 
         horizon_envelope = SeparableResidualEnvelope(ones(1, 1),
-            (out, state, flow, t) -> (out[1] = 1.0))
-        horizon_cv = MarkedControlVariate(
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
+        horizon_cv = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             horizon_envelope, [0.0], 1)
@@ -383,11 +411,11 @@ end
         @test last(horizon_trace).time == 0.01
     end
 
-    @testset "marked ThinningStrategy certified roofs" begin
+    @testset "subsampling ThinningStrategy certified roofs" begin
         linear_flow = BouncyParticle(1, 0.0)
         growing = TrajectoryResidualEnvelope(ones(1, 2), [0.0];
             growth_rates=[0.2])
-        growing_cv = MarkedControlVariate(
+        growing_cv = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             growing, [0.0], 1)
@@ -399,7 +427,7 @@ end
         # Periodicity makes the same positive-growth envelope globally
         # representable by a constant Boomerang roof.
         boom_flow = Boomerang(reshape([1.0], 1, 1), [0.0], 0.2)
-        boom_cv = MarkedControlVariate(
+        boom_cv = SubsampledControlVariate(
             (out, x) -> (out[1] = 5.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             TrajectoryResidualEnvelope(ones(1, 2), [0.0]; growth_rates=[0.2]),
@@ -408,22 +436,26 @@ end
             boom_flow, PDMPModel(1, boom_cv),
             ThinningStrategy(GlobalBounds(10.0, 1)), 0.0,
             SkeletonPoint([0.4], [1.0]))
-        @test boom_state[3] isa PDMPSamplers.MarkedThinningState
+        @test boom_state[3] isa PDMPSamplers.SubsamplingThinningState
 
         generic_periodic = SeparableResidualEnvelope(ones(1, 2),
-            (out, state, flow, t) -> (out[1] = 1 + sin(t)))
-        generic_cv = MarkedControlVariate(
+            (out, state, flow, t) -> (out[1] = 1 + sin(t));
+            component_cell_scales! =
+                (out, state, flow, left, right) -> (out[1] = 2.0))
+        generic_cv = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             generic_periodic, [0.0], 1)
-        @test_throws ArgumentError PDMPSamplers.initialize_state(
+        periodic_state = PDMPSamplers.initialize_state(
             Random.Xoshiro(43), boom_flow, PDMPModel(1, generic_cv),
             ThinningStrategy(GlobalBounds(1.0, 1)), 0.0,
             SkeletonPoint([0.4], [1.0]))
-        @test_throws ArgumentError PDMPSamplers.initialize_state(
+        @test periodic_state[3] isa PDMPSamplers.SubsamplingThinningState
+        grid_state = PDMPSamplers.initialize_state(
             Random.Xoshiro(44), boom_flow, PDMPModel(1, generic_cv),
             GridThinningStrategy(N=4, t_max=π, lazy=false), 0.0,
             SkeletonPoint([0.4], [1.0]))
+        @test grid_state[3] isa PDMPSamplers.GridAdaptiveState
     end
 
     @testset "dense-preconditioned ZigZag deterministic roof" begin
@@ -474,8 +506,9 @@ end
         # must restart before drawing/evaluating a residual mark.
         switching_gradient = _SwitchingGradient(0, 2, 0.0, 10.0)
         envelope = SeparableResidualEnvelope(ones(1, 1),
-            (out, state, flow, t) -> (out[1] = 1.0))
-        cv = MarkedControlVariate(switching_gradient, zero_oracle,
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
+        cv = SubsampledControlVariate(switching_gradient, zero_oracle,
             envelope, [0.0], 1; deterministic_hvp! = zero_hvp)
         rng = Random.Xoshiro(191)
         state, model, alg, cache, stats = PDMPSamplers.initialize_state(rng,
@@ -492,8 +525,9 @@ end
 
         # An aggregate violation likewise restarts before invoking the oracle.
         switching_scale = _SwitchingScale(0, 2, 0.0, 10.0)
-        envelope2 = SeparableResidualEnvelope(ones(1, 1), switching_scale)
-        cv2 = MarkedControlVariate((out, x) -> (out[1] = 1.0), zero_oracle,
+        envelope2 = SeparableResidualEnvelope(ones(1, 1), switching_scale;
+            certified_affine=true)
+        cv2 = SubsampledControlVariate((out, x) -> (out[1] = 1.0), zero_oracle,
             envelope2, [0.0], 1; deterministic_hvp! = zero_hvp)
         rng2 = Random.Xoshiro(192)
         state2, model2, alg2, cache2, stats2 = PDMPSamplers.initialize_state(rng2,
@@ -510,9 +544,10 @@ end
 
         # A residual envelope cannot be repaired by changing the D grid.
         bad_envelope = SeparableResidualEnvelope(fill(0.1, 1, 1),
-            (out, state, flow, t) -> (out[1] = 1.0))
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
         bad_oracle = (out, x, subset, anchor) -> (out[1] = 10.0)
-        bad_cv = MarkedControlVariate((out, x) -> (out[1] = 0.0),
+        bad_cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0),
             bad_oracle, bad_envelope, [0.0], 1; deterministic_hvp! = zero_hvp)
         bad_rng = Random.Xoshiro(193)
         bad_state, bad_model, bad_alg, bad_cache, bad_stats =
@@ -524,10 +559,11 @@ end
             bad_model, flow, bad_alg, bad_state, bad_cache, bad_stats)
         @test bad_stats.grid_shrinks == 0
 
-        # A loose but valid marked envelope is not a safety-limit failure.
+        # A loose but valid subsampling envelope is not a safety-limit failure.
         loose_envelope = SeparableResidualEnvelope(fill(1000.0, 1, 1),
-            (out, state, flow, t) -> (out[1] = 1.0))
-        loose_cv = MarkedControlVariate((out, x) -> (out[1] = 1.0),
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
+        loose_cv = SubsampledControlVariate((out, x) -> (out[1] = 1.0),
             zero_oracle, loose_envelope, [0.0], 1;
             deterministic_hvp! = zero_hvp)
         loose_rng = Random.Xoshiro(194)
@@ -543,12 +579,13 @@ end
         @test loose_stats.grid_acceptance_tests > 100
     end
 
-    @testset "budget-first marked grid and deterministic adaptation" begin
+    @testset "budget-first subsampling grid and deterministic adaptation" begin
         calls_by_N = Int[]
         for N_grid in (20, 100, 500)
             envelope = SeparableResidualEnvelope(zeros(1, 1),
-                (out, state, flow, t) -> (out[1] = 0.0))
-            cv = MarkedControlVariate((out, x) -> (out[1] = 1000.0),
+                (out, state, flow, t) -> (out[1] = 0.0);
+                certified_affine=true)
+            cv = SubsampledControlVariate((out, x) -> (out[1] = 1000.0),
                 (out, x, subset, anchor) -> fill!(out, 0.0),
                 envelope, [0.0], 1;
                 deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
@@ -559,11 +596,11 @@ end
                     t_max=1.0, lazy=false, bound_violation=:throw), 0.0,
                 SkeletonPoint([0.0], [1.0]))
             alg.schedule_frozen[] = true
-            marked_bound = alg.marked_bound
+            subsampling_bound = alg.subsampling_bound
             _, event, _ = PDMPSamplers.next_event_time(rng, model,
                 BouncyParticle(1, 0.0), alg, state, cache, stats)
             @test event === :reflect
-            @test alg.marked_bound === marked_bound
+            @test alg.subsampling_bound === subsampling_bound
             push!(calls_by_N, stats.deterministic_gradient_calls)
             @test stats.residual_oracle_calls == 1
         end
@@ -571,8 +608,9 @@ end
 
         # A loose residual envelope must not request a finer deterministic grid.
         loose_envelope = SeparableResidualEnvelope(fill(100.0, 1, 1),
-            (out, state, flow, t) -> (out[1] = 1.0))
-        loose_cv = MarkedControlVariate((out, x) -> (out[1] = 1.0),
+            (out, state, flow, t) -> (out[1] = 1.0);
+            certified_affine=true)
+        loose_cv = SubsampledControlVariate((out, x) -> (out[1] = 1.0),
             (out, x, subset, anchor) -> fill!(out, 0.0), loose_envelope,
             [0.0], 1; deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
         loose_rng = Random.Xoshiro(994)
@@ -589,13 +627,13 @@ end
         @test loose_alg.N[] < initial_N
     end
 
-    @testset "cell-roof slack is aggregate-thinned before marked evaluation" begin
+    @testset "cell-roof slack is aggregate-thinned before subsampling evaluation" begin
         point_scale! = (out, state, flow, t) -> (out[1] = t)
         cell_scale! = (out, state, flow, left, right) -> (out[1] = right)
         envelope = SeparableResidualEnvelope(ones(1, 1), point_scale!;
             component_cell_scales! = cell_scale!)
         oracle = (out, x, subset, anchor) -> (out[1] = x[1])
-        cv = MarkedControlVariate((out, x) -> (out[1] = 0.0), oracle,
+        cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0), oracle,
             envelope, [0.0], 1;
             deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
         rng = Random.Xoshiro(0x5ce11)
@@ -618,10 +656,10 @@ end
         expected = 1 - exp(-0.5)
         @test observed ≈ expected atol=0.01
         @test abs(observed - (1 - exp(-1))) > 0.15
-        @test stats.marked_cell_roof_proposals > stats.marked_aggregate_accepts
-        @test stats.marked_aggregate_accepts == stats.marked_subset_evaluations
-        @test stats.marked_subset_evaluations == stats.marked_final_reflections
-        @test stats.residual_oracle_calls == stats.marked_subset_evaluations
+        @test stats.subsampling_cell_roof_proposals > stats.subsampling_aggregate_accepts
+        @test stats.subsampling_aggregate_accepts == stats.subsampling_subset_evaluations
+        @test stats.subsampling_subset_evaluations == stats.subsampling_final_reflections
+        @test stats.residual_oracle_calls == stats.subsampling_subset_evaluations
     end
 
     @testset "aggregate rejection precedes candidate propagation" begin
@@ -629,7 +667,7 @@ end
             (out, state, flow, t) -> (out[1] = 0.0);
             component_cell_scales! =
                 (out, state, flow, left, right) -> (out[1] = 100.0))
-        cv = MarkedControlVariate((out, x) -> fill!(out, 0.0),
+        cv = SubsampledControlVariate((out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0), envelope, [0.0], 1;
             deterministic_hvp! = ((out, x, v) -> fill!(out, 0.0)))
         rng = Random.Xoshiro(0xa99e9a7e)
@@ -644,12 +682,12 @@ end
         _, event, _ = PDMPSamplers.next_event_time(rng, model, flow, alg,
             state, cache, stats, 1.0, false, :horizon_hit)
         @test event === :horizon_hit
-        @test stats.marked_cell_roof_proposals > 0
-        @test stats.marked_aggregate_accepts == 0
+        @test stats.subsampling_cell_roof_proposals > 0
+        @test stats.subsampling_aggregate_accepts == 0
         @test alg.state_cache2.ξ.x[1] == 123.0
     end
 
-    @testset "marked anchor refresh is coherent" begin
+    @testset "subsampling anchor refresh is coherent" begin
         provider_anchor = Ref([0.0])
         envelope = TrajectoryResidualEnvelope(ones(1, 2), provider_anchor[])
         refresh! = function(anchor)
@@ -658,7 +696,7 @@ end
             provider_anchor[] = anchor
             return refreshed
         end
-        cv = MarkedControlVariate(
+        cv = SubsampledControlVariate(
             (out, x) -> (out[1] = x[1] - provider_anchor[][1]),
             (out, x, subset, anchor) -> (out[1] = x[1] - anchor[1]),
             envelope, provider_anchor[], 1;
@@ -674,20 +712,20 @@ end
         @test out == [3.0]
         @test_throws ArgumentError copy(cv)
 
-        no_refresh = MarkedControlVariate(
+        no_refresh = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             TrajectoryResidualEnvelope(ones(1, 1), [0.0]), [0.0], 1)
         @test_throws ArgumentError PDMPSamplers.refresh_anchor!(no_refresh, [1.0])
     end
 
-    @testset "marked anchor lifecycle validation" begin
+    @testset "subsampling anchor lifecycle validation" begin
         envelope = TrajectoryResidualEnvelope(ones(1, 1), [0.0])
-        @test_throws ArgumentError MarkedControlVariate(
+        @test_throws ArgumentError SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             envelope, [1.0], 1)
-        cv = MarkedControlVariate(
+        cv = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             envelope, [0.0], 1;
@@ -699,26 +737,28 @@ end
 
         point_scale_a = (out, state, flow, t) -> fill!(out, 1.0)
         point_scale_b = (out, state, flow, t) -> fill!(out, 2.0)
-        typed_envelope = SeparableResidualEnvelope(ones(1, 1), point_scale_a)
-        typed_cv = MarkedControlVariate(
+        typed_envelope = SeparableResidualEnvelope(ones(1, 1), point_scale_a;
+            certified_affine=true)
+        typed_cv = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             typed_envelope, [0.0], 1;
             refresh_anchor! = anchor ->
-                SeparableResidualEnvelope(ones(1, 1), point_scale_b))
+                SeparableResidualEnvelope(ones(1, 1), point_scale_b;
+                    certified_affine=true))
         @test_throws ArgumentError PDMPSamplers.refresh_anchor!(typed_cv, [1.0])
         @test typed_cv.anchor == [0.0]
         @test typed_cv.envelope === typed_envelope
     end
 
-    function gaussian_marked_model(flow, N=24, m=3)
+    function gaussian_subsampling_model(flow, N=24, m=3)
         q = collect(range(0.5, 1.5; length=N))
         q ./= sum(q)
         anchor = [0.0]
         envelope = TrajectoryResidualEnvelope(reshape(q, 1, :), anchor)
         oracle = (out, x, subset, a) ->
             (out[1] = sum(q[i] for i in subset) * (x[1] - a[1]))
-        cv = MarkedControlVariate((out, x) -> (out[1] = 0.0), oracle,
+        cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0), oracle,
             envelope, anchor, m;
             deterministic_hvp! = ((out, x, v) -> (out[1] = 0.0)))
         return PDMPModel(1, cv)
@@ -726,7 +766,7 @@ end
 
     @testset "Gaussian stationarity for BPS and ZigZag" begin
         for (flow, seed) in ((BouncyParticle(1, 0.5), 9101), (ZigZag(1), 9102))
-            model = gaussian_marked_model(flow)
+            model = gaussian_subsampling_model(flow)
             trace, stats = pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
                 model, GridThinningStrategy(N=12, t_max=2.0, lazy=false,
                     bound_violation=:throw), 0.0, 12_000.0;
@@ -739,7 +779,7 @@ end
         end
         for flow in (BouncyParticle(1, 0.5), ZigZag(1))
             trace, _ = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
-                gaussian_marked_model(flow),
+                gaussian_subsampling_model(flow),
                 GridThinningStrategy(N=8, t_max=1.5, lazy=false,
                     bound=:linear, bound_violation=:throw), 0.0, 50.0;
                 seed=774, progress=false)
@@ -747,10 +787,10 @@ end
         end
     end
 
-    @testset "marked ThinningStrategy stationarity and dynamics" begin
+    @testset "subsampling ThinningStrategy stationarity and dynamics" begin
         for (flow, seed) in ((BouncyParticle(1, 0.5), 9201), (ZigZag(1), 9202))
             trace, stats = pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
-                gaussian_marked_model(flow),
+                gaussian_subsampling_model(flow),
                 ThinningStrategy(GlobalBounds(0.0, 1)), 0.0, 8_000.0;
                 seed, progress=false)
             @test mean(trace)[1] ≈ 0 atol=0.11
@@ -768,7 +808,7 @@ end
         ]
         for (seed, flow) in enumerate(flows)
             trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
-                gaussian_marked_model(flow),
+                gaussian_subsampling_model(flow),
                 ThinningStrategy(GlobalBounds(100.0, 1)), 0.0, 12.0, 2.0;
                 seed=9300 + seed, progress=false)
             @test length(trace) > 1
@@ -777,14 +817,14 @@ end
 
         sticky_trace, sticky_stats = pdmp_sample(
             SkeletonPoint([0.4], [1.0]), BouncyParticle(1, 0.5),
-            gaussian_marked_model(BouncyParticle(1, 0.5)),
+            gaussian_subsampling_model(BouncyParticle(1, 0.5)),
             Sticky(ThinningStrategy(GlobalBounds(100.0, 1)), [1.0]),
             0.0, 8.0; seed=9399, progress=false)
         @test length(sticky_trace) > 1
         @test sticky_stats.residual_oracle_calls > 0
     end
 
-    @testset "marked sticky lifecycle across supported flows and strategies" begin
+    @testset "subsampling sticky lifecycle across supported flows and strategies" begin
         flow_factories = (
             () -> BouncyParticle(2, 0.0),
             () -> ZigZag(2),
@@ -813,10 +853,11 @@ end
             point_scales = (out, state, flow, t) -> (out[1] = 10.0)
             cell_scales = (out, state, flow, left, right) -> (out[1] = 10.0)
             envelope = SeparableResidualEnvelope(ones(1, 1), point_scales;
-                component_cell_scales! = cell_scales)
+                component_cell_scales! = cell_scales,
+                certified_affine=true)
             deterministic_gradient = (out, x) -> copyto!(out, x)
             deterministic_hvp = (out, x, v) -> copyto!(out, v)
-            cv = MarkedControlVariate(deterministic_gradient, residual_oracle,
+            cv = SubsampledControlVariate(deterministic_gradient, residual_oracle,
                 envelope, zeros(2), 1; deterministic_hvp! = deterministic_hvp)
             trace, stats = pdmp_sample(
                 SkeletonPoint([0.1, 1.0], [-1.0, 1.0]), flow,
@@ -851,7 +892,7 @@ end
         end
         make_model() = begin
             envelope = TrajectoryResidualEnvelope(ones(1, 8), zeros(2))
-            cv = MarkedControlVariate(
+            cv = SubsampledControlVariate(
                 (out, x) -> copyto!(out, x),
                 (out, x, subset, anchor) -> fill!(out, 0.0),
                 envelope, zeros(2), 2;
@@ -876,7 +917,7 @@ end
                     LowerTriangular(view(sb.ΣAA, 1:k, 1:k))
         end
         candidate_state(inner::PDMPSamplers.GridAdaptiveState) = inner.state_cache
-        candidate_state(inner::PDMPSamplers.MarkedThinningState) = inner.candidate
+        candidate_state(inner::PDMPSamplers.SubsamplingThinningState) = inner.candidate
 
         for (seed, strategy_a, strategy_b) in (
                 (0xd301,
@@ -963,7 +1004,7 @@ end
         end
     end
 
-    @testset "marked production loop covers full dynamics and sticky wrappers" begin
+    @testset "subsampling production loop covers full dynamics and sticky wrappers" begin
         flows = Any[
             PreconditionedBPS(1; refresh_rate=0.5, scale=[0.7]),
             PreconditionedZigZag(1; scale=[0.7]),
@@ -974,7 +1015,7 @@ end
         ]
         for (seed, flow) in enumerate(flows)
             trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
-                gaussian_marked_model(flow),
+                gaussian_subsampling_model(flow),
                 GridThinningStrategy(N=10, t_max=1.0, lazy=false,
                     bound_violation=:throw), 0.0, 20.0, 2.0;
                 seed=8300 + seed, progress=false)
@@ -991,7 +1032,7 @@ end
             alg = Sticky(GridThinningStrategy(N=8, t_max=0.8, lazy=false,
                 bound_violation=:throw), [1.0])
             trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
-                gaussian_marked_model(flow), alg, 0.0, 8.0;
+                gaussian_subsampling_model(flow), alg, 0.0, 8.0;
                 seed=8400 + seed, progress=false)
             @test length(trace) > 1
             @test stats.residual_oracle_calls > 0
@@ -1003,12 +1044,13 @@ end
         for N in (100, 10_000)
             work = Ref(0)
             envelope = SeparableResidualEnvelope(ones(1, N),
-                (out, state, flow, t) -> (out[1] = 1.0))
+                (out, state, flow, t) -> (out[1] = 1.0);
+                certified_affine=true)
             oracle = function (out, x, subset, anchor)
                 work[] += length(subset)
                 fill!(out, 0.0)
             end
-            cv = MarkedControlVariate((out, x) -> fill!(out, 0.0), oracle,
+            cv = SubsampledControlVariate((out, x) -> fill!(out, 0.0), oracle,
                 envelope, [0.0], 7)
             B = PDMPSamplers.total_residual_bound(envelope, state, 0.0)
             for _ in 1:100
@@ -1050,10 +1092,10 @@ end
             (out, state, flow, t) -> begin
                 vnorm = norm(state.ξ.θ)
                 out[1] = vnorm * (norm(state.ξ.x - anchor) + vnorm * t)
-            end)
-        cv = MarkedControlVariate(deterministic, oracle, envelope, anchor, m;
+            end; certified_affine=true)
+        cv = SubsampledControlVariate(deterministic, oracle, envelope, anchor, m;
             deterministic_hvp! = ((out, x, v) -> (out .= prior_precision .* v)))
-        marked_model = PDMPModel(d, cv)
+        subsampling_model = PDMPModel(d, cv)
         full_gradient = function (out, x)
             logistic_grad(out, x, axes(X, 1))
             out .+= prior_precision .* x
@@ -1071,13 +1113,13 @@ end
         ξ = SkeletonPoint([0.2, -0.2], [1.0, 0.0])
         alg = GridThinningStrategy(N=16, t_max=1.5, lazy=false,
             bound_violation=:throw)
-        marked_trace, marked_stats = pdmp_sample(ξ, flow, marked_model, alg,
+        subsampling_trace, subsampling_stats = pdmp_sample(ξ, flow, subsampling_model, alg,
             0.0, 8_000.0; seed=808, progress=false)
         full_trace, _ = pdmp_sample(ξ, flow, full_model, alg,
             0.0, 8_000.0; seed=809, progress=false)
-        @test mean(marked_trace) ≈ mean(full_trace) atol=0.18
-        @test diag(cov(marked_trace)) ≈ diag(cov(full_trace)) atol=0.2
-        @test marked_stats.residual_oracle_calls > 0
-        @test marked_stats.full_gradient_calls == 0
+        @test mean(subsampling_trace) ≈ mean(full_trace) atol=0.18
+        @test diag(cov(subsampling_trace)) ≈ diag(cov(full_trace)) atol=0.2
+        @test subsampling_stats.residual_oracle_calls > 0
+        @test subsampling_stats.full_gradient_calls == 0
     end
 end

@@ -52,7 +52,7 @@ include("dynamics/zigzag.jl")
 include("dynamics/bouncyparticle.jl")
 include("dynamics/boomerang.jl")
 include("dynamics/preconditioned.jl")
-include("dynamics/marked_trajectory_bounds.jl")
+include("dynamics/subsampling_trajectory_bounds.jl")
 
 # Gradient strategies
 # include("gradient_strategies.jl") # This line was moved up
@@ -74,7 +74,7 @@ include("poisson_time_strategies/grid_event_constant.jl")
 include("poisson_time_strategies/grid_event_value_quadratic.jl")
 include("poisson_time_strategies/grid_event_dispatch.jl")
 include("poisson_time_strategies/grid_event_grid.jl")
-include("poisson_time_strategies/marked_gridthinning.jl")
+include("poisson_time_strategies/subsampled_gridthinning.jl")
 include("poisson_time_strategies/positive_variation_gridthinning.jl")
 include("poisson_time_strategies/vector_variation_thinning.jl")
 include("poisson_time_strategies/thinning.jl")
@@ -150,7 +150,7 @@ export
     LogDensity,
     # Gradient strategies
     FullGradient,
-    MarkedControlVariate,
+    SubsampledControlVariate,
     SeparableResidualEnvelope,
     TrajectoryResidualEnvelope,
     DampedHCVResidualEnvelope,

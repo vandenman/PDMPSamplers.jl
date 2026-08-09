@@ -1,4 +1,4 @@
-# Likelihood-agnostic trajectory geometry for marked residual envelopes.
+# Likelihood-agnostic trajectory geometry for subsampling residual envelopes.
 
 function _linear_displacement(state, anchor, t)
     value = zero(promote_type(eltype(state.ξ.x), eltype(anchor), typeof(t)))
@@ -79,7 +79,7 @@ trajectory_displacement_bound(flow::AnyBoomerang, state, anchor, t) =
 trajectory_displacement_bound(flow::PreconditionedDynamics, state, anchor, t) =
     trajectory_displacement_bound(flow.dynamics, state, anchor, t)
 trajectory_displacement_bound(flow::ContinuousDynamics, state, anchor, t) =
-    throw(ArgumentError("no marked trajectory geometry for $(typeof(flow))"))
+    throw(ArgumentError("no subsampling trajectory geometry for $(typeof(flow))"))
 
 trajectory_displacement_cell_bound(::Union{BouncyParticle,ZigZag}, state,
         anchor, left, right) = _linear_displacement_cell(state, anchor, left, right)
@@ -90,7 +90,7 @@ trajectory_displacement_cell_bound(flow::PreconditionedDynamics, state,
             flow.dynamics, state, anchor, left, right)
 trajectory_displacement_cell_bound(flow::ContinuousDynamics, state,
         anchor, left, right) = throw(ArgumentError(
-            "no marked trajectory geometry for $(typeof(flow))"))
+            "no subsampling trajectory geometry for $(typeof(flow))"))
 
 _linear_rate_dual_bound(::ContinuousDynamics, state) = norm(state.ξ.θ)
 _linear_rate_dual_bound(flow::DensePreconditionedZigZag, state) =
@@ -108,7 +108,7 @@ _residual_rate_dual_bound(flow, ::Union{BouncyParticle,ZigZag}, state, t) =
 _residual_rate_dual_bound(flow, dynamics::AnyBoomerang, state, t) =
     last(_boomerang_geometry(dynamics, state, dynamics.μ, t))
 residual_rate_dual_bound(flow::ContinuousDynamics, state, t) = throw(ArgumentError(
-    "no marked residual-rate geometry for $(typeof(flow))"))
+    "no subsampling residual-rate geometry for $(typeof(flow))"))
 
 residual_rate_dual_cell_bound(flow::Union{BouncyParticle,ZigZag}, state, left, right) =
     _linear_rate_dual_bound(flow, state)
@@ -121,7 +121,7 @@ _residual_rate_dual_cell_bound(flow, ::Union{BouncyParticle,ZigZag}, state, left
 _residual_rate_dual_cell_bound(flow, dynamics::AnyBoomerang, state, left, right) =
     last(_boomerang_geometry_cell(dynamics, state, dynamics.μ, left, right))
 residual_rate_dual_cell_bound(flow::ContinuousDynamics, state, left, right) =
-    throw(ArgumentError("no marked residual-rate geometry for $(typeof(flow))"))
+    throw(ArgumentError("no subsampling residual-rate geometry for $(typeof(flow))"))
 
 trajectory_geometry_bounds(flow::ContinuousDynamics, state, anchor, t) =
     (trajectory_displacement_bound(flow, state, anchor, t),

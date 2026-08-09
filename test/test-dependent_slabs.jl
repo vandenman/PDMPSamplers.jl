@@ -245,19 +245,19 @@ end
         @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
               -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
 
+        structured_design = [1.0 0.0; 0.5 0.5; 0.0 1.0]
         structured = LogLinearGaussianScaleSlab(
-            indices, [1, 3], log.([2.0, 3.0, 4.0]),
-            [1.0 0.0; 0.5 0.5; 0.0 1.0])
+            indices, [1, 3], log.([2.0, 3.0, 4.0]), structured_design)
         structured_out = zeros(length(logscale_x))
         active_prior_grad!(structured, structured_out, logscale_x, logscale_active)
         expected_structured = zeros(length(logscale_x))
         for j in (1, 2)
             beta = logscale_x[indices[j]]
             ell = structured.log_base_scales[j] +
-                dot(structured.logscale_design[j, :], logscale_x[[1, 3]])
+                dot(structured_design[j, :], logscale_x[[1, 3]])
             z = beta^2 * exp(-2ell)
             expected_structured[indices[j]] += beta * exp(-2ell)
-            expected_structured[[1, 3]] .+= structured.logscale_design[j, :] .* (1 - z)
+            expected_structured[[1, 3]] .+= structured_design[j, :] .* (1 - z)
         end
         @test structured_out ≈ expected_structured
         @test conditional_logdensity_zero(structured, logscale_x,
