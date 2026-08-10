@@ -150,35 +150,22 @@ function _sample_time_exact_fallback(rng::Random.AbstractRNG, clock::Union{Cheby
         ))
     end
     clock.diagnostics.fallbacks += 1
+    clock.diagnostics.last_fallback_provider = nameof(typeof(clock.slab_provider))
+    clock.diagnostics.last_fallback_dynamics = nameof(typeof(flow))
     return sample_time(rng, clock.fallback, flow, state, horizon, can_stick)
 end
 
-rate(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::AnyBoomerang, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
+rate(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
     rate(_summed_fallback_clock(clock), flow, state, τ, can_stick)
 
-rate(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::PreconditionedDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
-    rate(_summed_fallback_clock(clock), flow, state, τ, can_stick)
-
-cumulative_hazard(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::AnyBoomerang, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
+cumulative_hazard(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
     cumulative_hazard(_summed_fallback_clock(clock), flow, state, t0, t1, can_stick)
 
-cumulative_hazard(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::PreconditionedDynamics, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
-    cumulative_hazard(_summed_fallback_clock(clock), flow, state, t0, t1, can_stick)
-
-sample_time(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::AnyBoomerang, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
+sample_time(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
     sample_time(rng, _summed_fallback_clock(clock), flow, state, horizon, can_stick)
 
-sample_time(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::PreconditionedDynamics, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
-    sample_time(rng, _summed_fallback_clock(clock), flow, state, horizon, can_stick)
-
-sample_label(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector) =
+sample_label(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, can_stick::BitVector) =
     sample_label(rng, _summed_fallback_clock(clock), flow, state, can_stick)
 
-sample_label(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::PreconditionedDynamics, state::StickyPDMPState, can_stick::BitVector) =
-    sample_label(rng, _summed_fallback_clock(clock), flow, state, can_stick)
-
-sample_label(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::AnyBoomerang, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
-    sample_label(rng, _summed_fallback_clock(clock), flow, state, τ, can_stick)
-
-sample_label(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::PreconditionedDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
+sample_label(rng::Random.AbstractRNG, clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
     sample_label(rng, _summed_fallback_clock(clock), flow, state, τ, can_stick)

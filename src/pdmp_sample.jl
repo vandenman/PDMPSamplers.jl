@@ -147,10 +147,12 @@ function pdmp_sample(
             Threads.@spawn begin
                 rng_i        = _make_chain_rng(seed, i)
                 flow_i        = _copy_flow(flow)
+                alg_i         = _copy_algorithm(alg)
+                adapter_i     = _copy_adapter(adapter)
                 stop_i        = _maybe_copy_criterion(stop)
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup,
-                    false, adapter, stop_i, warmup_stop_i, support_boundary_options, models[i],
+                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
+                    false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
                     statistic_counter)
             end
         end
@@ -159,10 +161,12 @@ function pdmp_sample(
         results = map(1:n_chains) do i
             rng_i        = _make_chain_rng(seed, i)
             flow_i        = _copy_flow(flow)
+            alg_i         = _copy_algorithm(alg)
+            adapter_i     = _copy_adapter(adapter)
             stop_i        = _maybe_copy_criterion(stop)
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg, t₀, T, t_warmup,
-                false, adapter, stop_i, warmup_stop_i, support_boundary_options, models[i],
+            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
+                false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
                 statistic_counter)
         end
     end
@@ -178,6 +182,8 @@ _maybe_copy_criterion(c::StoppingCriterion) = copy(c)
 _copy_flow(flow::ContinuousDynamics) = flow
 _copy_flow(flow::MutableBoomerang) = copy(flow)
 _copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metric), _copy_flow(pd.dynamics))
+_copy_algorithm(alg::PoissonTimeStrategy) = deepcopy(alg)
+_copy_adapter(adapter::AbstractAdapter) = deepcopy(adapter)
 
 initialize_flow_state!(::AbstractPDMPState, ::ContinuousDynamics) = nothing
 
@@ -375,7 +381,7 @@ function _handle_dynamics_adaptation!(
     _inc_counter_grid_resets_from_dynamics_adaptation(stats)
 
     state isa StickyPDMPState && _invalidate_boundary_velocity_cache!(state)
-    alg_ isa Union{StickyLoopState,AggregateStickyLoopState} && update_all_stick_times!(rng, alg_, state, flow)
+    alg_ isa Union{StickyLoopState,AggregateStickyLoopState} && rebuild_sticky_schedule!(rng, alg_, state, flow)
 
     return nothing
 end

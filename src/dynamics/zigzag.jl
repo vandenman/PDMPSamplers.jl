@@ -65,7 +65,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::Real, i::Integer, flow::ZigZag)
     return i
 end
 
-# The canonical freezing_time for ZigZag is defined in
+# The canonical sticking_time for ZigZag is defined in
 # src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.
 
 # actually part of thinning

@@ -173,7 +173,7 @@ reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVecto
 
 
 # 4. Hitting Times (Geometry is invariant)
-freezing_time(ξ::SkeletonPoint, pd::PreconditionedDynamics, i::Integer) = freezing_time(ξ, pd.dynamics, i)
+sticking_time(ξ::SkeletonPoint, pd::PreconditionedDynamics, i::Integer) = sticking_time(ξ, pd.dynamics, i)
 
 """
 Get the refreshment rate for the given continuous dynamics.

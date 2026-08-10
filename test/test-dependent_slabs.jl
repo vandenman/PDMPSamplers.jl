@@ -29,12 +29,104 @@ const unstick_rate_constant = PDMPSamplers.unstick_rate_constant
 struct _AlwaysAdaptedAdapter <: PDMPSamplers.AbstractAdapter end
 PDMPSamplers.did_dynamics_adapt(::_AlwaysAdaptedAdapter) = true
 
+struct _FutureContinuousDynamics <: ContinuousDynamics end
+PDMPSamplers.unstick_rate_constant(::_FutureContinuousDynamics, ::Integer) = 1.0
+function PDMPSamplers.move_forward_time!(state::PDMPSamplers.AbstractPDMPState,
+        τ::Real, ::_FutureContinuousDynamics)
+    state.t[] += τ
+    state.ξ.x .+= τ .* state.ξ.θ
+    return state
+end
+
+struct _DeclaredStickableClock{V} <: PDMPSamplers.AbstractAggregateUnstickClock
+    coordinates::V
+end
+struct _MissingStickableClock <: PDMPSamplers.AbstractAggregateUnstickClock end
+
+Base.copy(clock::_DeclaredStickableClock) = clock
+PDMPSamplers.stickable_coordinates(clock::_DeclaredStickableClock) =
+    clock.coordinates
+PDMPSamplers.sample_time(::Random.AbstractRNG, ::_DeclaredStickableClock,
+    ::ContinuousDynamics, ::StickyPDMPState, ::Real, ::BitVector) = Inf
+PDMPSamplers.sample_label(::Random.AbstractRNG, clock::_DeclaredStickableClock,
+    ::ContinuousDynamics, ::StickyPDMPState, ::BitVector) =
+    first(clock.coordinates)
+
 function _active_prior_grad_alloc(provider, out, x, active)
     return @allocated active_prior_grad!(provider, out, x, active)
 end
 
 function _conditional_logdensity_zero_alloc(provider, x, active, j)
     return @allocated conditional_logdensity_zero(provider, x, active, j)
+end
+
+function _seeded_fourier_sample_allocation(clock, flow, state, horizon,
+        can_stick, seed)
+    rng = MersenneTwister(seed)
+    return @allocated PDMPSamplers.sample_time(
+        rng, clock, flow, state, horizon, can_stick)
+end
+
+function _scalar_root_transformed_oracle(segment, ylo, yhi)
+    return setprecision(BigFloat, 256) do
+        log_width = BigFloat(log(segment.s0) + segment.ell0 +
+            segment.r * (-segment.a / segment.b) - log(abs(segment.b)))
+        q = BigFloat(segment.r) * exp(log_width)
+        prefactor = exp(BigFloat(segment.log_total_weight -
+            log(abs(segment.b)))) / sqrt(2BigFloat(pi))
+        integrand = y -> begin
+            z = y * exp(-q * y)
+            prefactor * exp(-q * y - z^2 / 2)
+        end
+        value, _ = PDMPSamplers.QuadGK.quadgk(
+            integrand, BigFloat(ylo), BigFloat(yhi);
+            rtol=big"1e-40", atol=big"1e-50")
+        Float64(value)
+    end
+end
+
+function _scalar_limiting_profile_oracle(q, ylo=-Inf, yhi=Inf)
+    return setprecision(BigFloat, 256) do
+        qbig = BigFloat(q)
+        integrand = y -> begin
+            z = y * exp(-qbig * y)
+            exp(-qbig * y - z^2 / 2) / sqrt(2BigFloat(pi))
+        end
+        value, _ = PDMPSamplers.QuadGK.quadgk(integrand,
+            BigFloat(ylo), BigFloat(yhi); rtol=big"1e-40", atol=big"1e-50")
+        Float64(value)
+    end
+end
+
+function _boomerang_bigfloat_cell_oracle(segment, root, lo, hi)
+    return setprecision(BigFloat, 256) do
+        root_b = BigFloat(root)
+        lo_b = BigFloat(lo)
+        hi_b = BigFloat(hi)
+        log_width = BigFloat(PDMPSamplers._boomerang_root_log_width(
+            segment, root))
+        width = exp(log_width)
+        ulo = asinh((lo_b - root_b) / width)
+        uhi = asinh((hi_b - root_b) / width)
+        derivative = BigFloat(PDMPSamplers._boomerang_root_derivative(
+            segment, root))
+        c0 = BigFloat(segment.c0)
+        log_prefactor = BigFloat(segment.log_total_weight) + log_width -
+            log(sqrt(2BigFloat(pi)))
+        integrand = u -> begin
+            delta = width * sinh(u)
+            mean_value = 2c0 * sin(delta / 2)^2 + derivative * sin(delta)
+            t = root_b + delta
+            log_scale = BigFloat(segment.log_scale) +
+                BigFloat(segment.log_scale_cos) * cos(t) +
+                BigFloat(segment.log_scale_sin) * sin(t)
+            z = mean_value * exp(-log_scale)
+            exp(log_prefactor - log_scale - z^2 / 2) * cosh(u)
+        end
+        value, _ = PDMPSamplers.QuadGK.quadgk(integrand, ulo, uhi;
+            rtol=big"1e-35", atol=big"1e-45")
+        return value
+    end
 end
 
 function _linear_gaussian_rate_oracle(provider, odds, flow, state, τ, can_stick)
@@ -860,6 +952,790 @@ end
         end
     end
 
+    @testset "Extreme global-logscale boundary rates stay in the extended reals" begin
+        prior = BernoulliModelPrior([0.5])
+        can_stick = BitVector([true, false])
+        state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0], [0.0, 0.0]),
+            falses(2),
+        )
+        active_beta = BitVector([false])
+
+        for offset in (-1000.0, 1000.0), conditional_mean in (0.0, 1.0)
+            provider = GlobalLogscaleExchangeableGaussianSlab(
+                1:1, 2, 1.0, 0.0;
+                mean=conditional_mean, logscale_offset=offset)
+            logdensity = conditional_logdensity_zero(
+                provider, state.ξ.x, active_beta, 1)
+            @test !isnan(logdensity)
+            for inclusion_probability in (0.0, 1.0)
+                endpoint_weights = fill(NaN, 1)
+                boundary_logweights!(endpoint_weights, provider,
+                    BernoulliModelPrior([inclusion_probability]), state.ξ.x,
+                    active_beta, BitVector([true]))
+                @test !isnan(only(endpoint_weights))
+            end
+
+            for flow in (ZigZag(2), BouncyParticle(2))
+                clock = PDMPSamplers.ChebyshevResidualAggregateClock(
+                    provider, prior; order=8, max_cells=8,
+                    residual_budget=0.0, allow_slow_fallback=false)
+                segment = scalar_logscale_gaussian_line_segment(
+                    provider, prior, flow, state, can_stick, 1.0)
+                direct_rate = PDMPSamplers._scalar_logscale_gaussian_line_rate(
+                    segment, 0.0)
+                direct_upper = PDMPSamplers._scalar_logscale_gaussian_line_upper(
+                    segment, 0.0, 1.0)
+                @test !isnan(direct_rate)
+                @test !isnan(direct_upper)
+                @test direct_upper >= direct_rate
+                @test !isnan(PDMPSamplers.rate(
+                    clock, flow, state, 0.0, can_stick))
+                for horizon in (1.0, Inf)
+                    sampled = PDMPSamplers.sample_time(MersenneTwister(701),
+                        clock, flow, state, horizon, can_stick)
+                    @test !isnan(sampled)
+                    if offset < 0 && iszero(conditional_mean)
+                        @test sampled == 0.0
+                    else
+                        @test sampled == Inf
+                    end
+                end
+            end
+
+            flow = Boomerang(2)
+            clock = PDMPSamplers.FourierResidualAggregateClock(
+                provider, prior; order=8, cells=8,
+                residual_budget=0.0, allow_slow_fallback=true)
+            direct_rate = PDMPSamplers._residual_target_rate(
+                clock, flow, state, can_stick, 0.0)
+            direct_upper = PDMPSamplers.boundary_rate_upper(
+                clock, flow, state, can_stick, 0.0, 1.0)
+            @test !isnan(direct_rate)
+            @test !isnan(direct_upper)
+            @test direct_upper >= direct_rate
+            for horizon in (1.0, Inf)
+                sampled = PDMPSamplers.sample_time(MersenneTwister(702),
+                    clock, flow, state, horizon, can_stick)
+                @test !isnan(sampled)
+                if offset < 0 && iszero(conditional_mean)
+                    @test sampled == 0.0
+                else
+                    @test sampled == Inf
+                end
+            end
+        end
+    end
+
+    @testset "Extreme moving-mean global-logscale hazards" begin
+        prior = BernoulliModelPrior([0.5, 0.5])
+        can_stick = BitVector([true, true, false])
+        crossing_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+            BitVector([true, false, true]),
+        )
+        for offset in (-1000.0, 1000.0), flow in (ZigZag(3), BouncyParticle(3))
+            provider = GlobalLogscaleExchangeableGaussianSlab(
+                1:2, 3, 1.0, 1.0; mean=0.0, logscale_offset=offset)
+            clock = ChebyshevResidualAggregateClock(provider, prior;
+                order=8, max_cells=8, residual_budget=0.0,
+                allow_slow_fallback=false)
+            segment = scalar_logscale_gaussian_line_segment(
+                provider, prior, flow, crossing_state, can_stick, Inf)
+            hazards = [PDMPSamplers._scalar_logscale_gaussian_line_cumulative_hazard(
+                segment, T) for T in (0.5, 1.0, 2.0)]
+            @test all(isfinite, hazards)
+            @test issorted(hazards)
+            @test hazards[1] == 0.0
+            if offset < 0
+                oracle_mass = exp(segment.log_total_weight) / abs(segment.b)
+                @test hazards[2] ≈ 0.5oracle_mass rtol=1e-14
+                @test hazards[3] ≈ oracle_mass rtol=1e-14
+                @test PDMPSamplers.sample_time(MersenneTwister(1), clock,
+                    flow, crossing_state, 2.0, can_stick) == 1.0
+                @test PDMPSamplers.sample_time(MersenneTwister(1), clock,
+                    flow, crossing_state, Inf, can_stick) == 1.0
+            else
+                @test hazards == zeros(3)
+                @test PDMPSamplers.sample_time(MersenneTwister(1), clock,
+                    flow, crossing_state, 2.0, can_stick) == Inf
+                @test PDMPSamplers.sample_time(MersenneTwister(1), clock,
+                    flow, crossing_state, Inf, can_stick) == Inf
+            end
+            @test PDMPSamplers.sample_time(MersenneTwister(1), clock,
+                flow, crossing_state, 0.5, can_stick) == Inf
+        end
+
+
+        moving_scale_state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([-2.0, 0.0, 0.0], [2.0, 0.0, 0.5]),
+            BitVector([true, false, true]),
+        )
+        moving_provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:2, 3, 1.0, 1.0; mean=0.0, logscale_offset=-1000.0)
+        for flow in (ZigZag(3), BouncyParticle(3))
+            moving_clock = ChebyshevResidualAggregateClock(
+                moving_provider, prior; order=8, max_cells=8,
+                residual_budget=0.0, allow_slow_fallback=false)
+            moving_segment = scalar_logscale_gaussian_line_segment(
+                moving_provider, prior, flow, moving_scale_state,
+                can_stick, 2.0)
+            @test PDMPSamplers._scalar_unresolved_peak(moving_segment) !== nothing
+            moving_hazards = [PDMPSamplers._scalar_logscale_gaussian_line_cumulative_hazard(
+                moving_segment, T) for T in (0.5, 1.0, 2.0)]
+            @test all(isfinite, moving_hazards)
+            @test issorted(moving_hazards)
+            @test moving_hazards[1] == 0.0
+            @test moving_hazards[2] ≈ 0.5moving_hazards[3] rtol=1e-14
+            @test PDMPSamplers.sample_time(MersenneTwister(1), moving_clock,
+                flow, moving_scale_state, 2.0, can_stick) == 1.0
+            available = PDMPSamplers._scalar_logscale_gaussian_line_available_hazard(
+                moving_segment)
+            @test isfinite(available)
+            @test available >= moving_hazards[end]
+            @test PDMPSamplers.sample_time(MersenneTwister(1), moving_clock,
+                flow, moving_scale_state, Inf, can_stick) == 1.0
+        end
+
+        for offset in (-20.0, -30.0, -1000.0),
+                logscale_velocity in (-1.0, 1.0),
+                flow in (ZigZag(3), BouncyParticle(3))
+            provider = GlobalLogscaleExchangeableGaussianSlab(
+                1:2, 3, 1.0, 1.0; mean=0.0,
+                logscale_offset=offset)
+            state = StickyPDMPState(
+                Ref(0.0),
+                SkeletonPoint([-2.0, 0.0, 0.0],
+                    [2.0, 0.0, logscale_velocity]),
+                BitVector([true, false, true]),
+            )
+            segment = scalar_logscale_gaussian_line_segment(
+                provider, prior, flow, state, can_stick, 2.0)
+            clock = ChebyshevResidualAggregateClock(provider, prior;
+                order=8, max_cells=8, residual_budget=0.0,
+                allow_slow_fallback=false)
+            resolved = PDMPSamplers._scalar_peak_window(segment)
+            unresolved = PDMPSamplers._scalar_unresolved_peak(segment)
+            @test (resolved === nothing) != (unresolved === nothing)
+            hazards = [PDMPSamplers._scalar_logscale_gaussian_line_cumulative_hazard(
+                segment, T) for T in (0.5, 1.0, 2.0)]
+            oracle_mass = exp(segment.log_total_weight) / abs(segment.b)
+            oracle_half = _scalar_root_transformed_oracle(
+                segment, -20.0, 0.0)
+            oracle_full = _scalar_root_transformed_oracle(
+                segment, -20.0, 20.0)
+            @test hazards[1] == 0.0
+            @test hazards[2] ≈ oracle_half rtol=1e-10
+            @test hazards[3] ≈ oracle_full rtol=1e-10
+            @test oracle_full ≈ oracle_mass rtol=1e-8
+            @test issorted(hazards)
+            @test all(isfinite, hazards)
+            @test PDMPSamplers.sample_time(MersenneTwister(1), clock,
+                flow, state, 0.5, can_stick) == Inf
+            finite_event = PDMPSamplers.sample_time(MersenneTwister(1),
+                clock, flow, state, 2.0, can_stick)
+            infinite_event = PDMPSamplers.sample_time(MersenneTwister(1),
+                clock, flow, state, Inf, can_stick)
+            tolerance = resolved === nothing ? eps(1.0) :
+                20resolved.width
+            @test abs(finite_event - 1.0) <= tolerance
+            @test abs(infinite_event - 1.0) <= tolerance
+        end
+
+        provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:2, 3, 1.0, 1.0; mean=0.0, logscale_offset=-1000.0)
+        flow = Boomerang(3)
+        clock = FourierResidualAggregateClock(provider, prior;
+            order=8, cells=8, residual_budget=0.0,
+            allow_slow_fallback=false)
+        peak = PDMPSamplers._boomerang_narrow_peak_segment(
+            clock, flow, crossing_state, can_stick)
+        @test peak !== nothing
+        roots = PDMPSamplers._boomerang_peak_roots(peak)
+        @test first(roots) ≈ π / 4
+        hazards = [PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            peak, T) for T in (0.5, π / 4, 1.0, 2.0)]
+        @test all(isfinite, hazards)
+        @test issorted(hazards)
+        @test hazards[1] == 0.0
+        @test hazards[2] ≈ 0.5hazards[3] rtol=1e-14
+        @test hazards[3] == hazards[4]
+        env, evaluations = PDMPSamplers.build_residual_envelope(
+            clock, flow, crossing_state, 2.0, can_stick)
+        @test evaluations == 0
+        @test env.Hbar_horizon == hazards[end]
+        @test issorted([PDMPSamplers._envelope_hazard(env, T)
+            for T in range(0.0, 2.0; length=33)])
+        @test !isnan(PDMPSamplers._residual_target_rate(
+            clock, flow, crossing_state, can_stick, π / 4))
+        @test PDMPSamplers.boundary_rate_upper(
+            clock, flow, crossing_state, can_stick, 0.5, 1.0) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(8), clock, flow,
+            crossing_state, 0.5, can_stick) == Inf
+        @test PDMPSamplers.sample_time(MersenneTwister(8), clock, flow,
+            crossing_state, 2.0, can_stick) ≈ π / 4
+        @test PDMPSamplers.sample_time(MersenneTwister(8), clock, flow,
+            crossing_state, Inf, can_stick) ≈ π / 4
+    end
+
+    @testset "Unresolved scalar peaks retain scale variation" begin
+        for q in (0.0, -0.1, 0.1, -1.0, 1.0)
+            segment = PDMPSamplers.ScalarLogscaleGaussianLineSegment(
+                -1e16, 1.0, 1.0, -q * 1e16, q, 0.0, Inf)
+            peak = PDMPSamplers._scalar_unresolved_peak(segment)
+            @test peak !== nothing
+            oracle = _scalar_limiting_profile_oracle(q)
+            @test peak.mass ≈ oracle rtol=2e-11
+            @test PDMPSamplers._scalar_logscale_gaussian_line_available_hazard(
+                segment) ≈ oracle rtol=2e-11
+            if q == 0.1
+                profile_limit = PDMPSamplers._scalar_root_profile_limit(
+                    segment, peak.log_width)
+                old_bracket_hazard = PDMPSamplers._scalar_root_profile_integral(
+                    segment, peak.log_width, -profile_limit, 40.0)
+                @test old_bracket_hazard < peak.mass
+                tail_seed = findfirst(1:10_000) do seed
+                    threshold = rand(MersenneTwister(seed), Exponential())
+                    old_bracket_hazard < threshold < peak.mass
+                end
+                @test tail_seed !== nothing
+                @test isfinite(PDMPSamplers._sample_scalar_unresolved_peak(
+                    MersenneTwister(tail_seed), segment, Inf))
+            end
+            for horizon in (2e16, Inf)
+                rng = MersenneTwister(1)
+                threshold = rand(MersenneTwister(1), Exponential())
+                event_time = PDMPSamplers._sample_scalar_unresolved_peak(
+                    rng, segment, horizon)
+                @test isfinite(event_time)
+                @test event_time <= horizon
+                lower = PDMPSamplers._scalar_logscale_gaussian_line_cumulative_hazard(
+                    segment, prevfloat(event_time))
+                upper = PDMPSamplers._scalar_logscale_gaussian_line_cumulative_hazard(
+                    segment, nextfloat(event_time))
+                @test lower <= threshold <= upper
+            end
+        end
+
+        for r in (-1.0, 1.0)
+            segment = PDMPSamplers.ScalarLogscaleGaussianLineSegment(
+                -1.0, 1.0, 1.0, -1000.0, r, 0.0, Inf)
+            peak = PDMPSamplers._scalar_unresolved_peak(segment)
+            @test peak !== nothing
+            @test peak.mass ≈ 1.0 rtol=1e-14
+            @test PDMPSamplers._sample_scalar_unresolved_peak(
+                MersenneTwister(1), segment, 2.0) == 1.0
+            @test PDMPSamplers._sample_scalar_unresolved_peak(
+                MersenneTwister(1), segment, Inf) == 1.0
+        end
+    end
+
+    @testset "Boomerang transverse, tangent, and periodic narrow peaks" begin
+        for logscale_sine in (-1.0, 1.0), offset in (-20.0, -30.0, -1000.0)
+            moving = PDMPSamplers._BoomerangNarrowPeakSegment(
+                0.0, 1.0, 0.0, offset, 0.0, logscale_sine, 0.0)
+            moving_roots = PDMPSamplers._boomerang_peak_roots(moving)
+            @test length(moving_roots) == 2
+            moving_hazards = [
+                PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    moving, T) for T in range(0.0, 2π; length=33)]
+            @test issorted(moving_hazards)
+            # Each transverse root has limiting mass weight/|m'(root)| = 1.
+            @test moving_hazards[end] ≈ 2.0 rtol=2e-10
+            for horizon in (2π, Inf)
+                threshold = rand(MersenneTwister(1), Exponential())
+                event_time = PDMPSamplers._sample_boomerang_narrow_peak(
+                    MersenneTwister(1), moving, horizon)
+                @test isfinite(event_time)
+                lower = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    moving, prevfloat(event_time))
+                upper = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    moving, nextfloat(event_time))
+                @test lower <= threshold <= upper
+            end
+        end
+
+        transverse = PDMPSamplers._BoomerangNarrowPeakSegment(
+            0.0, 1.0, 0.0, log(1e-8), 0.0)
+        H_transverse = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            transverse, 2π)
+        @test H_transverse ≈ 2.0 rtol=1e-12
+
+        δ = eps(Float64)
+        near_tangent = PDMPSamplers._BoomerangNarrowPeakSegment(
+            -1.0 + δ, 1.0, 0.0, log(1e-16), log(sqrt(2 / π)))
+        near_roots = PDMPSamplers._boomerang_peak_roots(near_tangent)
+        @test length(near_roots) == 2
+        @test near_roots[2] - near_roots[1] > 2π - 1e-6
+        @test !PDMPSamplers._boomerang_all_roots_use_delta(
+            near_tangent, near_roots)
+        H_near = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            near_tangent, 2π)
+        near_oracle = 8.4201005e7
+        @test H_near ≈ near_oracle rtol=1e-8
+
+        tangent = PDMPSamplers._BoomerangNarrowPeakSegment(
+            -1.0, 1.0, 0.0, log(1e-16), 0.0)
+        tangent_roots = PDMPSamplers._boomerang_peak_roots(tangent)
+        @test tangent_roots == [0.0]
+        @test isfinite(PDMPSamplers._boomerang_peak_mass(tangent, 0.0))
+        H_tangent = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            tangent, 2π)
+        tangent_oracle = 1.2162802142575204e8
+        @test H_tangent ≈ tangent_oracle rtol=1e-8
+
+        moving_tangent = PDMPSamplers._BoomerangNarrowPeakSegment(
+            -1.0, 1.0, 0.0, log(1e-16) - 0.5, 0.5, 0.0, 0.0)
+        @test PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            moving_tangent, 2π) ≈ tangent_oracle rtol=1e-8
+
+        for segment in (transverse, near_tangent, tangent)
+            threshold = rand(MersenneTwister(1), Exponential())
+            event_time = PDMPSamplers._sample_boomerang_narrow_peak(
+                MersenneTwister(1), segment, 2π)
+            @test 0.0 <= event_time <= 2π
+            event_hazard = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                segment, event_time)
+            @test event_hazard ≈ threshold rtol=2e-8 atol=1e-9
+        end
+
+        for mass in (1e-20, 1e-100, 1e-300)
+            segment = PDMPSamplers._BoomerangNarrowPeakSegment(
+                0.0, 1.0, 0.0, -1000.0, log(mass))
+            event_time = PDMPSamplers._sample_boomerang_narrow_peak(
+                MersenneTwister(1), segment, Inf)
+            @test isfinite(event_time)
+            threshold = rand(MersenneTwister(1), Exponential())
+            @test PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                segment, event_time) ≈ threshold rtol=1e-14
+        end
+
+        tiny = PDMPSamplers._BoomerangNarrowPeakSegment(
+            0.0, 1.0, 0.0, -1000.0, log(1e-300))
+        huge_horizon = (Float64(typemax(Int)) + 1.0) * (2π)
+        huge_hazard = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            tiny, huge_horizon)
+        @test huge_hazard ≈ 2e-300 * floor(huge_horizon / (2π))
+        @test isfinite(huge_hazard)
+
+        public_provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:2, 3, 1.0, 1.0; mean=-2.0 + 2δ,
+            logscale_offset=log(1e-16 / sqrt(1.5)))
+        public_prior = BernoulliModelPrior([0.5, 0.5])
+        public_flow = Boomerang(3)
+        public_state = StickyPDMPState(
+            Ref(0.0), SkeletonPoint([2.0, 0.0, 0.0], zeros(3)),
+            BitVector([true, false, true]))
+        public_mask = BitVector([true, true, false])
+        public_clock = FourierResidualAggregateClock(public_provider,
+            public_prior; allow_slow_fallback=false)
+        public_peak = PDMPSamplers._boomerang_narrow_peak_segment(
+            public_clock, public_flow, public_state, public_mask)
+        @test public_peak !== nothing
+        @test PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            public_peak, 2π) ≈ near_oracle rtol=1e-8
+
+        for velocity in (-1.0, 1.0), offset in (-20.0, -1000.0)
+            moving_provider = GlobalLogscaleExchangeableGaussianSlab(
+                1:2, 3, 1.0, 1.0; mean=0.0,
+                logscale_offset=offset)
+            moving_clock = FourierResidualAggregateClock(moving_provider,
+                public_prior; allow_slow_fallback=false)
+            moving_state = StickyPDMPState(Ref(0.0),
+                SkeletonPoint([-2.0, 0.0, 0.0], [2.0, 0.0, velocity]),
+                BitVector([true, false, true]))
+            peak = PDMPSamplers._boomerang_narrow_peak_segment(
+                moving_clock, public_flow, moving_state, public_mask)
+            @test peak !== nothing
+            @test peak.log_scale_sin == velocity
+            envelope, _ = PDMPSamplers.build_residual_envelope(
+                moving_clock, public_flow, moving_state, 2π, public_mask)
+            @test isfinite(envelope.Hbar_horizon)
+            @test envelope.Hbar_horizon ≈ 2 / sqrt(π) rtol=2e-10
+            PDMPSamplers.sample_time(MersenneTwister(1), moving_clock,
+                public_flow, moving_state, 2π, public_mask)
+            allocation = @allocated PDMPSamplers.sample_time(
+                MersenneTwister(1), moving_clock, public_flow,
+                moving_state, 2π, public_mask)
+            @test allocation < 200_000
+        end
+    end
+
+    @testset "Large finite transformed Boomerang peaks use log quadrature" begin
+        tiny = nextfloat(0.0)
+        provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:2, 3, 1.0, 1.0; mean=0.0, logscale_offset=-10.0)
+        flow = Boomerang(3)
+        state = StickyPDMPState(Ref(0.0),
+            SkeletonPoint([-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+            BitVector([true, false, true]))
+        can_stick = BitVector([true, true, false])
+
+        for log_weight_scale in (680.0, 709.0, -log(tiny))
+            prior = ExchangeableModelSizePrior(
+                [-log_weight_scale, -log_weight_scale, 0.0]; normalize=true)
+            clock = FourierResidualAggregateClock(provider, prior;
+                allow_slow_fallback=false)
+            peak = PDMPSamplers._boomerang_narrow_peak_segment(
+                clock, flow, state, can_stick)
+            roots = PDMPSamplers._boomerang_peak_roots(peak)
+            @test isfinite(peak.log_total_weight)
+            @test !PDMPSamplers._boomerang_all_roots_use_delta(peak, roots)
+            @test PDMPSamplers.rate(clock, flow, state, 0.0,
+                can_stick) == 0.0
+            threshold = rand(Xoshiro(1), Exponential())
+            event_time = PDMPSamplers.sample_time(Xoshiro(1), clock, flow,
+                state, Inf, can_stick)
+            @test 0.0 < event_time < first(roots)
+            lower = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                peak, prevfloat(event_time))
+            upper = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                peak, nextfloat(event_time))
+            @test lower <= threshold <= upper
+            @test PDMPSamplers.sample_time(Xoshiro(1), clock, flow, state,
+                prevfloat(event_time), can_stick) == Inf
+            finite_event = PDMPSamplers.sample_time(Xoshiro(1), clock, flow,
+                state, nextfloat(event_time), can_stick)
+            @test isfinite(finite_event)
+            @test finite_event <= nextfloat(event_time)
+            hazards = [PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                peak, t) for t in range(0.0, first(roots); length=17)]
+            @test issorted(hazards)
+
+            if log_weight_scale == -log(tiny)
+                oracle = _boomerang_bigfloat_cell_oracle(
+                    peak, first(roots), 0.0, event_time)
+                @test BigFloat(lower) <= BigFloat(threshold) <= BigFloat(upper)
+                @test BigFloat(PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    peak, event_time)) ≈ oracle rtol=big"2e-9"
+            end
+        end
+
+        # The public near-tangent configuration remains on the transformed
+        # path and is sampled by the same complete-cell quadrature.
+        delta = eps(Float64)
+        near_provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:2, 3, 1.0, 1.0; mean=-2.0 + 2delta,
+            logscale_offset=log(1e-16 / sqrt(1.5)))
+        near_clock = FourierResidualAggregateClock(near_provider,
+            BernoulliModelPrior([0.5, 0.5]); allow_slow_fallback=false)
+        near_state = StickyPDMPState(Ref(0.0),
+            SkeletonPoint([2.0, 0.0, 0.0], zeros(3)),
+            BitVector([true, false, true]))
+        near_peak = PDMPSamplers._boomerang_narrow_peak_segment(
+            near_clock, flow, near_state, can_stick)
+        @test !PDMPSamplers._boomerang_all_roots_use_delta(
+            near_peak, PDMPSamplers._boomerang_peak_roots(near_peak))
+        @test isfinite(PDMPSamplers.sample_time(Xoshiro(1), near_clock,
+            flow, near_state, Inf, can_stick))
+    end
+
+    @testset "Mixed transformed and delta Boomerang roots" begin
+        flow = Boomerang(3)
+        can_stick = BitVector([true, true, false])
+        prior = BernoulliModelPrior([0.5, 0.5])
+        first_root = Float64(π / 4)
+
+        function mixed_fixture(logscale_cosine)
+            offset = -10.0 - abs(logscale_cosine) * cos(first_root)
+            provider = GlobalLogscaleExchangeableGaussianSlab(
+                1:2, 3, 1.0, 1.0; mean=0.0,
+                logscale_offset=offset)
+            state = StickyPDMPState(Ref(0.0),
+                SkeletonPoint([-2.0, 0.0, logscale_cosine],
+                    [2.0, 0.0, 0.0]),
+                BitVector([true, false, true]))
+            clock = FourierResidualAggregateClock(provider, prior;
+                allow_slow_fallback=false)
+            peak = PDMPSamplers._boomerang_narrow_peak_segment(
+                clock, flow, state, can_stick)
+            roots = PDMPSamplers._boomerang_peak_roots(peak)
+            modes = [PDMPSamplers._boomerang_root_uses_delta(
+                peak, roots, i) for i in eachindex(roots)]
+            return clock, state, peak, roots, modes
+        end
+
+        for coefficient in (-1000.0, -500.0, -100.0,
+                100.0, 500.0, 1000.0)
+            clock, state, peak, roots, modes = mixed_fixture(coefficient)
+            @test roots ≈ [π / 4, 5π / 4]
+            @test modes == (coefficient < 0 ? [true, false] :
+                [false, true])
+
+            transformed_index = findfirst(!, modes)
+            delta_index = findfirst(identity, modes)
+            transformed_root = roots[transformed_index]
+            delta_root = roots[delta_index]
+            previous = transformed_index == 1 ? roots[end] - 2π :
+                roots[transformed_index - 1]
+            following = transformed_index == length(roots) ?
+                roots[1] + 2π : roots[transformed_index + 1]
+            cell_lo = 0.5(previous + transformed_root)
+            cell_hi = 0.5(transformed_root + following)
+            transformed_mass = PDMPSamplers._boomerang_transformed_cell_hazard(
+                peak, transformed_root, cell_lo, cell_hi)
+            oracle = _boomerang_bigfloat_cell_oracle(
+                peak, transformed_root, cell_lo, cell_hi)
+            @test BigFloat(transformed_mass) ≈ oracle rtol=big"2e-9"
+
+            # Pick an explicit target on the leading continuous flank.
+            flank_lo = max(0.0, cell_lo)
+            H_flank_lo = PDMPSamplers._boomerang_partial_transformed_hazard(
+                peak, roots, flank_lo)
+            H_flank_hi = PDMPSamplers._boomerang_partial_transformed_hazard(
+                peak, roots, prevfloat(transformed_root))
+            flank_threshold = 0.5(H_flank_lo + H_flank_hi)
+            flank_event = PDMPSamplers._boomerang_mixed_phase_event(
+                peak, roots, flank_threshold, 2π)
+            @test flank_lo < flank_event < transformed_root
+
+            # The atomic root jumps at the root itself, never at its cell edge.
+            H_before = PDMPSamplers._boomerang_partial_transformed_hazard(
+                peak, roots, prevfloat(delta_root))
+            H_at = PDMPSamplers._boomerang_partial_transformed_hazard(
+                peak, roots, delta_root)
+            H_after = PDMPSamplers._boomerang_partial_transformed_hazard(
+                peak, roots, nextfloat(delta_root))
+            delta_mass = PDMPSamplers._boomerang_peak_mass(peak, delta_root)
+            @test H_at - H_before ≈ 0.5delta_mass rtol=1e-12
+            @test H_after - H_at ≈ 0.5delta_mass rtol=1e-12
+            atomic_threshold = H_before + 0.25delta_mass
+            @test PDMPSamplers._boomerang_mixed_phase_event(
+                peak, roots, atomic_threshold, 2π) == delta_root
+
+            seed_lower = findfirst(1:10_000) do seed
+                H_before < rand(Xoshiro(seed), Exponential()) < H_at
+            end
+            seed_upper = findfirst(1:10_000) do seed
+                H_at < rand(Xoshiro(seed), Exponential()) < H_after
+            end
+            @test seed_lower !== nothing
+            @test seed_upper !== nothing
+            @test PDMPSamplers.sample_time(Xoshiro(seed_lower), clock,
+                flow, state, prevfloat(delta_root), can_stick) == Inf
+            @test PDMPSamplers.sample_time(Xoshiro(seed_lower), clock,
+                flow, state, delta_root, can_stick) == delta_root
+            @test PDMPSamplers.sample_time(Xoshiro(seed_upper), clock,
+                flow, state, delta_root, can_stick) == Inf
+            @test PDMPSamplers.sample_time(Xoshiro(seed_upper), clock,
+                flow, state, nextfloat(delta_root), can_stick) == delta_root
+
+            period_hazard = PDMPSamplers._boomerang_partial_transformed_hazard(
+                peak, roots, 2π)
+            later_threshold = period_hazard + flank_threshold
+            later_event = 2π + flank_event
+            lower = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                peak, prevfloat(later_event))
+            upper = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                peak, nextfloat(later_event))
+            @test lower <= later_threshold <= upper
+
+            times = sort!(unique!(vcat(collect(range(0.0, 2π; length=65)),
+                [prevfloat(root) for root in roots], roots,
+                [nextfloat(root) for root in roots])))
+            hazards = [PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                peak, time) for time in times]
+            @test all(diff(hazards) .>=
+                -1e-12 * max(1.0, maximum(hazards)))
+
+            for seed in (1, 30, 80)
+                threshold = rand(Xoshiro(seed), Exponential())
+                event = PDMPSamplers.sample_time(Xoshiro(seed), clock,
+                    flow, state, Inf, can_stick)
+                @test event != 0.5(roots[1] + roots[2])
+                @test PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    peak, prevfloat(event)) <= threshold <=
+                    PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                        peak, nextfloat(event))
+            end
+        end
+
+        # Exact public reproducer: seed 30 belongs to the second, atomic peak.
+        clock, state, peak, roots, modes = mixed_fixture(1000.0)
+        @test modes == [false, true]
+        @test PDMPSamplers.sample_time(Xoshiro(30), clock, flow, state,
+            Inf, can_stick) == roots[2]
+
+        # The inverse asinh map must retain subnormal, nonzero displacements.
+        smallest = nextfloat(0.0)
+        @test PDMPSamplers._boomerang_delta_from_asinh_coordinate(
+            asinh(1.0), log(smallest)) == smallest
+    end
+
+    @testset "Tiny Boomerang period masses use stable inverse arithmetic" begin
+        function tiny_period_fixture(probability; transformed::Bool)
+            if transformed
+                delta = eps(Float64)
+                provider = GlobalLogscaleExchangeableGaussianSlab(
+                    1:2, 3, 1.0, 1.0;
+                    mean=-2.0 + 2delta,
+                    logscale_offset=log(1e-16 / sqrt(1.5)))
+                state = StickyPDMPState(Ref(0.0),
+                    SkeletonPoint([2.0, 0.0, 0.0], zeros(3)),
+                    BitVector([true, false, true]))
+            else
+                provider = GlobalLogscaleExchangeableGaussianSlab(
+                    1:2, 3, 1.0, 1.0;
+                    mean=0.0, logscale_offset=-1000.0)
+                state = StickyPDMPState(Ref(0.0),
+                    SkeletonPoint([-2.0, 0.0, 0.0], [2.0, 0.0, 1.0]),
+                    BitVector([true, false, true]))
+            end
+            clock = FourierResidualAggregateClock(provider,
+                BernoulliModelPrior([0.5, probability]);
+                allow_slow_fallback=false)
+            flow = Boomerang(3)
+            can_stick = BitVector([true, true, false])
+            segment = PDMPSamplers._boomerang_narrow_peak_segment(
+                clock, flow, state, can_stick)
+            roots = PDMPSamplers._boomerang_peak_roots(segment)
+            return clock, flow, state, can_stick, segment, roots
+        end
+
+        cases = ((false, 1e-20), (false, 1e-100), (false, 1e-300),
+            (true, 3e-28), (true, 3e-108), (true, 3e-308))
+        for (transformed, probability) in cases
+            clock, flow, state, can_stick, segment, roots =
+                tiny_period_fixture(probability; transformed)
+            uses_delta = PDMPSamplers._boomerang_all_roots_use_delta(
+                segment, roots)
+            @test uses_delta == !transformed
+            period_hazard = uses_delta ?
+                sum(root -> PDMPSamplers._boomerang_peak_mass(
+                    segment, root), roots) :
+                PDMPSamplers._boomerang_partial_transformed_hazard(
+                    segment, roots, 2π)
+            # Complete-cell integration retains the near-tangent tails that
+            # the former fixed normalized-coordinate cutoff discarded.
+            @test 1e-301 < period_hazard < 3e-20
+            for seed in (1, 43, 80)
+                threshold = rand(Xoshiro(seed), Exponential())
+                event_time = PDMPSamplers.sample_time(Xoshiro(seed), clock,
+                    flow, state, Inf, can_stick)
+                @test isfinite(event_time)
+                lower = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    segment, prevfloat(event_time))
+                upper = PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+                    segment, nextfloat(event_time))
+                @test lower <= threshold <= upper
+                @test PDMPSamplers.sample_time(Xoshiro(seed), clock, flow,
+                    state, prevfloat(event_time), can_stick) == Inf
+                finite_event = PDMPSamplers.sample_time(Xoshiro(seed), clock,
+                    flow, state, nextfloat(event_time), can_stick)
+                @test isfinite(finite_event)
+                @test finite_event <= nextfloat(event_time)
+            end
+        end
+    end
+
+    @testset "Infinite Boomerang model-add odds are immediate" begin
+        provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:2, 3, 1.0, 1.0; mean=0.0, logscale_offset=-1000.0)
+        flow = Boomerang(3)
+        can_stick = BitVector([true, true, false])
+        for logscale_velocity in (0.0, 1.0)
+            state = StickyPDMPState(Ref(0.0),
+                SkeletonPoint([-2.0, 0.0, 0.0],
+                    [2.0, 0.0, logscale_velocity]),
+                BitVector([true, false, true]))
+            for horizon in (2.0, Inf)
+                zero_clock = FourierResidualAggregateClock(provider,
+                    BernoulliModelPrior([0.5, 0.0]);
+                    allow_slow_fallback=false)
+                @test PDMPSamplers.rate(zero_clock, flow, state, 0.0,
+                    can_stick) == 0.0
+                @test PDMPSamplers.sample_time(Xoshiro(1), zero_clock,
+                    flow, state, horizon, can_stick) == Inf
+
+                infinite_clock = FourierResidualAggregateClock(provider,
+                    BernoulliModelPrior([0.5, 1.0]);
+                    allow_slow_fallback=false)
+                @test PDMPSamplers.rate(infinite_clock, flow, state, 0.0,
+                    can_stick) == Inf
+                @test PDMPSamplers.sample_time(Xoshiro(1), infinite_clock,
+                    flow, state, horizon, can_stick) == 0.0
+            end
+        end
+
+        # A finite model weight whose local delta mass overflows is not a
+        # globally infinite rate: sampling waits for the first peak.
+        local_overflow = PDMPSamplers._BoomerangNarrowPeakSegment(
+            0.0, 1.0, 0.0, -1000.0, 710.0)
+        local_roots = PDMPSamplers._boomerang_peak_roots(local_overflow)
+        @test isfinite(local_overflow.log_total_weight)
+        @test isinf(PDMPSamplers._boomerang_peak_mass(
+            local_overflow, first(local_roots)))
+        @test PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            local_overflow, 1.0) == 0.0
+        @test PDMPSamplers._boomerang_narrow_peak_cumulative_hazard(
+            local_overflow, 2.0) == Inf
+        @test PDMPSamplers._sample_boomerang_narrow_peak(
+            Xoshiro(1), local_overflow, Inf) ≈ π / 2
+    end
+
+    @testset "Global-logscale provider validates and stabilizes scalar inputs" begin
+        for (name, value) in ((:mean, NaN), (:mean, Inf),
+                (:logscale_offset, NaN), (:logscale_offset, Inf))
+            kwargs = name === :mean ? (; mean=value) : (; logscale_offset=value)
+            @test_throws ArgumentError GlobalLogscaleExchangeableGaussianSlab(
+                1:1, 2, 1.0, 0.0; kwargs...)
+        end
+        provider = GlobalLogscaleExchangeableGaussianSlab(
+            1:1, 2, 1.0, 0.0; mean=1.0,
+            logscale_offset=-floatmax(Float64))
+        logdensity = conditional_logdensity_zero(provider,
+            [0.0, -floatmax(Float64)], BitVector([false]), 1)
+        @test logdensity == -Inf
+        @test !isnan(logdensity)
+    end
+
+    @testset "Default global-logscale clocks preserve exact fallback" begin
+        provider = GlobalLogscaleExchangeableGaussianSlab(1:1, 2, 1.0, 0.0)
+        prior = BernoulliModelPrior([0.5])
+        can_stick = BitVector([true, false])
+        model = PDMPModel(2,
+            FullGradient((out, x) -> (fill!(out, 0.0); out)), nothing)
+        initial = SkeletonPoint([0.0, 0.0], [0.0, 0.0])
+
+        for flow in (Boomerang(2), AdaptiveBoomerang(2))
+            clock = default_aggregate_unstick_clock(provider, prior, flow)
+            @test clock isa FourierResidualAggregateClock
+            @test clock.allow_slow_fallback
+            alg = AggregateSticky(GridThinningStrategy(), clock, can_stick)
+            _, _, internal, _, _ = PDMPSamplers.initialize_state(
+                MersenneTwister(1), flow, model, alg, 0.0, initial)
+            @test isfinite(internal.aggregate_unstick_time)
+            @test thinning_diagnostics(internal.clock).fallbacks == 1
+        end
+
+        no_flow_clock = default_aggregate_unstick_clock(provider, prior)
+        @test no_flow_clock isa ChebyshevResidualAggregateClock
+        @test no_flow_clock.allow_slow_fallback
+        no_flow_alg = AggregateSticky(
+            GridThinningStrategy(), no_flow_clock, can_stick)
+        _, _, no_flow_internal, _, _ = PDMPSamplers.initialize_state(
+            MersenneTwister(1), Boomerang(2), model, no_flow_alg, 0.0, initial)
+        @test isfinite(no_flow_internal.aggregate_unstick_time)
+        @test thinning_diagnostics(no_flow_internal.clock).fallbacks == 1
+
+        finite_clock = default_aggregate_unstick_clock(
+            provider, prior, Boomerang(2))
+        finite_state = StickyPDMPState(
+            Ref(0.0), initial, BitVector([false, true]))
+        PDMPSamplers.sample_time(MersenneTwister(2), finite_clock,
+            Boomerang(2), finite_state, 1.0, can_stick)
+        @test thinning_diagnostics(finite_clock).fallbacks == 0
+        @test thinning_diagnostics(finite_clock).rate_evaluations > 0
+
+        strict_clock = FourierResidualAggregateClock(provider, prior;
+            allow_slow_fallback=false)
+        @test_throws ArgumentError PDMPSamplers.sample_time(MersenneTwister(3),
+            strict_clock, Boomerang(2), finite_state, Inf, can_stick)
+    end
+
     @testset "Residual aggregate clocks delegate to exact fallback" begin
         provider = ArbitrarySlabBoundary(1:2;
             active_prior_neggrad! = (out, x, active) -> (fill!(out, 0.0); out),
@@ -883,6 +1759,18 @@ end
             falses(2),
         )
         can_stick = trues(2)
+
+        future_provider = DenseGaussianSlab(zeros(2), Matrix{Float64}(I, 2, 2), 1:2)
+        future_summed = SummedRateClock(future_provider, odds)
+        future_accelerated_clock = LinearGaussianAggregateClock(future_provider, odds)
+        future_flow = _FutureContinuousDynamics()
+        @test PDMPSamplers.rate(future_accelerated_clock, future_flow, state,
+            0.3, can_stick) ≈ PDMPSamplers.rate(future_summed, future_flow,
+            state, 0.3, can_stick)
+        @test PDMPSamplers.sample_time(MersenneTwister(120),
+            future_accelerated_clock, future_flow, state, 0.5, can_stick) ==
+            PDMPSamplers.sample_time(MersenneTwister(120), future_summed,
+                future_flow, state, 0.5, can_stick)
 
         for residual_clock in (cheb, fourier)
             @test PDMPSamplers.rate(residual_clock, flow, state, 0.3, can_stick) ≈
@@ -917,7 +1805,7 @@ end
         scalar_provider = GlobalLogscaleExchangeableGaussianSlab(1:3, 4, 1.1, 0.25; logscale_offset=0.1)
         scalar_odds = BernoulliModelPrior(fill(0.5, 3))
         @test default_aggregate_unstick_clock(scalar_provider, scalar_odds) isa ChebyshevResidualAggregateClock
-        @test !default_aggregate_unstick_clock(scalar_provider, scalar_odds).allow_slow_fallback
+        @test default_aggregate_unstick_clock(scalar_provider, scalar_odds).allow_slow_fallback
         scalar_clock = ChebyshevResidualAggregateClock(scalar_provider, scalar_odds;
             order=10, max_cells=64, residual_budget=1e-3, allow_slow_fallback=false)
         scalar_flow = ZigZag(4)
@@ -927,6 +1815,18 @@ end
             BitVector([true, false, true, true]),
         )
         scalar_can_stick = BitVector([true, true, true, false])
+        scalar_active = BitVector([true, false, true])
+        scalar_mean, scalar_cov = gaussian_slab(scalar_provider,
+            scalar_state.ξ.x)
+        scalar_dense = DenseGaussianSlab(scalar_mean, scalar_cov, 1:3)
+        @test conditional_logdensity_zero(scalar_provider,
+            scalar_state.ξ.x, scalar_active, 2) ≈
+            conditional_logdensity_zero(scalar_dense, scalar_state.ξ.x,
+                scalar_active, 2)
+        extreme_scalar_x = copy(scalar_state.ξ.x)
+        extreme_scalar_x[scalar_provider.logscale_index] = 1e155
+        @test !isnan(conditional_logdensity_zero(scalar_provider,
+            extreme_scalar_x, scalar_active, 2))
         seg = scalar_logscale_gaussian_line_segment(scalar_provider, scalar_odds, scalar_flow, scalar_state, scalar_can_stick, 1.5)
         env = PDMPSamplers._build_scalar_residual_envelope(scalar_clock, seg)
         for cell in env.cells
@@ -1034,6 +1934,8 @@ end
         fourier_diagnostics = PDMPSamplers.thinning_diagnostics(fourier_residual)
         @test fourier_diagnostics.fallbacks == 1
         @test fourier_diagnostics.rate_evaluations == 0
+        @test fourier_diagnostics.last_fallback_provider == nameof(typeof(provider))
+        @test fourier_diagnostics.last_fallback_dynamics == nameof(typeof(flow))
 
         boomerang_provider = DenseGaussianSlab([0.0, 0.1], [1.0 0.25; 0.25 1.4], 1:2)
         boomerang_odds = BernoulliModelPrior(fill(0.5, 2))
@@ -1071,6 +1973,62 @@ end
         @test boomerang_fourier_diagnostics.envelope_hazard > 0
         @test boomerang_fourier_diagnostics.min_envelope >= 0
         @test_throws ArgumentError PDMPSamplers.sample_time(MersenneTwister(25), boomerang_fourier, boomerang_flow, boomerang_state, Inf, boomerang_can_stick)
+
+        # Repeated rescheduling reuses all dimension/order/cell-dependent
+        # Fourier storage and the active-stratum covariance factorization.
+        fourier_workspace = boomerang_fourier.workspace
+        workspace_arrays = (fourier_workspace.coeffs, fourier_workspace.aux_coeffs,
+            fourier_workspace.cells, fourier_workspace.edges, fourier_workspace.prefix,
+            fourier_workspace.boundary.cov_AA, fourier_workspace.boundary.alpha)
+        @test all(a === b for (a, b) in zip(workspace_arrays,
+            (fourier_workspace.coeffs, fourier_workspace.aux_coeffs,
+             fourier_workspace.cells, fourier_workspace.edges,
+             fourier_workspace.prefix, fourier_workspace.boundary.cov_AA,
+             fourier_workspace.boundary.alpha)))
+        @test fourier_workspace.boundary.cache_key == boomerang_state.free
+
+        # Deterministic d=8 rescheduling contract: every measurement recreates
+        # the RNG, so all trials follow the identical proposal path.
+        allocation_d = 8
+        allocation_cov = Matrix{Float64}(I, allocation_d, allocation_d)
+        for i in 1:allocation_d-1
+            allocation_cov[i, i + 1] = 0.12
+            allocation_cov[i + 1, i] = 0.12
+        end
+        allocation_provider = DenseGaussianSlab(
+            collect(range(-0.2, 0.2; length=allocation_d)), allocation_cov,
+            1:allocation_d)
+        allocation_clock = FourierResidualAggregateClock(allocation_provider,
+            BernoulliModelPrior(fill(0.5, allocation_d)); order=8, cells=8,
+            residual_budget=1e-3, allow_slow_fallback=false)
+        allocation_flow = Boomerang(Matrix{Float64}(I, allocation_d,
+            allocation_d), zeros(allocation_d), 0.0)
+        allocation_state = StickyPDMPState(Ref(0.0), SkeletonPoint(
+            [0.25, -0.4, 0.0, 0.3, 0.0, -0.2, 0.0, 0.0],
+            [0.4, -0.3, 0.0, 0.25, 0.0, -0.35, 0.0, 0.0]),
+            BitVector([true, true, false, true, false, true, false, false]))
+        allocation_mask = trues(allocation_d)
+        expected_time = PDMPSamplers.sample_time(MersenneTwister(240),
+            allocation_clock, allocation_flow, allocation_state, 1.2,
+            allocation_mask)
+        @test PDMPSamplers.sample_time(MersenneTwister(240), allocation_clock,
+            allocation_flow, allocation_state, 1.2,
+            allocation_mask) == expected_time
+        allocation_trials = [_seeded_fourier_sample_allocation(
+            allocation_clock, allocation_flow, allocation_state, 1.2,
+            allocation_mask, 240) for _ in 1:3]
+        @test all(==(first(allocation_trials)), allocation_trials)
+        @test first(allocation_trials) <= 5_000
+
+        changed_stratum_state = StickyPDMPState(Ref(0.0),
+            SkeletonPoint([0.2, 0.0], [0.3, 0.0]), BitVector([true, false]))
+        PDMPSamplers._build_fourier_residual_envelope(boomerang_fourier,
+            boomerang_flow, changed_stratum_state, 0.8, boomerang_can_stick)
+        @test fourier_workspace.boundary.cache_key == changed_stratum_state.free
+        @test PDMPSamplers._residual_target_rate(boomerang_fourier,
+            boomerang_flow, changed_stratum_state, boomerang_can_stick, 0.3) ≈
+            PDMPSamplers.rate(boomerang_summed, boomerang_flow,
+                changed_stratum_state, 0.3, boomerang_can_stick)
 
         no_inactive_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.2, 0.45], [0.3, 0.7]), trues(2))
         PDMPSamplers.reset_thinning_diagnostics!(boomerang_fourier)
@@ -1121,6 +2079,119 @@ end
         τ_logscale = PDMPSamplers.sample_time(MersenneTwister(29), logscale_boomerang_clock, logscale_boomerang_flow, logscale_boomerang_state, 1.1, logscale_boomerang_can_stick)
         @test τ_logscale == Inf || 0.0 <= τ_logscale <= 1.1
         @test PDMPSamplers.thinning_diagnostics(logscale_boomerang_clock).fallbacks == 0
+
+        @testset "residual capability selection never leaks internal dispatch" begin
+            callback_provider = CallbackGaussianSlab(1:2;
+                mean_cov! = (mean, cov, x) -> begin
+                    fill!(mean, 0.0)
+                    fill!(cov, 0.0)
+                    cov[1, 1] = exp(0.1x[2])
+                    cov[2, 2] = 1.5
+                end)
+            arbitrary_provider = ArbitrarySlabBoundary(1:2;
+                active_prior_neggrad! = (out, x, active) -> fill!(out, 0.0),
+                log_q_zero! = (x, active, j) -> logpdf(Normal(0, j), 0.0))
+            fallback_state = StickyPDMPState(Ref(0.0),
+                SkeletonPoint([0.0, 0.4], zeros(2)), BitVector([false, true]))
+            fallback_flows = (
+                ZigZag(2),
+                BouncyParticle(2, 0.0),
+                boomerang_flow,
+                AdaptiveBoomerang(2; λref=0.0, scheme=:fullrank),
+                PreconditionedZigZag(2; scale=[0.8, 1.2]),
+                PreconditionedBPS(2; refresh_rate=0.0, scale=[0.8, 1.2]),
+                DensePreconditionedZigZag(2),
+                DensePreconditionedBPS(2; refresh_rate=0.0),
+                PreconditionedDynamics(DiagonalPreconditioner([0.8, 1.2]),
+                    boomerang_flow),
+            )
+
+            for unsupported_provider in (callback_provider, arbitrary_provider)
+                unsupported_odds = BernoulliModelPrior(fill(0.5, 2))
+                summed_clock = SummedRateClock(unsupported_provider,
+                    unsupported_odds)
+                for fallback_flow in fallback_flows, horizon in (0.4, Inf)
+                    fallback_clock = FourierResidualAggregateClock(
+                        unsupported_provider, unsupported_odds; allow_slow_fallback=true)
+                    τ = PDMPSamplers.sample_time(MersenneTwister(401),
+                        fallback_clock, fallback_flow, fallback_state, horizon,
+                        trues(2))
+                    @test τ == PDMPSamplers.sample_time(MersenneTwister(401),
+                        summed_clock, fallback_flow, fallback_state, horizon,
+                        trues(2))
+                    diag = thinning_diagnostics(fallback_clock)
+                    @test diag.fallbacks == 1
+                    @test diag.last_fallback_provider == nameof(typeof(unsupported_provider))
+                    @test diag.last_fallback_dynamics == nameof(typeof(fallback_flow))
+
+                    strict_clock = FourierResidualAggregateClock(
+                        unsupported_provider, unsupported_odds; allow_slow_fallback=false)
+                    err = try
+                        PDMPSamplers.sample_time(MersenneTwister(402), strict_clock,
+                            fallback_flow, fallback_state, horizon, trues(2))
+                        nothing
+                    catch exception
+                        exception
+                    end
+                    @test err isa ArgumentError
+                    @test !(err isa MethodError)
+                    @test occursin("no certified residual sampler", sprint(showerror, err))
+                end
+            end
+
+            for fallback_provider in (boomerang_provider,)
+                fallback_odds = BernoulliModelPrior(fill(0.5, 2))
+                summed_clock = SummedRateClock(fallback_provider, fallback_odds)
+                for fallback_flow in (fallback_flows[1], fallback_flows[2],
+                        fallback_flows[5], fallback_flows[6],
+                        fallback_flows[7], fallback_flows[8],
+                        fallback_flows[9]), horizon in (0.4, Inf)
+                    fallback_clock = FourierResidualAggregateClock(
+                        fallback_provider, fallback_odds;
+                        allow_slow_fallback=true)
+                    @test PDMPSamplers.sample_time(MersenneTwister(403),
+                        fallback_clock, fallback_flow, fallback_state, horizon,
+                        trues(2)) == PDMPSamplers.sample_time(
+                            MersenneTwister(403), summed_clock, fallback_flow,
+                            fallback_state, horizon, trues(2))
+                    @test thinning_diagnostics(fallback_clock).fallbacks == 1
+
+                    strict_clock = FourierResidualAggregateClock(
+                        fallback_provider, fallback_odds;
+                        allow_slow_fallback=false)
+                    @test_throws ArgumentError PDMPSamplers.sample_time(
+                        MersenneTwister(404), strict_clock, fallback_flow,
+                        fallback_state, horizon, trues(2))
+                end
+            end
+
+
+            global_fallback_flows = (
+                PreconditionedZigZag(3; scale=[0.8, 1.2, 0.9]),
+                PreconditionedBPS(3; refresh_rate=0.0,
+                    scale=[0.8, 1.2, 0.9]),
+                DensePreconditionedZigZag(3),
+                DensePreconditionedBPS(3; refresh_rate=0.0),
+                PreconditionedDynamics(DiagonalPreconditioner([0.8, 1.2, 0.9]),
+                    logscale_boomerang_flow),
+            )
+            global_fallback_state = StickyPDMPState(Ref(0.0),
+                SkeletonPoint(copy(logscale_boomerang_state.ξ.x), zeros(3)),
+                copy(logscale_boomerang_state.free))
+            for fallback_flow in global_fallback_flows, horizon in (0.4, Inf)
+                fallback_clock = FourierResidualAggregateClock(
+                    logscale_boomerang_provider, logscale_boomerang_odds;
+                    allow_slow_fallback=true)
+                @test PDMPSamplers.sample_time(MersenneTwister(405),
+                    fallback_clock, fallback_flow, global_fallback_state,
+                    horizon, logscale_boomerang_can_stick) ==
+                    PDMPSamplers.sample_time(MersenneTwister(405),
+                        logscale_boomerang_summed, fallback_flow,
+                        global_fallback_state, horizon,
+                        logscale_boomerang_can_stick)
+                @test thinning_diagnostics(fallback_clock).fallbacks == 1
+            end
+        end
     end
 
     @testset "AggregateSticky requests sticky state" begin
@@ -1139,6 +2210,73 @@ end
         state, _, alg_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(123), ZigZag(d), model, alg, 0.0, ξ)
         @test state isa StickyPDMPState
         @test alg_internal isa PDMPSamplers.AggregateStickyLoopState
+
+        one_beta_provider = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
+        one_beta_clock = SummedRateClock(one_beta_provider, BernoulliModelPrior([0.5]))
+        @test stickable_coordinates(one_beta_clock) == [1]
+        accepted_subset = AggregateSticky(GridThinningStrategy(), one_beta_clock,
+            BitVector([true, false]))
+        _, _, accepted_subset_internal, _, _ = PDMPSamplers.initialize_state(
+            MersenneTwister(122), ZigZag(2), model, accepted_subset, 0.0, ξ)
+        @test accepted_subset_internal.stickable_indices == [1]
+        nuisance_trace, _ = pdmp_sample(ξ, ZigZag(2), model, accepted_subset,
+            0.0, 0.2; seed=122, progress=false)
+        @test all(view(nuisance_trace.free_masks, 2, :))
+        invalid_mask = AggregateSticky(GridThinningStrategy(), one_beta_clock,
+            BitVector([true, true]))
+        invalid_error = try
+            PDMPSamplers.initialize_state(
+                MersenneTwister(121), ZigZag(2), model, invalid_mask, 0.0, ξ)
+            nothing
+        catch exception
+            exception
+        end
+        @test invalid_error isa ArgumentError
+        @test occursin("unsupported coordinates [2]", sprint(showerror, invalid_error))
+
+        for bad_coordinates in (Any[1.5], [0], [-1], [3], [1, 1],
+                [BigInt(typemax(Int)) + 1], [UInt(typemax(Int)) + UInt(1)])
+            bad_clock = _DeclaredStickableClock(bad_coordinates)
+            bad_alg = AggregateSticky(GridThinningStrategy(), bad_clock,
+                BitVector([false, false]))
+            error = try
+                PDMPSamplers.initialize_state(MersenneTwister(119), ZigZag(2),
+                    model, bad_alg, 0.0, ξ)
+                nothing
+            catch exception
+                exception
+            end
+            @test error isa ArgumentError
+            @test occursin("stickable_coordinates", sprint(showerror, error))
+        end
+
+        missing_alg = AggregateSticky(GridThinningStrategy(),
+            _MissingStickableClock(), BitVector([false, false]))
+        missing_error = try
+            PDMPSamplers.initialize_state(MersenneTwister(118), ZigZag(2),
+                model, missing_alg, 0.0, ξ)
+            nothing
+        catch exception
+            exception
+        end
+        @test missing_error isa ArgumentError
+        @test occursin("must implement PDMPSamplers.stickable_coordinates",
+            sprint(showerror, missing_error))
+
+        custom_subset = AggregateSticky(GridThinningStrategy(),
+            _DeclaredStickableClock([1, 2]), BitVector([true, false]))
+        _, _, custom_subset_internal, _, _ = PDMPSamplers.initialize_state(
+            MersenneTwister(117), ZigZag(2), model, custom_subset, 0.0, ξ)
+        @test custom_subset_internal.stickable_indices == [1]
+
+        two_beta_subset_clock = SummedRateClock(
+            DenseGaussianSlab(zeros(2), Matrix(I, 2, 2), [1, 2]),
+            BernoulliModelPrior(fill(0.5, 2)))
+        beta_subset = AggregateSticky(GridThinningStrategy(), two_beta_subset_clock,
+            BitVector([true, false]))
+        _, _, beta_subset_internal, _, _ = PDMPSamplers.initialize_state(
+            MersenneTwister(120), ZigZag(2), model, beta_subset, 0.0, ξ)
+        @test beta_subset_internal.stickable_indices == [1]
 
         linear_clock = LinearGaussianAggregateClock(DenseGaussianSlab(zeros(d), Matrix(I, d, d), 1:d), BernoulliModelPrior(fill(0.5, d)))
         linear_alg = AggregateSticky(GridThinningStrategy(), linear_clock, trues(d))
@@ -1189,7 +2327,7 @@ end
         defective_ξ = SkeletonPoint([0.0, 0.0], [0.0, 1.0])
         defective_state2, _, defective_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(132), ZigZag(2), defective_model, defective_alg, 0.0, defective_ξ)
         @test defective_internal.aggregate_unstick_time == Inf
-        PDMPSamplers.update_all_unfreeze_times!(MersenneTwister(133), defective_internal, defective_state2, ZigZag(2))
+        PDMPSamplers.reschedule_aggregate_unstick_time!(MersenneTwister(133), defective_internal, defective_state2, ZigZag(2))
         @test defective_internal.aggregate_unstick_time == Inf
         defective_trace, defective_stats = pdmp_sample(defective_ξ, ZigZag(2), defective_model, defective_alg, 0.0, 1.0; progress=false)
         @test isfinite(last_event_time(defective_trace))

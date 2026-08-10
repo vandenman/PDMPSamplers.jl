@@ -708,11 +708,11 @@ end
 
 
 """
-    unfreeze_time(alg::StickyLoopState, state::StickyPDMPState, i::Integer)
+    unsticking_time(alg::StickyLoopState, state::StickyPDMPState, i::Integer)
 
 Simulate the time a stuck/ frozen particle takes to unfreeze/ unstick
 """
-function unfreeze_time(rng::Random.AbstractRNG, alg::StickyLoopState,
+function unsticking_time(rng::Random.AbstractRNG, alg::StickyLoopState,
         state::StickyPDMPState, flow::ContinuousDynamics, i::Integer)
     κ = get_κ(alg, i, state.ξ.x, state.free, state.ξ.θ)
     κ isa Real || throw(ArgumentError(

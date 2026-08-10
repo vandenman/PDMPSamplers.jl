@@ -31,7 +31,9 @@ handles reflection events, while `clock` samples a single aggregate unstick time
 over inactive stickable beta coordinates. `can_stick` is a full-state Boolean
 mask. The current implementation supports `ZigZag`, `BouncyParticle`,
 Boomerang-family flows, and supported preconditioned variants with a
-`GridThinningStrategy` inner algorithm.
+`GridThinningStrategy` inner algorithm. Every `true` entry must belong to
+`stickable_coordinates(clock)`; supported coordinates may deliberately remain
+non-stickable by setting their mask entries to `false`.
 """
 struct AggregateSticky{T<:PoissonTimeStrategy,C<:AbstractAggregateUnstickClock} <: PoissonTimeStrategy
     alg::T

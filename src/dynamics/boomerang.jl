@@ -35,7 +35,7 @@ const AnyBoomerang = Union{Boomerang, MutableBoomerang}
 default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
                                 model_prior::AbstractModelPrior,
                                 ::AnyBoomerang) =
-    FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=false)
+    FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=true)
 
 
 """
@@ -422,7 +422,7 @@ function rate_and_derivative(
         state, flow, _provider_grad(provider), _provider_hvp(provider), cached_gradient)
 end
 
-function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
+function sticking_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
     μ = flow.μ[i]

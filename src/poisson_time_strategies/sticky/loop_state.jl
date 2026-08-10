@@ -3,7 +3,7 @@ struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector},
     inner_alg_state::T # this should perhaps be the more generic, i.e., _to_internal(Sticky.alg, ...)!
     κ::U
     can_stick::BitVector
-    sticky_times::Vector{Float64}  # Absolute times of next freeze/unfreeze event
+    sticky_times::Vector{Float64}  # Absolute times of next stick/unstick event
     stickable_indices::Vector{Int}
     sticky_pq::PriorityQueue{Int,Float64}
     empty_∇ϕx::V
@@ -27,6 +27,15 @@ end
 
 _validate_sticky_rates(::Function, ::BitVector, ::Integer) = nothing
 
+"""
+    AggregateStickyLoopState
+
+Internal scheduler state for `AggregateSticky`. `sticky_times` and `sticky_pq`
+contain coordinate-wise stick events only; `aggregate_unstick_time` contains
+the one clock event shared by all currently frozen stickable coordinates.
+Every reschedule must keep these absolute times at or after the state's current
+time, and active-set changes invalidate and rebuild the aggregate event.
+"""
 mutable struct AggregateStickyLoopState{T<:PoissonTimeStrategy,C<:AbstractAggregateUnstickClock,V<:AbstractVector} <: PoissonTimeStrategy
     inner_alg_state::T
     clock::C
@@ -36,6 +45,31 @@ mutable struct AggregateStickyLoopState{T<:PoissonTimeStrategy,C<:AbstractAggreg
     sticky_pq::PriorityQueue{Int,Float64}
     aggregate_unstick_time::Float64
     empty_∇ϕx::V
+end
+
+function _validated_stickable_coordinates(clock::AbstractAggregateUnstickClock,
+        d::Integer)
+    supported_raw = stickable_coordinates(clock)
+    supported_raw isa AbstractVector || throw(ArgumentError(
+        "stickable_coordinates($(nameof(typeof(clock)))) must return an " *
+        "AbstractVector of unique integer coordinates in 1:$d; got " *
+        "$(typeof(supported_raw))"))
+    supported = Int[]
+    sizehint!(supported, length(supported_raw))
+    for (position, coordinate) in pairs(supported_raw)
+        coordinate isa Integer && !(coordinate isa Bool) || throw(ArgumentError(
+            "stickable_coordinates($(nameof(typeof(clock)))) entry $position " *
+            "must be an integer coordinate; got $(repr(coordinate))"))
+        1 <= coordinate <= d || throw(ArgumentError(
+            "stickable_coordinates($(nameof(typeof(clock)))) contains " *
+            "out-of-range coordinate $(repr(coordinate)); valid full-state coordinates are 1:$d"))
+        i = Int(coordinate)
+        i in supported && throw(ArgumentError(
+            "stickable_coordinates($(nameof(typeof(clock)))) contains duplicate " *
+            "coordinate $i; supported coordinates must be unique"))
+        push!(supported, i)
+    end
+    return supported
 end
 
 accept_reflection_event(rng::Random.AbstractRNG, alg::StickyLoopState, args...) = accept_reflection_event(rng, alg.inner_alg_state, args...)
@@ -80,7 +114,7 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
 
     alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, stickable_indices, sticky_pq, similar(state.ξ.x, 0))
-    update_all_stick_times!(rng, alg, state, flow)
+    rebuild_sticky_schedule!(rng, alg, state, flow)
     # @show alg.sticky_times
     any(isnan, alg.sticky_times) && error("sticky_times contains NaN: $(alg.sticky_times)")
 
@@ -94,6 +128,11 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
         throw(ArgumentError("AggregateSticky does not support this flow"))
     d = length(state.ξ)
     length(strat.can_stick) == d || throw(DimensionMismatch("can_stick length $(length(strat.can_stick)) does not match dimension $d"))
+    supported = _validated_stickable_coordinates(strat.clock, d)
+    invalid = Int[i for i in eachindex(strat.can_stick) if strat.can_stick[i] && !(i in supported)]
+    isempty(invalid) || throw(ArgumentError(
+        "AggregateSticky can_stick marks unsupported coordinates $(invalid) as stickable; " *
+        "$(nameof(typeof(strat.clock))) supports full-state coordinates $(collect(supported))"))
     _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
     draw_stratum_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
@@ -104,7 +143,7 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
     internal_alg_ isa GridAdaptiveState ||
         throw(ArgumentError("AggregateSticky requires an inner strategy with bounded event search; use GridThinningStrategy for now"))
     alg = AggregateStickyLoopState(internal_alg_, copy(strat.clock), copy(strat.can_stick), sticky_times, stickable_indices, sticky_pq, Inf, similar(state.ξ.x, 0))
-    update_all_stick_times!(rng, alg, state, flow)
+    rebuild_sticky_schedule!(rng, alg, state, flow)
     any(isnan, alg.sticky_times) && error("sticky_times contains NaN: $(alg.sticky_times)")
     isnan(alg.aggregate_unstick_time) && error("aggregate_unstick_time is NaN")
     return alg

@@ -136,4 +136,88 @@ end
         end
     end
 
+    @testset "Affine-logistic subsampling integration" begin
+        rng = Random.Xoshiro(0x1091571c)
+        N_sub, d_sub, minibatch = 40, 2, 5
+        X_sub = randn(rng, N_sub, d_sub)
+        β_true_sub = [0.4, -0.7]
+        y_sub = Float64.(rand(rng, N_sub) .<
+            LogExpFunctions.logistic.(X_sub * β_true_sub))
+        anchor = zeros(d_sub)
+        prior_precision = 0.25
+        logistic_grad! = function (out, x, rows)
+            fill!(out, 0.0)
+            for i in rows
+                η = dot(view(X_sub, i, :), x)
+                out .+= (LogExpFunctions.logistic(η) - y_sub[i]) .*
+                    view(X_sub, i, :)
+            end
+            return out
+        end
+        anchor_likelihood = zeros(d_sub)
+        logistic_grad!(anchor_likelihood, anchor, axes(X_sub, 1))
+        deterministic! = (out, x) ->
+            (out .= anchor_likelihood .+ prior_precision .* x)
+        residual_oracle! = function (out, x, subset, a)
+            logistic_grad!(out, x, subset)
+            anchor_part = zeros(d_sub)
+            logistic_grad!(anchor_part, a, subset)
+            out .-= anchor_part
+        end
+        weights = reshape([0.25 * sum(abs2, view(X_sub, i, :))
+            for i in axes(X_sub, 1)], 1, :)
+        envelope = SeparableResidualEnvelope(weights,
+            (out, state, flow, t) -> begin
+                vnorm = norm(state.ξ.θ)
+                out[1] = vnorm *
+                    (norm(state.ξ.x - anchor) + vnorm * t)
+            end; certified_affine=true)
+        cv = SubsampledControlVariate(deterministic!, residual_oracle!,
+            envelope, anchor, minibatch;
+            deterministic_hvp! = ((out, x, v) ->
+                (out .= prior_precision .* v)))
+        subsampling_model = PDMPModel(d_sub, cv)
+        chain_model_a = copy(subsampling_model)
+        chain_model_b = copy(subsampling_model)
+        @test chain_model_a.grad.anchor !== chain_model_b.grad.anchor
+        @test chain_model_a.grad.residual_buffer !==
+            chain_model_b.grad.residual_buffer
+        @test chain_model_a.grad.envelope !== chain_model_b.grad.envelope
+
+        full_gradient! = function (out, x)
+            logistic_grad!(out, x, axes(X_sub, 1))
+            out .+= prior_precision .* x
+        end
+        full_hvp! = function (out, x, v)
+            out .= prior_precision .* v
+            for i in axes(X_sub, 1)
+                xi = view(X_sub, i, :)
+                p = LogExpFunctions.logistic(dot(xi, x))
+                out .+= (p * (1 - p) * dot(xi, v)) .* xi
+            end
+        end
+        full_model = PDMPModel(d_sub, FullGradient(full_gradient!), full_hvp!)
+        flow = BouncyParticle(d_sub, 0.7)
+        ξ = SkeletonPoint([0.2, -0.2], [1.0, 0.0])
+        alg = GridThinningStrategy(N=16, t_max=1.5, lazy=false,
+            bound_violation=:throw)
+        full_chains = pdmp_sample(ξ, flow, full_model, alg, 0.0, 8_000.0;
+            seed=809, progress=false)
+        full_trace = full_chains.traces[1]
+        subsampling_chains = pdmp_sample(ξ, flow, subsampling_model, alg,
+            0.0, 8_000.0; n_chains=2, threaded=false, seed=[808, 810],
+            progress=false)
+
+        @test n_chains(subsampling_chains) == 2
+        for chain in 1:2
+            subsampling_trace, subsampling_stats = subsampling_chains[chain]
+            @test length(subsampling_trace) > 100
+            @test mean(subsampling_trace) ≈ mean(full_trace) atol=0.18
+            @test diag(cov(subsampling_trace)) ≈
+                diag(cov(full_trace)) atol=0.2
+            @test subsampling_stats.residual_oracle_calls > 0
+            @test subsampling_stats.full_gradient_calls == 0
+        end
+    end
+
 end

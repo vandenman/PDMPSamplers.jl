@@ -102,6 +102,45 @@ end
     @test PDMPSamplers.max_grid_horizon(BouncyParticle(2)) == 1e10
     @test PDMPSamplers.max_grid_horizon(Boomerang(2)) == 8π
 
+    providers = (
+        PDMPSamplers.GradientOnlyProvider(grad),
+        PDMPSamplers.GradHVPProvider(grad, nothing),
+        provider,
+        PDMPSamplers.VHVProvider(grad, (x, v, w) -> dot(w, v)),
+        PDMPSamplers.FiniteDiffVHV(grad, zeros(2)),
+        PDMPSamplers.WithStatsJoint((x, v) -> (dot(x, v), dot(v, v)),
+            PDMPSamplers.StatisticCounter()),
+    )
+    flows = (
+        BouncyParticle(2),
+        Boomerang(2),
+        ZigZag(2),
+        PreconditionedBPS(2),
+        PreconditionedZigZag(2),
+        DensePreconditionedBPS(2),
+        DensePreconditionedZigZag(2),
+        PreconditionedDynamics(DiagonalPreconditioner(ones(2)), Boomerang(2)),
+    )
+    expected_support = (
+        (true, false, false, true, false, true, false, false),
+        (true, false, false, true, false, true, false, false),
+        (true, true, true, true, true, true, true, false),
+        (true, true, false, true, false, true, false, false),
+        (true, true, true, true, true, true, false, false),
+        (true, true, false, true, false, true, false, false),
+    )
+    expected_aggregation = (:scalar, :scalar, :componentwise, :scalar,
+        :componentwise, :scalar, :componentwise, :unsupported)
+    for (provider_i, support_row) in zip(providers, expected_support),
+            (flow_i, expected, aggregation) in
+                zip(flows, support_row, expected_aggregation)
+        @test PDMPSamplers._supports_rate_derivatives(provider_i, flow_i) ==
+            expected
+        @test PDMPSamplers._rate_aggregation(flow_i) === aggregation
+        @test PDMPSamplers._rate_channel_count(state, flow_i) ==
+            (aggregation === :scalar ? 1 : 2)
+    end
+
     values = zeros(1, 3)
     derivatives = zeros(1, 3)
     t_grid = [0.0, 0.5, 1.0]

@@ -1,9 +1,9 @@
 """
-    τ = freezing_time(ξ::SkeletonPoint, flow::ContinuousDynamics, i::Integer)
+    τ = sticking_time(ξ::SkeletonPoint, flow::ContinuousDynamics, i::Integer)
 
 computes the hitting time of the particle to hit 0 given the position `ξ.x[i]` and the velocity `ξ.θ[i]`.
 """
-function freezing_time(ξ::SkeletonPoint, ::Union{BouncyParticle,ZigZag}, i::Integer)
+function sticking_time(ξ::SkeletonPoint, ::Union{BouncyParticle,ZigZag}, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
     if θ * x >= 0
@@ -19,68 +19,68 @@ get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:Function}, i, args...) = sti
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_state.κ[i]
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_state.κ(i, args...)
 
-function update_all_stick_times!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function rebuild_sticky_schedule!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
 
     t = state.t[]
     for i in alg.stickable_indices
         if state.free[i]
-            _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-        else # stuck/ frozen
-            _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, flow, i))
+            _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
+        else # stuck
+            _set_sticky_time!(alg, i, t + unsticking_time(rng, alg, state, flow, i))
         end
-        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling a stick/unstick event (θ[i] = $(state.ξ.θ[i]))")
     end
 end
 
-function _update_aggregate_unstick_time!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, horizon::Real=Inf)
+function update_aggregate_unstick_time!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, horizon::Real=Inf)
     t = state.t[]
     τ = sample_time(rng, alg.clock, flow, state, horizon, alg.can_stick)
     alg.aggregate_unstick_time = t + τ
     return alg.aggregate_unstick_time
 end
 
-function update_all_stick_times!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function rebuild_sticky_schedule!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
     empty!(alg.sticky_pq)
     fill!(alg.sticky_times, Inf)
     for i in alg.stickable_indices
         if state.free[i]
-            _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
+            _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
         end
-        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling sticking (θ[i] = $(state.ξ.θ[i]))")
     end
-    _, t_freeze = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
-    _update_aggregate_unstick_time!(rng, alg, state, flow, max(0.0, t_freeze - t))
+    _, t_stick = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
+    update_aggregate_unstick_time!(rng, alg, state, flow, max(0.0, t_stick - t))
     return nothing
 end
 
-function update_all_freeze_times!(alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function update_stick_times!(alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
     for i in alg.stickable_indices
         if state.free[i]
-            _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-            isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
+            _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
+            isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling sticking (θ[i] = $(state.ξ.θ[i]))")
         end
     end
 end
 
-function update_all_freeze_times!(alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function update_stick_times!(alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
     empty!(alg.sticky_pq)
     fill!(alg.sticky_times, Inf)
     for i in alg.stickable_indices
         if state.free[i]
-            _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-            isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
+            _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
+            isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling sticking (θ[i] = $(state.ξ.θ[i]))")
         end
     end
     return nothing
 end
 
-function update_all_unfreeze_times!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
+function reschedule_aggregate_unstick_time!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
     t = state.t[]
-    _, t_freeze = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
-    _update_aggregate_unstick_time!(rng, alg, state, flow, max(0.0, t_freeze - t))
+    _, t_stick = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
+    update_aggregate_unstick_time!(rng, alg, state, flow, max(0.0, t_stick - t))
     return nothing
 end
 
@@ -95,11 +95,11 @@ function _update_sticky_time_at_index!(rng::Random.AbstractRNG, alg::StickyLoopS
     end
     t = state.t[]
     if state.free[i]
-        _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
+        _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling sticking (θ[i] = $(state.ξ.θ[i]))")
     else
-        _set_sticky_time!(alg, i, t + unfreeze_time(rng, alg, state, flow, i))
-        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN after unfreezing")
+        _set_sticky_time!(alg, i, t + unsticking_time(rng, alg, state, flow, i))
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN after scheduling unsticking")
     end
     return nothing
 end
@@ -112,24 +112,20 @@ function _update_sticky_time_at_index!(rng::Random.AbstractRNG, alg::AggregateSt
     end
     t = state.t[]
     if state.free[i]
-        _set_sticky_time!(alg, i, t + freezing_time(state.ξ, flow, i))
-        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after freezing (θ[i] = $(state.ξ.θ[i]))")
+        _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
+        isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling sticking (θ[i] = $(state.ξ.θ[i]))")
     else
         alg.sticky_times[i] = Inf
         haskey(alg.sticky_pq, i) && delete!(alg.sticky_pq, i)
-        _, t_freeze = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
-        _update_aggregate_unstick_time!(rng, alg, state, flow, max(0.0, t_freeze - t))
+        _, t_stick = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
+        update_aggregate_unstick_time!(rng, alg, state, flow, max(0.0, t_stick - t))
     end
     return nothing
 end
 
-function _update_sticky_schedule_after_reflect!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, meta)
-    update_all_stick_times!(rng, alg, state, flow)
-    return nothing
-end
-
-function _update_sticky_schedule_after_reflect!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, meta)
-    update_all_stick_times!(rng, alg, state, flow)
+"""Rebuild velocity-dependent stick deadlines after a global reflection."""
+function _update_sticky_schedule_after_reflect!(rng::Random.AbstractRNG, alg::Union{StickyLoopState,AggregateStickyLoopState}, state::StickyPDMPState, flow::ContinuousDynamics, meta)
+    rebuild_sticky_schedule!(rng, alg, state, flow)
     return nothing
 end
 
@@ -138,13 +134,9 @@ function _update_sticky_schedule_after_reflect!(rng::Random.AbstractRNG, alg::St
     return nothing
 end
 
-function _update_sticky_schedule_after_refresh!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
-    update_all_stick_times!(rng, alg, state, flow)
-    return nothing
-end
-
-function _update_sticky_schedule_after_refresh!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
-    update_all_stick_times!(rng, alg, state, flow)
+"""Rebuild stick deadlines after a refresh changes the velocity."""
+function _update_sticky_schedule_after_refresh!(rng::Random.AbstractRNG, alg::Union{StickyLoopState,AggregateStickyLoopState}, state::StickyPDMPState, flow::ContinuousDynamics)
+    rebuild_sticky_schedule!(rng, alg, state, flow)
     return nothing
 end
 
@@ -152,18 +144,14 @@ function _update_sticky_schedule_after_refresh!(::Random.AbstractRNG, ::StickyLo
     return nothing
 end
 
-function _update_sticky_schedule_after_horizon_hit!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
-    update_all_stick_times!(rng, alg, state, flow)
-    return nothing
-end
-
-function _update_sticky_schedule_after_horizon_hit!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
-    update_all_stick_times!(rng, alg, state, flow)
+"""Restore scheduler invariants after advancing to an internal horizon."""
+function _update_sticky_schedule_after_horizon_hit!(rng::Random.AbstractRNG, alg::Union{StickyLoopState,AggregateStickyLoopState}, state::StickyPDMPState, flow::ContinuousDynamics)
+    rebuild_sticky_schedule!(rng, alg, state, flow)
     return nothing
 end
 
 function _update_sticky_schedule_after_horizon_hit!(::Random.AbstractRNG, alg::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, state::StickyPDMPState, flow::ContinuousDynamics)
-    update_all_freeze_times!(alg, state, flow)
+    update_stick_times!(alg, state, flow)
     return nothing
 end
 
@@ -176,7 +164,9 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState,
     ξ = state.ξ
     tol = sqrt(eps(eltype(ξ.x)))
     if state.free[i]
-        abs(ξ.x[i]) < tol || error("freezing but not frozen: x[$i] = $(ξ.x[i])")
+        abs(ξ.x[i]) < tol || error(
+            "sticking coordinate $i away from its boundary: x[$i] = $(ξ.x[i]), " *
+            "θ[$i] = $(ξ.θ[i]), t = $(state.t[]), scheduled_t = $(alg.sticky_times[i])")
         ξ.x[i] = 0.0
         state.free[i] = false
         _invalidate_active_stratum_cache!(state)
@@ -184,12 +174,12 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState,
         accepted = true
     else
         (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) ||
-            error("unfreezing but coordinate $i is not frozen")
+            error("unsticking coordinate $i that is not stuck")
         accepted = propose_boundary_velocity!(rng, state, flow, i)
         accepted && (state.free[i] = true)
     end
     if accepted
-        update_all_stick_times!(rng, alg, state, flow)
+        rebuild_sticky_schedule!(rng, alg, state, flow)
     else
         _update_sticky_time_at_index!(rng, alg, state, flow, i)
     end
@@ -204,23 +194,23 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
     alg.can_stick[i] || throw(ArgumentError("coordinate $i is not stickable"))
 
     if state.free[i]
-        abs(ξ.x[i]) < tol || error("freezing but not frozen: x[$i] = $(ξ.x[i]) !≈ 0 at $(t) with tol = $(tol)")
+        abs(ξ.x[i]) < tol || error("sticking coordinate $i away from its boundary: x[$i] = $(ξ.x[i]) !≈ 0 at $(t) with tol = $(tol)")
         ξ.x[i] = 0.0
         state.free[i] = false
         _invalidate_active_stratum_cache!(state)
         draw_stratum_velocity!(rng, state, flow)
         alg.sticky_times[i] = Inf
         haskey(alg.sticky_pq, i) && delete!(alg.sticky_pq, i)
-        update_all_stick_times!(rng, alg, state, flow)
+        rebuild_sticky_schedule!(rng, alg, state, flow)
     else
         (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) ||
-            error("unfreezing but not frozen: x[$i] = $(ξ.x[i]) ≉ 0 or θ[$i] = $(ξ.θ[i]) ≉ 0 at $(t) with tol = $(tol)")
+            error("unsticking coordinate $i that is not stuck: x[$i] = $(ξ.x[i]) ≉ 0 or θ[$i] = $(ξ.θ[i]) ≉ 0 at $(t) with tol = $(tol)")
         accepted = propose_boundary_velocity!(rng, state, flow, i)
         accepted && (state.free[i] = true)
         if accepted
-            update_all_stick_times!(rng, alg, state, flow)
+            rebuild_sticky_schedule!(rng, alg, state, flow)
         else
-            update_all_unfreeze_times!(rng, alg, state, flow)
+            reschedule_aggregate_unstick_time!(rng, alg, state, flow)
         end
         validate_state(state, flow, "after aggregate stick_or_unstick! at index $i")
         return accepted
@@ -267,9 +257,9 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
 
-    i_freeze, t_freeze = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
+    i_stick, t_stick = isempty(alg.sticky_pq) ? (0, Inf) : first(alg.sticky_pq)
     t_unstick = alg.aggregate_unstick_time
-    t_sticky = min(t_freeze, t_unstick)
+    t_sticky = min(t_stick, t_unstick)
     τ_sticky = max(0.0, t_sticky - t)
 
     if any(state.free)
@@ -283,11 +273,11 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
             return step_horizon, :horizon_hit, EmptyMeta()
         elseif τ_sticky <= τ_inner && τ_sticky <= τ_refresh
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
-            if t_unstick <= t_freeze
+            if t_unstick <= t_stick
                 i_unstick = sample_label(rng, alg.clock, flow, state, τ_sticky, alg.can_stick)
                 return τ_sticky, :sticky, CoordinateMeta(i_unstick)
             end
-            return τ_sticky, :sticky, CoordinateMeta(i_freeze)
+            return τ_sticky, :sticky, CoordinateMeta(i_stick)
         elseif τ_refresh <= τ_inner
             _inc_counter_sticky_inner_wasted_by_refresh(stats)
             return τ_refresh, :refresh, GradientMeta(alg.empty_∇ϕx)

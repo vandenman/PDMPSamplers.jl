@@ -76,19 +76,37 @@ _rate_channel_count(state::AbstractPDMPState, flow::ContinuousDynamics) =
 _rate_channel_count(state::AbstractPDMPState, ::DensePreconditionedZigZag) =
     length(state.ξ)
 
-_provider_has_directional_derivative(_) = true
-_provider_has_directional_derivative(::GradientOnlyProvider) = false
-_provider_has_directional_derivative(::GradHVPProvider{G,Nothing}) where {G} = false
+_provider_rate_derivative_capability(_) = :directional
+_provider_rate_derivative_capability(::GradientOnlyProvider) = :gradient_only
+_provider_rate_derivative_capability(::GradHVPProvider{G,Nothing}) where {G} = :gradient_only
+_provider_rate_derivative_capability(::GradHVPProvider) = :hvp
+_provider_rate_derivative_capability(::VHVProvider) = :directional
+_provider_rate_derivative_capability(::FiniteDiffVHV) = :finite_difference
+_provider_rate_derivative_capability(::WithStatsJoint) = :directional
+_provider_has_directional_derivative(provider) =
+    _provider_rate_derivative_capability(provider) !== :gradient_only
 
-_supports_rate_derivatives(provider, ::ContinuousDynamics) = false
-_supports_rate_derivatives(provider, ::BouncyParticle) = true
-_supports_rate_derivatives(provider, ::AnyBoomerang) = _provider_has_directional_derivative(provider)
-_supports_rate_derivatives(provider, ::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) = true
-_supports_rate_derivatives(provider::GradHVPProvider{G,H}, ::ZigZag) where {G,H} = !(H <: Nothing)
-_supports_rate_derivatives(::FiniteDiffVHV, ::ZigZag) = true
-_supports_rate_derivatives(provider::GradHVPProvider{G,H}, ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
-_supports_rate_derivatives(::FiniteDiffVHV, ::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) = true
-_supports_rate_derivatives(provider::GradHVPProvider{G,H}, ::PreconditionedDynamics{DensePreconditioner,<:ZigZag}) where {G,H} = !(H <: Nothing)
+_flow_rate_derivative_capability(::ContinuousDynamics) = :unsupported
+_flow_rate_derivative_capability(::BouncyParticle) = :scalar_gradient
+_flow_rate_derivative_capability(::AnyBoomerang) = :scalar_directional
+_flow_rate_derivative_capability(::ZigZag) = :componentwise_hvp_or_fd
+_flow_rate_derivative_capability(::PreconditionedDynamics{<:AbstractPreconditioner,<:BouncyParticle}) = :scalar_gradient
+_flow_rate_derivative_capability(::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}) = :componentwise_hvp_or_fd
+_flow_rate_derivative_capability(::PreconditionedDynamics{DensePreconditioner,<:ZigZag}) = :componentwise_hvp
+_flow_rate_derivative_capability(::PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang}) = :unsupported
+
+function _supports_rate_derivatives(provider, flow::ContinuousDynamics)
+    provider_capability = _provider_rate_derivative_capability(provider)
+    flow_capability = _flow_rate_derivative_capability(flow)
+    flow_capability === :scalar_gradient && return true
+    flow_capability === :scalar_directional &&
+        return provider_capability !== :gradient_only
+    flow_capability === :componentwise_hvp_or_fd &&
+        return provider_capability in (:hvp, :finite_difference)
+    flow_capability === :componentwise_hvp &&
+        return provider_capability === :hvp
+    return false
+end
 
 function _can_use_signed_grid(state::AbstractPDMPState, flow::ContinuousDynamics, provider)
     _rate_aggregation(flow) === :unsupported && return false

@@ -141,18 +141,18 @@ end
         invalid_values = (NaN, Inf, -Inf, Exponential(1.0), :invalid, -0.1)
         for (seed, value) in enumerate(invalid_values)
             rng, state, alg = frozen_callable_fixture(value, 20 + seed)
-            @test_throws ArgumentError PDMPSamplers.unfreeze_time(
+            @test_throws ArgumentError PDMPSamplers.unsticking_time(
                 rng, alg, state, ZigZag(1), 1)
         end
 
         zero_rng, zero_state, zero_alg = frozen_callable_fixture(0.0, 30)
         next_draw = rand(copy(zero_rng))
-        @test isinf(PDMPSamplers.unfreeze_time(
+        @test isinf(PDMPSamplers.unsticking_time(
             zero_rng, zero_alg, zero_state, ZigZag(1), 1))
         @test rand(zero_rng) == next_draw
 
         valid_rng, valid_state, valid_alg = frozen_callable_fixture(2.0, 31)
-        τ = PDMPSamplers.unfreeze_time(
+        τ = PDMPSamplers.unsticking_time(
             valid_rng, valid_alg, valid_state, ZigZag(1), 1)
         @test isfinite(τ)
         @test τ > 0
@@ -235,7 +235,7 @@ end
         disposable = copy(control)
         @test !PDMPSamplers.propose_boundary_velocity!(
             control_rng, disposable, flow, 2)
-        PDMPSamplers.update_all_unfreeze_times!(
+        PDMPSamplers.reschedule_aggregate_unstick_time!(
             control_rng, control_alg, control, flow)
 
         @test rejected_alg.sticky_times == sticky_times_before

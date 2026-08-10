@@ -833,14 +833,68 @@ end
 
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0;
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        state_before = copy(state)
+        @test alg_.state_cache !== alg_.state_cache2
+        @test alg_.state_cache.ξ.x !== alg_.state_cache2.ξ.x
+        @test alg_.state_cache.ξ.θ !== alg_.state_cache2.ξ.θ
         τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
 
         @test event_type === :horizon_hit
         @test τ > alg.t_max
         @test stats.grid_budget_tail_restarts > 0
+        @test state.t[] == state_before.t[]
+        @test state.ξ.x == state_before.ξ.x
+        @test state.ξ.θ == state_before.ξ.θ
         @test alg_.pcb.t_grid[1] == 0.0
         @test stats.grid_bound_violations == 0
         @test stats.affine_bound_violations == 0
+
+        allocation_rng = Xoshiro(3)
+        allocation_state, allocation_model, allocation_alg, allocation_cache,
+            allocation_stats = PDMPSamplers.initialize_state(allocation_rng,
+                flow, model, alg, 0.0, ξ0;
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        allocation_bytes = @allocated PDMPSamplers.next_event_time(
+            allocation_rng, allocation_model, flow, allocation_alg,
+            allocation_state, allocation_cache, allocation_stats, Inf, false)
+        @test allocation_stats.grid_budget_tail_restarts > 0
+        @test allocation_bytes <= 5_000
+
+        # Isolate the operation changed by the tail-restart handoff. The
+        # production helper copies into existing cache storage and returns that
+        # storage without allocating a new state object.
+        PDMPSamplers._prepare_tail_restart_state!(allocation_alg.state_cache2,
+            allocation_state, 0.25, flow)
+        handoff_bytes = @allocated PDMPSamplers._prepare_tail_restart_state!(
+            allocation_alg.state_cache2, allocation_state, 0.25, flow)
+        state_copy_bytes = @allocated copy(allocation_alg.state_cache2)
+        @test handoff_bytes == 0
+        @test state_copy_bytes > 0
+
+        multiple_restart_alg = GridThinningStrategy(; N=1, N_min=1,
+            t_max=4.0, lazy=false, bound=:flat, curvature_bound=0.0,
+            bound_violation=:throw, max_rejections_before_tail_restart=1,
+            safety_limit=50)
+        multiple_rng = Xoshiro(59)
+        multiple_state, multiple_model, multiple_internal, multiple_cache,
+            multiple_stats = PDMPSamplers.initialize_state(multiple_rng, flow,
+                model, multiple_restart_alg, 0.0, ξ0;
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        multiple_state_before = copy(multiple_state)
+        multiple_bytes = @allocated PDMPSamplers.next_event_time(multiple_rng,
+            multiple_model, flow, multiple_internal, multiple_state,
+            multiple_cache, multiple_stats, Inf, false)
+        @test multiple_stats.grid_budget_tail_restarts >= 2
+        @test multiple_state.t[] == multiple_state_before.t[]
+        @test multiple_state.ξ.x == multiple_state_before.ξ.x
+        @test multiple_state.ξ.θ == multiple_state_before.ξ.θ
+        @test multiple_bytes <= 7_000
+        @test multiple_internal.state_cache !== multiple_internal.state_cache2
+        @test multiple_internal.state_cache.ξ.x !==
+            multiple_internal.state_cache2.ξ.x
+        retained_tail_value = multiple_internal.state_cache2.ξ.x[1]
+        multiple_internal.state_cache.ξ.x[1] += 1.0
+        @test multiple_internal.state_cache2.ξ.x[1] == retained_tail_value
     end
 
     @testset "componentwise bounded ZigZag Gaussian channels" begin

@@ -181,7 +181,7 @@ function rate_and_derivative(
     return dot(fd.grad_buf, θ), vhv
 end
 
-# The canonical freezing_time for BouncyParticle is defined in
+# The canonical sticking_time for BouncyParticle is defined in
 # src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.
 
 # Bounds computation for BPS

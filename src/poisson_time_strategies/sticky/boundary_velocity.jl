@@ -4,11 +4,13 @@ function propose_boundary_velocity! end
 
 function _boomerang_covariance_entry(flow::AnyBoomerang, i::Integer, j::Integer)
     ΣL = flow.ΣL
+    # Σ = ΣL * ΣL', hence Σ[i,j] is the dot product of rows i and j.
     return dot(view(ΣL, i, :), view(ΣL, j, :))
 end
 
 function _boomerang_covariance_entry(flow::LowRankMutableBoomerang, i::Integer, j::Integer)
     lrp = flow.Γ
+    # Σ[i,j] = D[i]1{i=j} + sum_k V[i,k]Λ[k]V[j,k], evaluated in O(r).
     value = i == j ? lrp.D[i] : zero(eltype(lrp.D))
     @inbounds for k in eachindex(lrp.Λ)
         value += lrp.V[i, k] * lrp.Λ[k] * lrp.V[j, k]

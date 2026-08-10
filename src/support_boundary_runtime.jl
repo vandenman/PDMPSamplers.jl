@@ -269,6 +269,9 @@ function _line_search_truncated_refresh_from_current_state!(
             _inc_counter_refreshment_events(stats)
             _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
+            if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
+                _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+            end
             record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end
@@ -686,6 +689,9 @@ function _boundary_refresh_from_localization!(
             _inc_counter_refreshment_events(stats)
             _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
+            if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
+                _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+            end
             record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end

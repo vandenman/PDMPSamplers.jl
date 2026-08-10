@@ -1,3 +1,10 @@
+function _prepare_tail_restart_state!(tail_state::AbstractPDMPState,
+        state::AbstractPDMPState, elapsed::Real, flow::ContinuousDynamics)
+    copyto!(tail_state, state)
+    move_forward_time!(tail_state, elapsed, flow)
+    return tail_state
+end
+
 function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
     max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit,
@@ -166,11 +173,13 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                     return time_offset + last_rejected_time, horizon_event, default_return
                 end
 
-                tail_state = alg.state_cache2
-                copyto!(tail_state, state)
-                move_forward_time!(tail_state, last_rejected_time, flow)
+                tail_state = _prepare_tail_restart_state!(alg.state_cache2,
+                    state, last_rejected_time, flow)
                 time_offset += last_rejected_time
-                state = copy(tail_state)
+                # `state_cache` remains the proposal scratch state, so the
+                # preallocated second cache can safely become the new tail
+                # origin without mutating the caller or aliasing proposal work.
+                state = tail_state
                 max_horizon = remaining_horizon
                 include_refresh = false
                 max_horizon_event = horizon_event

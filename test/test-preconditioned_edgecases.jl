@@ -369,12 +369,12 @@
         @test dzz.metric.L == old_L
     end
 
-    @testset "freezing_time forwarding" begin
+    @testset "sticking_time forwarding" begin
         d = 3
         pzz = PreconditionedZigZag(d)
         ξ = SkeletonPoint([1.0, -1.0, 2.0], [1.0, 1.0, -1.0])
         for i in 1:d
-            t = PDMPSamplers.freezing_time(ξ, pzz, i)
+            t = PDMPSamplers.sticking_time(ξ, pzz, i)
             @test t >= 0
         end
     end

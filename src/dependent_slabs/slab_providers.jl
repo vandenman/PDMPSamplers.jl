@@ -283,9 +283,15 @@ struct GlobalLogscaleExchangeableGaussianSlab <: AbstractExchangeableGaussianSla
         p = length(beta_indices)
         u_f = Float64(u0)
         v_f = Float64(v0)
+        mean_f = Float64(mean)
+        offset_f = Float64(logscale_offset)
+        isfinite(u_f) || throw(ArgumentError("u0 must be finite"))
+        isfinite(v_f) || throw(ArgumentError("v0 must be finite"))
+        isfinite(mean_f) || throw(ArgumentError("mean must be finite"))
+        isfinite(offset_f) || throw(ArgumentError("logscale_offset must be finite"))
         u_f > 0 || throw(ArgumentError("u0 must be positive"))
         u_f + p * v_f > 0 || throw(ArgumentError("u0 + p*v0 must be positive"))
-        new(Vector{Int}(beta_indices), Int(logscale_index), Float64(mean), u_f, v_f, Float64(logscale_offset))
+        new(Vector{Int}(beta_indices), Int(logscale_index), mean_f, u_f, v_f, offset_f)
     end
 end
 
@@ -714,6 +720,33 @@ function conditional_logdensity_zero(provider::LogLinearGaussianScaleSlab,
     active_beta[j_beta] && throw(ArgumentError(
         "conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
     return -0.5 * log2π - _loglinear_log_scale(provider, x, Int(j_beta))
+end
+
+function conditional_logdensity_zero(
+    provider::GlobalLogscaleExchangeableGaussianSlab,
+    x::AbstractVector,
+    active_beta::BitVector,
+    j_beta::Integer,
+)
+    indices = provider.beta_indices
+    1 <= j_beta <= length(indices) || throw(BoundsError(indices, j_beta))
+    length(active_beta) == length(indices) || throw(DimensionMismatch(
+        "active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    active_beta[j_beta] && throw(ArgumentError(
+        "conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
+
+    k = count(active_beta)
+    centered_sum = 0.0
+    @inbounds for j in eachindex(active_beta)
+        active_beta[j] && (centered_sum += x[indices[j]] - provider.mean)
+    end
+    denominator = provider.u + k * provider.v
+    conditional_mean = provider.mean + provider.v * centered_sum / denominator
+    base_variance = provider.u * (provider.u + (k + 1) * provider.v) /
+        denominator
+    log_scale = provider.logscale_offset + x[provider.logscale_index]
+    return _log_gaussian_zero_density(
+        0.5 * log(base_variance) + log_scale, conditional_mean)
 end
 
 """

@@ -178,6 +178,7 @@ export
     GlobalLogscaleExchangeableGaussianSlab,
     ArbitrarySlabBoundary,
     default_aggregate_unstick_clock,
+    stickable_coordinates,
     DependentSlabTarget,
 
     # Adaptation
@@ -269,6 +270,5 @@ export
 # test_boomerang_target,
 # test_boomerang_dynamics
 
-include("precompile_workload.jl")
 
 end # module PDMPSamplers

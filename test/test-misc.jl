@@ -52,29 +52,29 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         @test_throws ErrorException("Cannot compute statistics on a trace with fewer than 2 events") mean(trace_single)
     end
 
-    @testset "Boomerang freezing_time" begin
+    @testset "Boomerang sticking_time" begin
         flow_zero_mu = Boomerang(1)
 
         @testset "μ=0, θ=0, x>0 → π/2" begin
             ξ = SkeletonPoint([1.0], [0.0])
-            @test PDMPSamplers.freezing_time(ξ, flow_zero_mu, 1) ≈ π / 2
+            @test PDMPSamplers.sticking_time(ξ, flow_zero_mu, 1) ≈ π / 2
         end
 
         @testset "μ=0, θ=0, x<0 → π/2" begin
             ξ = SkeletonPoint([-1.0], [0.0])
-            @test PDMPSamplers.freezing_time(ξ, flow_zero_mu, 1) ≈ π / 2
+            @test PDMPSamplers.sticking_time(ξ, flow_zero_mu, 1) ≈ π / 2
         end
 
         @testset "μ=0, θ=0, x=0 → Inf" begin
             ξ = SkeletonPoint([0.0], [0.0])
-            @test PDMPSamplers.freezing_time(ξ, flow_zero_mu, 1) == Inf
+            @test PDMPSamplers.sticking_time(ξ, flow_zero_mu, 1) == Inf
         end
 
         @testset "x=2μ singularity → finite positive" begin
             μ_val = 1.5
             flow_nonzero = Boomerang(Diagonal([1.0]), [μ_val])
             ξ = SkeletonPoint([2μ_val], [1.0])
-            t = PDMPSamplers.freezing_time(ξ, flow_nonzero, 1)
+            t = PDMPSamplers.sticking_time(ξ, flow_nonzero, 1)
             @test isfinite(t)
             @test t > 0
         end
@@ -84,7 +84,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
                                (1.0, 0.5, 0.3), (3.0, -1.0, 1.0)]
                 flow_i = Boomerang(Diagonal([1.0]), [μ])
                 ξ = SkeletonPoint([x], [θ])
-                t_computed = PDMPSamplers.freezing_time(ξ, flow_i, 1)
+                t_computed = PDMPSamplers.sticking_time(ξ, flow_i, 1)
                 trajectory(t) = (x - μ) * cos(t) + θ * sin(t) + μ
                 if isfinite(t_computed)
                     @test abs(trajectory(t_computed)) < 1e-10

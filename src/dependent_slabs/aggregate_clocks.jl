@@ -67,9 +67,12 @@ mutable struct AggregateClockDiagnostics
     min_envelope::Float64
     rate_evaluations::Int
     last_cells::Int
+    last_fallback_provider::Symbol
+    last_fallback_dynamics::Symbol
 end
 
-AggregateClockDiagnostics() = AggregateClockDiagnostics(0, 0, 0, 0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0)
+AggregateClockDiagnostics() = AggregateClockDiagnostics(
+    0, 0, 0, 0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0, :none, :none)
 
 function reset_thinning_diagnostics!(diagnostics::AggregateClockDiagnostics)
     diagnostics.proposals = 0
@@ -83,6 +86,8 @@ function reset_thinning_diagnostics!(diagnostics::AggregateClockDiagnostics)
     diagnostics.min_envelope = Inf
     diagnostics.rate_evaluations = 0
     diagnostics.last_cells = 0
+    diagnostics.last_fallback_provider = :none
+    diagnostics.last_fallback_dynamics = :none
     return diagnostics
 end
 
@@ -96,7 +101,7 @@ through the exact `SummedRateClock` fallback when `allow_slow_fallback=true`.
 Set `allow_slow_fallback=false` to require a concrete residual sampler and
 error if none is available.
 """
-struct ChebyshevResidualAggregateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
+struct ChebyshevResidualAggregateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock,W} <: AbstractAggregateUnstickClock
     slab_provider::P
     model_prior::O
     order::Int
@@ -105,6 +110,7 @@ struct ChebyshevResidualAggregateClock{P<:AbstractSlabPrior,O<:AbstractModelPrio
     allow_slow_fallback::Bool
     diagnostics::AggregateClockDiagnostics
     fallback::S
+    workspace::W
 end
 
 """
@@ -117,7 +123,7 @@ infinite horizons route through the exact `SummedRateClock` fallback when
 `allow_slow_fallback=true`. Set `allow_slow_fallback=false` to require a
 concrete residual sampler and error if none is available.
 """
-struct FourierResidualAggregateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock} <: AbstractAggregateUnstickClock
+struct FourierResidualAggregateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,T<:Real,S<:SummedRateClock,W} <: AbstractAggregateUnstickClock
     slab_provider::P
     model_prior::O
     order::Int
@@ -126,6 +132,7 @@ struct FourierResidualAggregateClock{P<:AbstractSlabPrior,O<:AbstractModelPrior,
     allow_slow_fallback::Bool
     diagnostics::AggregateClockDiagnostics
     fallback::S
+    workspace::W
 end
 
 mutable struct LinearGaussianAggregateCache
@@ -262,13 +269,17 @@ Base.copy(clock::ExponentialSumAggregateClock) = ExponentialSumAggregateClock(
 Choose an aggregate unstick clock. Pass `flow` when it is available so the
 default can select a compatible residual sampler; in particular,
 Boomerang-family flows use a Fourier residual clock for global-logscale slabs.
+Default residual clocks keep exact fallback enabled so scheduling remains valid
+when no certified accelerated envelope exists, including infinite horizons.
+Set `allow_slow_fallback=false` only by explicitly constructing a residual clock
+when certified-only operation is required.
 """
 default_aggregate_unstick_clock(provider::IndependentZeroMeanLogscaleGaussianSlab, model_prior::AbstractModelPrior) =
     ExponentialSumAggregateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::LogLinearGaussianScaleSlab, model_prior::AbstractModelPrior) =
     ExponentialSumAggregateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab, model_prior::AbstractModelPrior) =
-    ChebyshevResidualAggregateClock(provider, model_prior; allow_slow_fallback=false)
+    ChebyshevResidualAggregateClock(provider, model_prior; allow_slow_fallback=true)
 default_aggregate_unstick_clock(provider::AbstractGaussianSlabProvider, model_prior::AbstractModelPrior) =
     slab_cache_style(provider) isa FixedCovarianceCache ? LinearGaussianAggregateClock(provider, model_prior) : SummedRateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::AbstractSlabPrior, model_prior::AbstractModelPrior) =
@@ -318,7 +329,7 @@ function ChebyshevResidualAggregateClock(
     max_cells > 0 || throw(ArgumentError("max_cells must be positive"))
     residual_budget >= 0 || throw(ArgumentError("residual_budget must be non-negative"))
     fallback = SummedRateClock(slab_provider, model_prior; rtol, atol, initial_bracket, bracket_multiplier)
-    return ChebyshevResidualAggregateClock(slab_provider, model_prior, Int(order), Int(max_cells), Float64(residual_budget), Bool(allow_slow_fallback), AggregateClockDiagnostics(), fallback)
+    return ChebyshevResidualAggregateClock(slab_provider, model_prior, Int(order), Int(max_cells), Float64(residual_budget), Bool(allow_slow_fallback), AggregateClockDiagnostics(), fallback, _chebyshev_residual_workspace(order, max_cells, length(beta_indices(slab_provider))))
 end
 
 Base.copy(clock::ChebyshevResidualAggregateClock) = ChebyshevResidualAggregateClock(
@@ -350,7 +361,7 @@ function FourierResidualAggregateClock(
     cells > 0 || throw(ArgumentError("cells must be positive"))
     residual_budget >= 0 || throw(ArgumentError("residual_budget must be non-negative"))
     fallback = SummedRateClock(slab_provider, model_prior; rtol, atol, initial_bracket, bracket_multiplier)
-    return FourierResidualAggregateClock(slab_provider, model_prior, Int(order), Int(cells), Float64(residual_budget), Bool(allow_slow_fallback), AggregateClockDiagnostics(), fallback)
+    return FourierResidualAggregateClock(slab_provider, model_prior, Int(order), Int(cells), Float64(residual_budget), Bool(allow_slow_fallback), AggregateClockDiagnostics(), fallback, _fourier_residual_workspace(order, cells, length(beta_indices(slab_provider))))
 end
 
 Base.copy(clock::FourierResidualAggregateClock) = FourierResidualAggregateClock(
@@ -386,8 +397,31 @@ function thinning_diagnostics(clock::Union{ChebyshevResidualAggregateClock,Fouri
         min_envelope=d.min_envelope,
         rate_evaluations=d.rate_evaluations,
         last_cells=d.last_cells,
+        last_fallback_provider=d.last_fallback_provider,
+        last_fallback_dynamics=d.last_fallback_dynamics,
     )
 end
+
+"""
+    stickable_coordinates(clock) -> AbstractVector{Int}
+
+Return the full-state coordinate indices for which an aggregate clock can
+compute both unstick rates and event labels. `AggregateSticky.can_stick` is a
+full-state mask and its `true` entries must be a subset of this vector.
+
+Custom aggregate clocks must implement this method explicitly.
+"""
+function stickable_coordinates(clock::AbstractAggregateUnstickClock)
+    throw(ArgumentError(
+        "$(nameof(typeof(clock))) must implement " *
+        "PDMPSamplers.stickable_coordinates(clock)::AbstractVector{Int}"))
+end
+
+stickable_coordinates(clock::SummedRateClock) = beta_indices(clock.slab_provider)
+stickable_coordinates(clock::ChebyshevResidualAggregateClock) = beta_indices(clock.slab_provider)
+stickable_coordinates(clock::FourierResidualAggregateClock) = beta_indices(clock.slab_provider)
+stickable_coordinates(clock::LinearGaussianAggregateClock) = beta_indices(clock.slab_provider)
+stickable_coordinates(clock::ExponentialSumAggregateClock) = beta_indices(clock.slab_provider)
 
 function _active_beta_from_free(provider::AbstractSlabPrior, free::BitVector)
     active_beta = BitVector(undef, length(beta_indices(provider)))
@@ -438,6 +472,39 @@ function boundary_logweights!(
         if stickable_beta[j] && !active_beta[j]
             out[j] = log_model_add_odds(model_prior, active_beta, j) +
                      log_boundary_density_zero(provider, x, active_beta, j)
+        end
+    end
+    return out
+end
+
+function boundary_logweights!(
+    out::AbstractVector,
+    provider::GlobalLogscaleExchangeableGaussianSlab,
+    model_prior::AbstractModelPrior,
+    x::AbstractVector,
+    active_beta::BitVector,
+    stickable_beta::BitVector,
+)
+    m = length(beta_indices(provider))
+    length(out) == m || throw(DimensionMismatch("out length $(length(out)) does not match beta dimension $m"))
+    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
+    length(stickable_beta) == m || throw(DimensionMismatch("stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
+    fill!(out, -Inf)
+    first_candidate = 0
+    @inbounds for j in eachindex(active_beta)
+        if stickable_beta[j] && !active_beta[j]
+            first_candidate = j
+            break
+        end
+    end
+    iszero(first_candidate) && return out
+    log_q = conditional_logdensity_zero(provider, x, active_beta,
+        first_candidate)
+    @inbounds for j in 1:m
+        if stickable_beta[j] && !active_beta[j]
+            logodds = log_model_add_odds(model_prior, active_beta, j)
+            out[j] = logodds == -Inf ? -Inf :
+                logodds == Inf ? Inf : logodds + log_q
         end
     end
     return out
