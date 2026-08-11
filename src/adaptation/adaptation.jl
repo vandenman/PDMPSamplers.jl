@@ -163,6 +163,17 @@ function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, preco
     return SequenceAdapter((adpt_flow, adpt_grad))
 end
 
+"""Construct the default adapter on a shared warmup adaptation schedule."""
+function default_warmup_adapter(flow::ContinuousDynamics,
+        grad::GradientStrategy, t_warmup::Real, t0::Real=0.0;
+        warmup_adaptation_interval::Union{Nothing,Real}=nothing)
+    interval = isnothing(warmup_adaptation_interval) ?
+        float(t_warmup) / 10 : float(warmup_adaptation_interval)
+    isfinite(interval) && interval >= 0 || throw(ArgumentError(
+        "warmup_adaptation_interval must be finite and nonnegative"))
+    return default_adapter(flow, grad, interval, t_warmup, t0)
+end
+
 # --- 5. Boomerang Adaptation ---
 
 """

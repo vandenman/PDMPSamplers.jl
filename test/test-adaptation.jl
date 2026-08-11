@@ -254,6 +254,30 @@
         @test ad.dt == 10.0
     end
 
+    @testset "default warmup adapter supports explicit matched schedules" begin
+        zz = ZigZag(3)
+        flow = PDMPSamplers.PreconditionedDynamics(
+            PDMPSamplers.IdentityPreconditioner(), zz)
+        grad = FullGradient(x -> x)
+        ad = PDMPSamplers.default_warmup_adapter(flow, grad, 5.0, 0.0)
+        @test ad.adapters[1] isa PDMPSamplers.PreconditionerAdapter
+        @test ad.adapters[1].dt == 0.5
+
+        short = PDMPSamplers.default_warmup_adapter(flow, grad, 0.5, 0.0)
+        @test short.adapters[1].dt == 0.05
+
+        eventwise = PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=0.0)
+        @test eventwise.adapters[1].dt == 0.0
+        explicit = PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=1.25)
+        @test explicit.adapters[1].dt == 1.25
+        @test_throws ArgumentError PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=-0.1)
+        @test_throws ArgumentError PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=Inf)
+    end
+
     @testset "default_dynamics_adapter for MutableBoomerang" begin
         flow_diag = AdaptiveBoomerang(3; scheme=:diagonal)
         ad_diag = PDMPSamplers.default_dynamics_adapter(flow_diag, 5.0, 0.0)

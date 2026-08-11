@@ -617,8 +617,8 @@ function _pdmp_sample_single(
     t_warmup_abs = t₀ + t_warmup
     trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
-    adapter = adapter isa NoAdaptation ? default_adapter(
-        flow, main_model.grad, t_warmup ÷ 10, t_warmup, t₀) : adapter
+    adapter = adapter isa NoAdaptation ? default_warmup_adapter(
+        flow, main_model.grad, t_warmup, t₀) : adapter
 
     warmup_criterion = _phase_criterion(warmup_stop, t_warmup_abs)
     stop_criterion = _phase_criterion(stop, T)
