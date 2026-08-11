@@ -64,6 +64,31 @@ struct SeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
 end
 
 """
+    BlockSeparableResidualEnvelope(weights, component_blocks, n_blocks,
+                                   component_scales!;
+                                   component_cell_scales! = nothing)
+
+Compact separable envelope for a Cartesian set of observations `(block, local)`.
+Each component row belongs to exactly one block and `weights[r, i]` stores only
+the local-observation weights. The represented full matrix has
+`n_blocks * size(weights, 2)` columns and structural zeros outside the row's
+block. This avoids materializing block-diagonal factor envelopes.
+"""
+struct BlockSeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
+    weights::Matrix{Float64}
+    component_blocks::Vector{Int}
+    block_components::Vector{Vector{Int}}
+    n_blocks::Int
+    component_scales!::F
+    component_cell_scales!::C
+    totals::Vector{Float64}
+    alias_tables::Vector{Union{Nothing,AliasTables.AliasTable{UInt64,Int}}}
+    scales::Vector{Float64}
+    cell_scales::Vector{Float64}
+    cumulative_masses::Vector{Float64}
+end
+
+"""
     GroupedResidualEnvelope(groups, component_scales!;
                             component_cell_scales!)
 
@@ -135,6 +160,46 @@ function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
     return SeparableResidualEnvelope(stored_weights, stored_scales,
         component_cell_scales!, totals,
         tables, zeros(Float64, size(stored_weights, 1)),
+        zeros(Float64, size(stored_weights, 1)),
+        zeros(Float64, size(stored_weights, 1)))
+end
+
+function BlockSeparableResidualEnvelope(weights::AbstractMatrix,
+        component_blocks::AbstractVector{<:Integer}, n_blocks::Integer,
+        component_scales!; component_cell_scales! = nothing,
+        certified_affine::Bool=false)
+    isempty(weights) && throw(ArgumentError(
+        "block-separable residual envelope weights must be nonempty"))
+    any(x -> !isfinite(x) || x < 0, weights) && throw(ArgumentError(
+        "block-separable residual envelope weights must be finite and nonnegative"))
+    n_blocks >= 1 || throw(ArgumentError(
+        "block-separable residual envelope must have at least one block"))
+    length(component_blocks) == size(weights, 1) || throw(DimensionMismatch(
+        "one block index is required per residual-envelope component"))
+    stored_blocks = Int.(component_blocks)
+    all(block -> 1 <= block <= n_blocks, stored_blocks) || throw(ArgumentError(
+        "block-separable residual-envelope block indices are out of range"))
+    stored_weights = Matrix{Float64}(weights)
+    totals = vec(sum(stored_weights; dims=2))
+    tables = Union{Nothing,AliasTables.AliasTable{UInt64,Int}}[
+        ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
+        for r in axes(stored_weights, 1)
+    ]
+    block_components = [Int[] for _ in 1:n_blocks]
+    @inbounds for component in eachindex(stored_blocks)
+        push!(block_components[stored_blocks[component]], component)
+    end
+    all(components -> !isempty(components), block_components) || throw(ArgumentError(
+        "every block must own at least one residual-envelope component"))
+    component_cell_scales! === nothing && !certified_affine && throw(ArgumentError(
+        "arbitrary residual-envelope component scales require an explicit certified " *
+        "component_cell_scales! callback; set certified_affine=true only for " *
+        "component scales that are affine in time"))
+    stored_scales = certified_affine ?
+        CertifiedAffineComponentScales(component_scales!) : component_scales!
+    return BlockSeparableResidualEnvelope(stored_weights, stored_blocks,
+        block_components, Int(n_blocks), stored_scales, component_cell_scales!,
+        totals, tables, zeros(Float64, size(stored_weights, 1)),
         zeros(Float64, size(stored_weights, 1)),
         zeros(Float64, size(stored_weights, 1)))
 end
@@ -396,7 +461,17 @@ end
 total_residual_bound(envelope::AbstractResidualEnvelope, state, t) =
     total_residual_bound(envelope, state, nothing, t)
 
+# Providers with a compact aggregate formula may specialize this hook to
+# avoid materializing all component masses for proposals rejected by the
+# pointwise aggregate screen. Before subset drawing they must then specialize
+# `prepare_residual_sampling!` to populate `scales` and `cumulative_masses`.
+screening_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t) =
+    total_residual_bound(envelope, state, flow, t)
+prepare_residual_sampling!(::AbstractResidualEnvelope, state, flow, t) = nothing
+
 n_observations(envelope::SeparableResidualEnvelope) = size(envelope.weights, 2)
+n_observations(envelope::BlockSeparableResidualEnvelope) =
+    envelope.n_blocks * size(envelope.weights, 2)
 n_observations(envelope::GroupedResidualEnvelope) = size(envelope.groups, 2)
 
 function observation_residual_bound(envelope::SeparableResidualEnvelope,
@@ -405,6 +480,22 @@ function observation_residual_bound(envelope::SeparableResidualEnvelope,
     @inbounds for component in axes(envelope.weights, 1)
         result += envelope.scales[component] *
             envelope.weights[component, observation]
+    end
+    return result
+end
+
+function observation_residual_bound(envelope::BlockSeparableResidualEnvelope,
+        observation::Integer)
+    local_count = size(envelope.weights, 2)
+    block0, local0 = divrem(observation - 1, local_count)
+    block = block0 + 1
+    local_index = local0 + 1
+    1 <= block <= envelope.n_blocks || throw(BoundsError(
+        1:n_observations(envelope), observation))
+    result = 0.0
+    @inbounds for component in envelope.block_components[block]
+        result += envelope.scales[component] *
+            envelope.weights[component, local_index]
     end
     return result
 end

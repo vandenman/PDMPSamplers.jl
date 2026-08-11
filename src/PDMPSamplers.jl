@@ -152,6 +152,7 @@ export
     FullGradient,
     SubsampledControlVariate,
     SeparableResidualEnvelope,
+    BlockSeparableResidualEnvelope,
     TrajectoryResidualEnvelope,
     DampedHCVResidualEnvelope,
     CoordinateWiseGradient,

@@ -24,6 +24,12 @@ end
 
 _draw_distinguished(rng, envelope::SeparableResidualEnvelope, component) =
     rand(rng, envelope.alias_tables[component])
+function _draw_distinguished(rng, envelope::BlockSeparableResidualEnvelope,
+        component)
+    local_index = rand(rng, envelope.alias_tables[component])
+    return (envelope.component_blocks[component] - 1) *
+        size(envelope.weights, 2) + local_index
+end
 _draw_distinguished(rng, envelope::GroupedResidualEnvelope, component) =
     rand(rng, envelope.members[component])
 
@@ -159,6 +165,7 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     copyto!(candidate, state)
     move_forward_time!(candidate, τ, flow)
     scale = n_observations(cv.envelope) / cv.m
+    prepare_residual_sampling!(cv.envelope, candidate, flow, 0.0)
     M_subset = draw_subset!(rng, cv, D, B)
     residual_subset_bound = subsampling_residual_subset_bound(
         cv.residual_oracle, candidate, flow, D, M_subset,
@@ -332,7 +339,8 @@ function next_event_time(rng::Random.AbstractRNG,
             _inc_counter_subsampling_cell_roof_proposals(stats)
             D = modes.use_linear ? pos(alg.affine_bound(τ_proposal)) :
                 pos(alg.pcb(τ_proposal))
-            B = total_residual_bound(cv.envelope, state, flow, τ_proposal)
+            B = screening_residual_bound(
+                cv.envelope, state, flow, τ_proposal)
             if _subsampling_bound_violation(alg, stats, D + B, bar_M, :aggregate)
                 _shrink_grid_after_bound_violation!(alg, stats)
                 break

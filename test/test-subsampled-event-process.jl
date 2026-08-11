@@ -116,6 +116,38 @@ end
         @test grouped_subset_bound == 3 *
             PDMPSamplers.observation_residual_bound(
                 grouped, only(grouped_cv.subset))
+
+        block_weights = [1.0 2.0 3.0; 0.0 1.0 0.0;
+                         4.0 0.0 1.0; 1.0 1.0 1.0]
+        block_scales = [2.0, 3.0, 5.0, 7.0]
+        block_callback = (out, state, flow, args...) ->
+            copyto!(out, block_scales)
+        block = BlockSeparableResidualEnvelope(
+            block_weights, [1, 1, 2, 2], 2, block_callback;
+            component_cell_scales! = block_callback)
+        @test block.totals == [6.0, 1.0, 5.0, 3.0]
+        @test PDMPSamplers.n_observations(block) == 6
+        PDMPSamplers.component_scales!(block.scales, block,
+            state, BouncyParticle(1, 0.0), 0.0)
+        @test [PDMPSamplers.observation_residual_bound(block, i)
+            for i in 1:6] == [2.0, 7.0, 6.0, 27.0, 7.0, 12.0]
+        @test PDMPSamplers.total_residual_bound(
+            block, state, BouncyParticle(1, 0.0), 0.0) == 61.0
+        @test_throws DimensionMismatch BlockSeparableResidualEnvelope(
+            block_weights, [1, 2], 2, block_callback;
+            component_cell_scales! = block_callback)
+        @test_throws ArgumentError BlockSeparableResidualEnvelope(
+            block_weights, [1, 1, 3, 3], 2, block_callback;
+            component_cell_scales! = block_callback)
+        block_cv = SubsampledControlVariate(
+            (out, x) -> fill!(out, 0.0),
+            (out, x, subset, anchor) -> fill!(out, 0.0),
+            block, [0.0], 1)
+        block_subset_bound = PDMPSamplers.draw_subset!(
+            MersenneTwister(82), block_cv, 0.0, 61.0)
+        @test block_subset_bound == 6 *
+            PDMPSamplers.observation_residual_bound(
+                block, only(block_cv.subset))
     end
 
     @testset "trajectory residual geometry dominates every supported flow" begin
