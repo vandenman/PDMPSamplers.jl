@@ -66,9 +66,20 @@ end
 
 reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache) = reflect!(state, ∇ϕ, flow, cache)
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache)
-    # this does not work in general! we'd need some kind of sub-cache here as well...
-    subcache = (; z = view(cache.z, 1:sum(state.free)))
-    reflect!(substate(state), view(∇ϕ, state.free), flow, subcache)
+    numerator = zero(eltype(state.ξ.θ))
+    denominator = zero(eltype(state.ξ.θ))
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ)
+        if state.free[i]
+            numerator += state.ξ.θ[i] * ∇ϕ[i]
+            denominator += abs2(∇ϕ[i])
+        end
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * numerator / denominator
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ)
+        state.free[i] && (state.ξ.θ[i] -= coefficient * ∇ϕ[i])
+    end
+    return nothing
 end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))
@@ -76,7 +87,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
 )
     x = state.ξ.x
     θ = state.ξ.θ
@@ -90,7 +101,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
     cached_gradient::AbstractVector,
 )
     θ = state.ξ.θ
@@ -133,18 +144,18 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    grad_and_nothing::Tuple{G,Nothing},
-) where {G}
-    ∇U = grad_and_nothing[1](state.ξ.x)
+    provider::GradientOnlyProvider,
+)
+    ∇U = provider.grad(state.ξ.x)
     return dot(∇U, state.ξ.θ), 0.0
 end
 
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    ::Tuple{G,Nothing},
+    ::GradientOnlyProvider,
     cached_gradient::AbstractVector,
-) where {G}
+)
     return dot(cached_gradient, state.ξ.θ), 0.0
 end
 
@@ -170,7 +181,7 @@ function rate_and_derivative(
     return dot(fd.grad_buf, θ), vhv
 end
 
-# The canonical freezing_time for BouncyParticle is defined in
+# The canonical sticking_time for BouncyParticle is defined in
 # src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.
 
 # Bounds computation for BPS

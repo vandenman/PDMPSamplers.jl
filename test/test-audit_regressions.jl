@@ -22,18 +22,17 @@ end
     @testset "DensePreconditionedZigZag refresh is a no-op" begin
         Random.seed!(11)
         flow = DensePreconditionedZigZag(3)
-        flow.metric.L .= [2.0 0.0 0.0; 0.5 3.0 0.0; -0.25 0.75 4.0]
-        flow.metric.Linv .= inv(LowerTriangular(flow.metric.L))
+        set_dense_preconditioner!(flow.metric,
+            [2.0 0.0 0.0; 0.5 3.0 0.0; -0.25 0.75 4.0])
 
         ξ = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(flow, 3))
         θ_before = copy(ξ.θ)
-        v_before = copy(flow.metric.v_canonical)
+        signs_before = LowerTriangular(flow.metric.L) \ ξ.θ
 
         PDMPSamplers.refresh_velocity!(ξ, flow)
 
         @test ξ.θ ≈ θ_before
-        @test flow.metric.v_canonical ≈ v_before
-        @test ξ.θ ≈ flow.metric.L * flow.metric.v_canonical
+        @test ξ.θ ≈ flow.metric.L * signs_before
     end
 
     @testset "Factorized trace bounds replay scalar coordinates" begin

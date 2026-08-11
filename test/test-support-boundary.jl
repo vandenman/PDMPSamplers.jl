@@ -1,6 +1,26 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 using LinearAlgebra
 
+struct _TypedBoundaryProbeError <: PDMPSamplers._SupportBoundaryProbeError end
+
+mutable struct _RecordingAggregateClock <: PDMPSamplers.AbstractAggregateUnstickClock
+    coordinates::Vector{Int}
+    horizons::Vector{Float64}
+end
+Base.copy(clock::_RecordingAggregateClock) =
+    _RecordingAggregateClock(copy(clock.coordinates), Float64[])
+PDMPSamplers.stickable_coordinates(clock::_RecordingAggregateClock) =
+    clock.coordinates
+function PDMPSamplers.sample_time(::Random.AbstractRNG,
+        clock::_RecordingAggregateClock, ::ContinuousDynamics,
+        ::StickyPDMPState, horizon::Real, ::BitVector)
+    push!(clock.horizons, Float64(horizon))
+    return isfinite(horizon) ? Float64(horizon) / 2 : 1.0
+end
+PDMPSamplers.sample_label(::Random.AbstractRNG,
+    clock::_RecordingAggregateClock, ::ContinuousDynamics,
+    ::StickyPDMPState, ::BitVector) = first(clock.coordinates)
+
 @testset "Support-boundary handling" begin
 
     # ── Synthetic model with a boundary at x[1] >= 1.0 ──
@@ -231,6 +251,97 @@ using LinearAlgebra
         @test result.stats[1].support_boundary_refresh_attempts >= result.stats[1].support_boundary_events
     end
 
+    @testset "support-boundary BPS refresh rebuilds sticky deadlines" begin
+        rng = PDMPSamplers.Random.Xoshiro(20260702)
+        model = _make_boundary_model()
+        flow = _make_boundary_flow()
+        public_alg = Sticky(_make_boundary_alg(; N=8, t_max=0.5), fill(0.5, d_boundary))
+        initial = SkeletonPoint([0.2, -0.3], [-1.0, 1.0])
+        state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, public_alg, 0.0, initial,
+        )
+        trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
+        old_deadlines = copy(alg.sticky_times)
+        ctx = PDMPSamplers.BoundaryContext(
+            copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0, eps(Float64),
+            ErrorException("test"), BouncyParticle, GridThinningStrategy,
+        )
+        opts = SupportBoundaryOptions(;
+            detect_boundaries=true,
+            mode=:line_search_truncated_refresh,
+            max_refresh_attempts=1,
+            refresh_probe_time=0.0,
+        )
+
+        result = PDMPSamplers._line_search_truncated_refresh_from_current_state!(
+            rng, state, model_, flow, alg, cache, stats, trace_manager, ctx, opts;
+            phase=:main,
+        )
+
+        @test result === :refresh
+        @test alg.sticky_times != old_deadlines
+        @test all(i -> alg.sticky_times[i] == state.t[] +
+            PDMPSamplers.sticking_time(state.ξ, flow, i), alg.stickable_indices)
+        @test last(first(alg.sticky_pq)) == minimum(alg.sticky_times)
+    end
+
+    @testset "aggregate BPS boundary refresh rebuilds both schedules" begin
+        function aggregate_boundary_grad!(out, x)
+            x[1] >= 1.0 && error("outside support")
+            out .= x
+            return out
+        end
+        d = 3
+        model = PDMPModel(d, FullGradient(aggregate_boundary_grad!))
+        flows = (
+            BouncyParticle(Matrix{Float64}(I, d, d), zeros(d)),
+            PreconditionedBPS(Matrix{Float64}(I, d, d), zeros(d)),
+        )
+        for (flow_index, flow) in pairs(flows)
+            rng = PDMPSamplers.Random.Xoshiro(20260710 + flow_index)
+            clock = _RecordingAggregateClock(collect(1:d), Float64[])
+            public_alg = AggregateSticky(
+                _make_boundary_alg(; N=8, t_max=0.5), clock, trues(d))
+            initial = SkeletonPoint([0.0, -0.3, 0.4], [0.0, 1.0, -1.0])
+            state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, public_alg, 0.0, initial)
+            trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
+            old_deadlines = copy(alg.sticky_times)
+            old_aggregate_time = alg.aggregate_unstick_time
+            old_horizon_calls = length(alg.clock.horizons)
+            ctx = PDMPSamplers.BoundaryContext(
+                copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0,
+                eps(Float64), ErrorException("test"), typeof(flow),
+                GridThinningStrategy)
+            opts = SupportBoundaryOptions(; detect_boundaries=true,
+                mode=:line_search_truncated_refresh, max_refresh_attempts=1,
+                refresh_probe_time=0.0)
+
+            result = PDMPSamplers._line_search_truncated_refresh_from_current_state!(
+                rng, state, model_, flow, alg, cache, stats, trace_manager,
+                ctx, opts; phase=:main)
+
+            @test result === :refresh
+            @test alg.sticky_times != old_deadlines
+            @test length(alg.clock.horizons) == old_horizon_calls + 1
+            _, earliest_stick = isempty(alg.sticky_pq) ? (0, Inf) :
+                first(alg.sticky_pq)
+            refreshed_horizon = max(0.0, earliest_stick - state.t[])
+            @test last(alg.clock.horizons) == refreshed_horizon
+            expected_unstick_delay = isfinite(refreshed_horizon) ?
+                refreshed_horizon / 2 : 1.0
+            @test alg.aggregate_unstick_time == state.t[] +
+                expected_unstick_delay
+            @test alg.aggregate_unstick_time != old_aggregate_time ||
+                refreshed_horizon != first(alg.clock.horizons)
+            @test all(i -> !haskey(alg.sticky_pq, i) ||
+                alg.sticky_pq[i] == alg.sticky_times[i], eachindex(alg.sticky_times))
+            @test all(i -> !state.free[i] || alg.sticky_times[i] == state.t[] +
+                PDMPSamplers.sticking_time(state.ξ, flow, i),
+                alg.stickable_indices)
+        end
+    end
+
     @testset "pdmp_sample — line_search_truncated_refresh recovers for PreconditionedBPS" begin
         model = _make_boundary_model()
         flow = PreconditionedBPS(Matrix{Float64}(I, d_boundary, d_boundary), zeros(d_boundary))
@@ -302,14 +413,14 @@ using LinearAlgebra
         @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
-    @testset "_get_rate_and_deriv_or_throw treats BridgeStan-style zero-bracket failures as probe failures" begin
+    @testset "_get_rate_and_deriv_or_throw treats typed zero-bracket failures as probe failures" begin
         rng = PDMPSamplers.Random.Xoshiro(8)
-        function bridgestan_like_grad!(out, x)
-            x[1] == 1.0 && error("BridgeStan gradient failed (code -1)")
+        function typed_probe_failure_grad!(out, x)
+            x[1] == 1.0 && throw(_TypedBoundaryProbeError())
             out .= x
             return out
         end
-        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        model = PDMPModel(d_boundary, FullGradient(typed_probe_failure_grad!))
         flow = _make_boundary_flow()
         alg = _make_boundary_alg(; N=20, t_max=2.0)
         state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
@@ -333,19 +444,19 @@ using LinearAlgebra
         @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
-    @testset "_throw_grid_boundary_error treats BridgeStan-style positive-bracket failures as probe failures" begin
-        function bridgestan_like_grad!(out, x)
+    @testset "_throw_grid_boundary_error treats typed positive-bracket failures as probe failures" begin
+        function typed_probe_failure_grad!(out, x)
             out .= x
             return out
         end
-        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        model = PDMPModel(d_boundary, FullGradient(typed_probe_failure_grad!))
         flow = _make_boundary_flow()
         original_state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
         current_state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
 
         err = try
             PDMPSamplers._throw_grid_boundary_error(
-                current_state, original_state, flow, model, ErrorException("BridgeStan gradient failed (code -1)");
+                current_state, original_state, flow, model, _TypedBoundaryProbeError();
                 t_valid=0.25, t_invalid=1.0,
             )
             nothing

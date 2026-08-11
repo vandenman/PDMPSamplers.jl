@@ -16,8 +16,10 @@ allocation_contract_rate(state, flow, provider) =
 allocation_contract_grid_rate(state, flow, provider) =
     PDMPSamplers.get_rate_and_deriv(state, flow, provider, false)
 
-allocation_contract_next_event!(rng, model, flow, alg, state, cache, stats) =
+function allocation_contract_next_event!(rng, model, flow, alg, state, cache, stats)
     PDMPSamplers.next_event_time(rng, model, flow, alg, state, cache, stats, 1.0, true, :horizon_hit)
+    return nothing
+end
 
 function allocation_contract_setup(flow)
     d = 4
@@ -29,9 +31,9 @@ end
 
 @testset "Hot-loop allocation contract" begin
     @testset "Boomerang rate derivatives" begin
-        state, model, alg, cache, stats = allocation_contract_setup(Boomerang(4))
-        provider = alg.grad_hvp_provider
-        flow = provider.grad.flow
+        flow = Boomerang(4)
+        state, model, alg, cache, stats = allocation_contract_setup(flow)
+        provider = PDMPSamplers._grid_event_provider(model, flow, alg, stats)
         for _ in 1:5
             allocation_contract_rate(state, flow, provider)
             allocation_contract_grid_rate(state, flow, provider)

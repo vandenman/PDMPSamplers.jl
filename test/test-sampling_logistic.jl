@@ -90,59 +90,6 @@ end
         end
     end
 
-    @testset "Subsampled gradient (ZigZag)" begin
-        Random.seed!(stable_test_seed(:zigzag, :logistic_sub))
-
-        nsub = n ÷ 10
-        T = 20_000.0
-
-        grad = SubsampledGradient(Base.Fix1(neg_gradient_sub_cv!, target), Base.Fix1(resample_indices!, target), nsub)
-        flow = ZigZag(Matrix(1.0I(d)), zeros(d))
-        model = PDMPModel(d, grad, Base.Fix1(neg_hvp_sub!, target))
-        alg = GridThinningStrategy()
-
-        x0 = zeros(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
-        ξ0 = SkeletonPoint(x0, θ0)
-
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
-
-        @test length(trace) > 100
-
-        test_logistic_approximation(trace, β_map; name="LogReg($d,$n) sub", elapsed=stats.elapsed_time)
-    end
-
-    @testset "Subsampled gradient multi-chain independence (ZigZag)" begin
-        Random.seed!(stable_test_seed(:zigzag, :logistic_sub_multichain))
-
-        nsub = n ÷ 10
-        T = 5_000.0
-
-        grad = SubsampledGradient(Base.Fix1(neg_gradient_sub_cv!, target), Base.Fix1(resample_indices!, target), nsub)
-        flow = ZigZag(Matrix(1.0I(d)), zeros(d))
-        model = PDMPModel(d, grad, Base.Fix1(neg_hvp_sub!, target))
-        alg = GridThinningStrategy()
-
-        x0 = zeros(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
-        ξ0 = SkeletonPoint(x0, θ0)
-
-        chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T; n_chains=2, progress=false)
-
-        @test length(chains) == 2
-        trace1, _ = chains[1]
-        trace2, _ = chains[2]
-        @test length(trace1) > 50
-        @test length(trace2) > 50
-
-        # Chains must have independent state: their means should differ
-        @test mean(trace1) != mean(trace2)
-
-        # Both chains should give reasonable posterior means
-        test_logistic_approximation(trace1, β_map; name="LogReg($d,$n) sub chain1")
-        test_logistic_approximation(trace2, β_map; name="LogReg($d,$n) sub chain2")
-    end
-
     @testset "Sticky ZigZag" begin
         d_s, n_s = 5, 200
         β_gen_s = [0.5, 0.0, 1.0, 0.0, -0.8]
@@ -189,46 +136,88 @@ end
         end
     end
 
-    @testset "CV-subsampled gradient and HVP unbiasedness (MC)" begin
-        Random.seed!(stable_test_seed(:logistic_mc_unbiasedness))
-
-        d_mc, n_mc = 4, 300
-        nsub = n_mc ÷ 10
-        N_mc = 2_000
-
-        target_mc = gen_data(LogisticRegressionModel, d_mc, n_mc)
-
-        β = randn(d_mc)
-        v = randn(d_mc)
-
-        set_anchor!(target_mc, randn(d_mc))   # anchor ≠ β to stress-test CV
-
-        true_grad = zeros(d_mc)
-        neg_gradient!(target_mc, true_grad, β)
-
-        true_hvp = zeros(d_mc)
-        neg_hvp!(target_mc, true_hvp, β, v)
-
-        grad_acc = zeros(d_mc)
-        hvp_acc  = zeros(d_mc)
-        g_tmp    = zeros(d_mc)
-        h_tmp    = zeros(d_mc)
-
-        for _ in 1:N_mc
-            resample_indices!(target_mc, nsub)
-            neg_gradient_sub_cv!(target_mc, g_tmp, β)
-            neg_hvp_sub!(target_mc, h_tmp, β, v)
-            grad_acc .+= g_tmp
-            hvp_acc  .+= h_tmp
+    @testset "Affine-logistic subsampling integration" begin
+        rng = Random.Xoshiro(0x1091571c)
+        N_sub, d_sub, minibatch = 40, 2, 5
+        X_sub = randn(rng, N_sub, d_sub)
+        β_true_sub = [0.4, -0.7]
+        y_sub = Float64.(rand(rng, N_sub) .<
+            LogExpFunctions.logistic.(X_sub * β_true_sub))
+        anchor = zeros(d_sub)
+        prior_precision = 0.25
+        logistic_grad! = function (out, x, rows)
+            fill!(out, 0.0)
+            for i in rows
+                η = dot(view(X_sub, i, :), x)
+                out .+= (LogExpFunctions.logistic(η) - y_sub[i]) .*
+                    view(X_sub, i, :)
+            end
+            return out
         end
+        anchor_likelihood = zeros(d_sub)
+        logistic_grad!(anchor_likelihood, anchor, axes(X_sub, 1))
+        deterministic! = (out, x) ->
+            (out .= anchor_likelihood .+ prior_precision .* x)
+        residual_oracle! = function (out, x, subset, a)
+            logistic_grad!(out, x, subset)
+            anchor_part = zeros(d_sub)
+            logistic_grad!(anchor_part, a, subset)
+            out .-= anchor_part
+        end
+        weights = reshape([0.25 * sum(abs2, view(X_sub, i, :))
+            for i in axes(X_sub, 1)], 1, :)
+        envelope = SeparableResidualEnvelope(weights,
+            (out, state, flow, t) -> begin
+                vnorm = norm(state.ξ.θ)
+                out[1] = vnorm *
+                    (norm(state.ξ.x - anchor) + vnorm * t)
+            end; certified_affine=true)
+        cv = SubsampledControlVariate(deterministic!, residual_oracle!,
+            envelope, anchor, minibatch;
+            deterministic_hvp! = ((out, x, v) ->
+                (out .= prior_precision .* v)))
+        subsampling_model = PDMPModel(d_sub, cv)
+        chain_model_a = copy(subsampling_model)
+        chain_model_b = copy(subsampling_model)
+        @test chain_model_a.grad.anchor !== chain_model_b.grad.anchor
+        @test chain_model_a.grad.residual_buffer !==
+            chain_model_b.grad.residual_buffer
+        @test chain_model_a.grad.envelope !== chain_model_b.grad.envelope
 
-        mc_grad = grad_acc ./ N_mc
-        mc_hvp  = hvp_acc  ./ N_mc
+        full_gradient! = function (out, x)
+            logistic_grad!(out, x, axes(X_sub, 1))
+            out .+= prior_precision .* x
+        end
+        full_hvp! = function (out, x, v)
+            out .= prior_precision .* v
+            for i in axes(X_sub, 1)
+                xi = view(X_sub, i, :)
+                p = LogExpFunctions.logistic(dot(xi, x))
+                out .+= (p * (1 - p) * dot(xi, v)) .* xi
+            end
+        end
+        full_model = PDMPModel(d_sub, FullGradient(full_gradient!), full_hvp!)
+        flow = BouncyParticle(d_sub, 0.7)
+        ξ = SkeletonPoint([0.2, -0.2], [1.0, 0.0])
+        alg = GridThinningStrategy(N=16, t_max=1.5, lazy=false,
+            bound_violation=:throw)
+        full_chains = pdmp_sample(ξ, flow, full_model, alg, 0.0, 8_000.0;
+            seed=809, progress=false)
+        full_trace = full_chains.traces[1]
+        subsampling_chains = pdmp_sample(ξ, flow, subsampling_model, alg,
+            0.0, 8_000.0; n_chains=2, threaded=false, seed=[808, 810],
+            progress=false)
 
-        mc_se = 1.0 / sqrt(N_mc)
-
-        @test isapprox(mc_grad, true_grad; atol=mc_se * norm(true_grad) + mc_se)
-        @test isapprox(mc_hvp,  true_hvp;  atol=mc_se * norm(true_hvp)  + mc_se)
+        @test n_chains(subsampling_chains) == 2
+        for chain in 1:2
+            subsampling_trace, subsampling_stats = subsampling_chains[chain]
+            @test length(subsampling_trace) > 100
+            @test mean(subsampling_trace) ≈ mean(full_trace) atol=0.18
+            @test diag(cov(subsampling_trace)) ≈
+                diag(cov(full_trace)) atol=0.2
+            @test subsampling_stats.residual_oracle_calls > 0
+            @test subsampling_stats.full_gradient_calls == 0
+        end
     end
 
 end

@@ -166,6 +166,8 @@ struct _GridSafetyLimitException <: Exception
     ctx::BoundaryContext
 end
 
+abstract type _SupportBoundaryProbeError <: Exception end
+
 struct _GradientProbeFailure <: Exception
     original_error::Any
 end
@@ -192,10 +194,6 @@ function _support_boundary_probe_is_valid(grad::FullGradient, model::PDMPModel, 
     catch
         false
     end
-end
-
-function _support_boundary_probe_is_valid(grad::SubsampledGradient, model::PDMPModel, ctx::BoundaryContext, t::Float64)
-    return _support_boundary_probe_is_valid(grad.full, model, ctx, t)
 end
 
 function _support_boundary_probe_is_valid(grad::CoordinateWiseGradient, model::PDMPModel, ctx::BoundaryContext, t::Float64)
@@ -273,10 +271,6 @@ function _localize_support_boundary!(grad::FullGradient, model::PDMPModel, ctx::
     end
 
     return _localization_from_bracket(t_lo, t_hi, opts)
-end
-
-function _localize_support_boundary!(grad::SubsampledGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
-    return _localize_support_boundary!(grad.full, model, ctx, opts)
 end
 
 function _localize_support_boundary!(grad::CoordinateWiseGradient, model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions)
@@ -390,4 +384,3 @@ _flow_has_linear_dynamics(::Type) = false
 _is_bps_family_flow(::Type{<:BouncyParticle}) = true
 _is_bps_family_flow(::Type{<:PreconditionedDynamics{P,D}}) where {P,D} = _is_bps_family_flow(D)
 _is_bps_family_flow(::Type) = false
-

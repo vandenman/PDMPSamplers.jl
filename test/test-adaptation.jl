@@ -48,7 +48,7 @@
     @testset "WelfordBoomerangStats fullrank mode" begin
         d = 4
         ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        @test ws.sum_xy_dt !== nothing
+        @test !isempty(ws.sum_xy_dt)
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
 
         Random.seed!(42)
@@ -214,6 +214,30 @@
         @test PDMPSamplers.adapt!(na) === nothing
     end
 
+    @testset "RefreshRateAdapter refresh-rate objective" begin
+        @test_throws ArgumentError PDMPSamplers.BoomerangAdaptationOptions(;
+            refresh_objective=:refresh_rate)
+        @test_throws ArgumentError PDMPSamplers.RefreshRateAdapter(
+            1.0, 0.0; objective=:refresh_rate)
+
+        flow = AdaptiveBoomerang(2; scheme=:diagonal, λref=1.0)
+        state = PDMPSamplers.PDMPState(0.0, PDMPSamplers.SkeletonPoint(zeros(2), ones(2)))
+        stats = PDMPSamplers.StatisticCounter()
+        ad = PDMPSamplers.RefreshRateAdapter(
+            1.0, 0.0; objective=:refresh_rate, target_refresh_rate=2.0)
+
+        state.t[] = 1.0
+        stats.refreshment_events = 1
+        PDMPSamplers.adapt!(ad, state, flow, nothing, nothing; stats)
+        @test flow.λref > 1.0
+
+        λref_after_increase = flow.λref
+        state.t[] = 2.0
+        stats.refreshment_events = 10
+        PDMPSamplers.adapt!(ad, state, flow, nothing, nothing; stats)
+        @test flow.λref < λref_after_increase
+    end
+
     @testset "default_adapter fallbacks" begin
         zz = ZigZag(3)
         grad = FullGradient(x -> x)
@@ -222,36 +246,36 @@
         @test result isa PDMPSamplers.NoAdaptation
     end
 
-    @testset "default_adapter for MutableBoomerang + SubsampledGradient" begin
-        d = 3
-        flow = AdaptiveBoomerang(d; scheme=:diagonal)
-        grad_sub = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            2,
-            false;
-            resample_dt=0.25,
-        )
-
-        adapter = PDMPSamplers.default_adapter(flow, grad_sub, 6.0, 40.0, 1.5)
-        @test adapter isa PDMPSamplers.SequenceAdapter
-
-        ad_flow, ad_grad = adapter.adapters
-        @test ad_flow isa PDMPSamplers.BoomerangAdapter
-        @test ad_flow.base_dt == 6.0
-        @test ad_flow.last_update == 1.5
-        @test ad_grad isa PDMPSamplers.SequenceAdapter
-    end
-
     @testset "default_dynamics_adapter for PreconditionedDynamics" begin
         zz = ZigZag(3)
         precond = PDMPSamplers.PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), zz)
         ad = PDMPSamplers.default_dynamics_adapter(precond, 10.0, 0.0)
         @test ad isa PDMPSamplers.PreconditionerAdapter
         @test ad.dt == 10.0
+    end
+
+    @testset "default warmup adapter supports explicit matched schedules" begin
+        zz = ZigZag(3)
+        flow = PDMPSamplers.PreconditionedDynamics(
+            PDMPSamplers.IdentityPreconditioner(), zz)
+        grad = FullGradient(x -> x)
+        ad = PDMPSamplers.default_warmup_adapter(flow, grad, 5.0, 0.0)
+        @test ad.adapters[1] isa PDMPSamplers.PreconditionerAdapter
+        @test ad.adapters[1].dt == 0.5
+
+        short = PDMPSamplers.default_warmup_adapter(flow, grad, 0.5, 0.0)
+        @test short.adapters[1].dt == 0.05
+
+        eventwise = PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=0.0)
+        @test eventwise.adapters[1].dt == 0.0
+        explicit = PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=1.25)
+        @test explicit.adapters[1].dt == 1.25
+        @test_throws ArgumentError PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=-0.1)
+        @test_throws ArgumentError PDMPSamplers.default_warmup_adapter(
+            flow, grad, 5.0, 0.0; warmup_adaptation_interval=Inf)
     end
 
     @testset "default_dynamics_adapter for MutableBoomerang" begin
@@ -269,6 +293,23 @@
         @test ad_lr.scheme == :lowrank
     end
 
+    @testset "RefreshRateAdapter skips empty evaluation windows" begin
+        flow = AdaptiveBoomerang(2; scheme=:diagonal, λref=0.5)
+        ad = PDMPSamplers.RefreshRateAdapter(1.0, 0.0)
+        state = PDMPState(1.0, SkeletonPoint(zeros(2), ones(2)))
+        stats = PDMPSamplers.StatisticCounter()
+
+        PDMPSamplers.adapt!(Random.default_rng(), ad, state, flow, nothing, nothing; stats)
+
+        @test flow.λref == 0.5
+        @test ad.prev_total_evals == 0
+        @test ad.prev_refresh_events == 0
+        @test ad.prev_pdmp_time == 1.0
+        @test ad.last_update == 1.0
+        @test ad.no_updates_done == 1
+        @test ad.did_update == false
+    end
+
     @testset "BoomerangAdapter construction" begin
         d = 4
         ad = PDMPSamplers.BoomerangAdapter(2.0, 1.0, d; scheme=:fullrank)
@@ -277,13 +318,17 @@
         @test ad.no_updates_done == 0
         @test ad.scheme == :fullrank
         @test ad.stats isa PDMPSamplers.WelfordBoomerangStats
-        @test ad.stats.sum_xy_dt !== nothing
+        @test !isempty(ad.stats.sum_xy_dt)
     end
 
     @testset "Allocation-free stats helpers" begin
         d = 3
 
         ws = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
+        flow = AdaptiveBoomerang(d; scheme=:fullrank)
+        θ0 = zeros(d)
+        PDMPSamplers.welford_update!(ws, ones(d), θ0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, 2 .* ones(d), θ0, 1.0, flow)
         μ = zeros(d)
         C = zeros(d, d)
         for _ in 1:5
@@ -355,10 +400,18 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
 
         m = mean(trace)
-        @test maximum(abs.(m .- μ_true)) ≤ 3.1
+        lrp = flow.Γ::PDMPSamplers.LowRankPrecision
+        @test length(trace) > 1000
+        @test all(isfinite, m)
+        @test maximum(abs.(m .- μ_true)) ≤ 1.0
+        @test maximum(abs.(flow.μ .- μ_true)) ≤ 1.5
+        @test all(isfinite, lrp.Λ)
+        @test all(lrp.Λ .> 0)
+        @test all(isfinite, lrp.D)
+        @test all(lrp.D .> 0)
     end
 
     @testset "SequenceAdapter adapt!" begin
@@ -366,173 +419,39 @@
         na2 = PDMPSamplers.NoAdaptation()
         seq = PDMPSamplers.SequenceAdapter((na1, na2))
         PDMPSamplers.adapt!(seq, nothing, nothing, nothing, nothing)
+        @test !PDMPSamplers.finish_warmup!(
+            seq, nothing, nothing, nothing, nothing, nothing)
     end
 
-    @testset "AnchorBankAdapter adapt! — warmup phase triggers update" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        select_called = Ref(0)
-        update_trace = Ref{Any}(nothing)
-        ad = AnchorBankAdapter(
-            _ -> (select_called[] += 1),
-            tr -> (update_trace[] = tr),
-            5.0, 0.0, true,
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:warmup)
-
-        @test select_called[] == 1
-        @test update_trace[] === nothing   # get_warmup_trace returns nothing
-        @test ad.last_update == 0.0
-    end
-
-    @testset "AnchorBankAdapter adapt! — main phase with warmup_only=false triggers update" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        update_called = Ref(0)
-        ad = AnchorBankAdapter(
-            _ -> nothing,
-            _ -> (update_called[] += 1),
-            5.0, 0.0, false,
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
-
-        @test update_called[] == 0
-        @test ad.last_update == 0.0
-    end
-
-    @testset "AnchorBankAdapter adapt! — main phase with warmup_only=true skips update" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        select_called = Ref(0)
-        update_called = Ref(0)
-        ad = AnchorBankAdapter(
-            _ -> (select_called[] += 1),
-            _ -> (update_called[] += 1),
-            5.0, 0.0, true,
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:main)
-
-        @test select_called[] == 0
-        @test update_called[] == 0
-        @test ad.last_update == 0.0
-    end
-
-    @testset "AnchorBankAdapter adapt! — update not triggered when interval not elapsed" begin
-        d = 3
-        x = [1.0, 2.0, 3.0]
-        state = PDMPState(10.0, SkeletonPoint(x, zeros(d)))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 100.0)
-
-        select_called = Ref(0)
-        update_called = Ref(0)
-        ad = AnchorBankAdapter(
-            _ -> (select_called[] += 1),
-            _ -> (update_called[] += 1),
-            5.0, 8.0, true,   # 10.0 - 8.0 = 2.0 < 5.0
-        )
-
-        PDMPSamplers.adapt!(ad, state, nothing, nothing, trace_mgr; phase=:warmup)
-
-        @test select_called[] == 1   # select always runs
-        @test update_called[] == 0   # update not triggered
-        @test ad.last_update == 8.0  # unchanged
-    end
-
-    @testset "AnchorUpdater adapt! — warmup triggers update_anchor!" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]  # iterable with ≥2 elements
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0)
-
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:warmup)
-        @test anchor_called[] == 1
-        @test ad.last_update == 10.0
-    end
-
-    @testset "AnchorUpdater adapt! — not triggered when interval not elapsed" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 8.0)  # 10.0 - 8.0 = 2.0 < 5.0
-
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:warmup)
-        @test anchor_called[] == 0
-        @test ad.last_update == 8.0
-    end
-
-    @testset "AnchorUpdater adapt! — main phase with warmup_only=false" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0, false)
+    @testset "subsampling anchor-bank selection continues after warmup" begin
+        state = PDMPState(10.0, SkeletonPoint([1.0], [0.0]))
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 5.0)
+        envelope = TrajectoryResidualEnvelope(ones(1, 1), [0.0])
+        grad = SubsampledControlVariate(
+            (out, x) -> fill!(out, 0.0),
+            (out, x, subset, anchor) -> fill!(out, 0.0),
+            envelope, [0.0], 1)
+        selected = Ref(0)
+        updated = Ref(0)
+        ad = PDMPSamplers.SubsamplingAnchorBankAdapter(
+            (cv, x, phase) -> (selected[] += phase === :main),
+            (cv, trace) -> (updated[] += 1),
+            1.0, 0.0)
 
         PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
-        @test anchor_called[] == 1
-        @test ad.last_update == 10.0
-    end
-
-    @testset "AnchorUpdater adapt! — main phase skipped when warmup_only=true" begin
-        d = 3
-        state = PDMPState(10.0, SkeletonPoint(ones(d), zeros(d)))
-        fake_trace = [1, 2]
-        trace_mgr = PDMPSamplers.TraceManager(fake_trace, fake_trace, 100.0)
-
-        anchor_called = Ref(0)
-        grad = (; update_anchor! = _ -> (anchor_called[] += 1))
-        ad = PDMPSamplers.AnchorUpdater(5.0, 0.0, true)
-
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
-        @test anchor_called[] == 0
+        @test selected[] == 1
+        @test updated[] == 0
         @test ad.last_update == 0.0
+
+        finished = Ref(0)
+        staged = PDMPSamplers.SubsamplingAnchorBankAdapter(
+            (cv, x, phase) -> nothing,
+            (cv, trace) -> nothing,
+            (cv, args...) -> (finished[] += 1; true),
+            1.0, 0.0)
+        @test PDMPSamplers.finish_warmup!(staged, state, nothing, grad,
+            trace_mgr, PDMPSamplers.StatisticCounter())
+        @test finished[] == 1
     end
 
-    @testset "default_adapter for MutableBoomerang + SubsampledGradient + AnchorBankAdapter" begin
-        d = 3
-        flow = AdaptiveBoomerang(d; scheme=:diagonal)
-        grad_sub = SubsampledGradient(
-            (out, x) -> (out .= x),
-            n -> nothing,
-            tr -> nothing,
-            (out, x) -> (out .= x),
-            5,
-            2,
-            false;
-            resample_dt=0.25,
-        )
-        bank_adapter = AnchorBankAdapter(_ -> nothing, _ -> nothing, 0.0, 0.0, true)
-
-        adapter = PDMPSamplers.default_adapter(flow, grad_sub, bank_adapter, 6.0, 40.0, 1.5)
-
-        @test adapter isa PDMPSamplers.SequenceAdapter
-        ad_flow, ad_resampler, ad_bank = adapter.adapters
-        @test ad_flow isa PDMPSamplers.BoomerangAdapter
-        @test ad_resampler isa PDMPSamplers.GradientResampler
-        @test ad_bank === bank_adapter
-        @test bank_adapter.update_dt ≈ 40.0 / 2   # t_warmup / no_anchor_updates
-        @test bank_adapter.last_update == 1.5
-    end
 end

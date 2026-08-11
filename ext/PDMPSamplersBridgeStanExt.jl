@@ -3,32 +3,75 @@ module PDMPSamplersBridgeStanExt
 using PDMPSamplers
 using BridgeStan
 using Base.Libc.Libdl: dlsym, dlpath
-import PDMPSamplers: PDMPModel, FullGradient
+import PDMPSamplers: PDMPModel, FullGradient, _SupportBoundaryProbeError, _last_gradient_potential, _potential_available, _potential
 
 # ── FastBridgeStanModel ──────────────────────────────────────────────────────
 # Eliminates per-call overhead from BridgeStan: caches dlsym function pointers
 # and pre-allocates Ref{Float64}/Ref{Cstring} buffers that are reused across
 # millions of gradient/HVP evaluations.
 
+struct BridgeStanCallError <: _SupportBoundaryProbeError
+    operation::Symbol
+    code::Cint
+    message::String
+end
+
+function Base.showerror(io::IO, err::BridgeStanCallError)
+    print(io, "BridgeStan ", err.operation, " failed (code ", err.code, ")")
+    isempty(err.message) || print(io, ": ", err.message)
+end
+
 struct FastBridgeStanModel
     # all the pointers are "owned" by the StanModel, so we keep it here to avoid it from going out of scope
     owner::BridgeStan.StanModel
     lib::Ptr{Nothing}
     stanmodel::Ptr{BridgeStan.StanModelStruct}
+    log_density_fn::Ptr{Nothing}
     grad_fn::Ptr{Nothing}
     hvp_fn::Ptr{Nothing}
+    free_error_fn::Ptr{Nothing}
     lp::Base.RefValue{Float64}
+    potential_lp::Base.RefValue{Float64}
     err::Base.RefValue{Cstring}
     d::Int
 end
 
 function FastBridgeStanModel(sm::BridgeStan.StanModel)
     d = BridgeStan.param_unc_num(sm)
+    log_density_fn = dlsym(sm.lib, :bs_log_density)
     grad_fn = dlsym(sm.lib, :bs_log_density_gradient)
     hvp_fn = dlsym(sm.lib, :bs_log_density_hessian_vector_product)
+    free_error_fn = dlsym(sm.lib, :bs_free_error_msg)
     lp = Ref(0.0)
-    err = Ref{Cstring}()
-    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, grad_fn, hvp_fn, lp, err, d)
+    potential_lp = Ref(0.0)
+    err = Ref{Cstring}(C_NULL)
+    FastBridgeStanModel(sm, sm.lib, sm.stanmodel, log_density_fn, grad_fn, hvp_fn, free_error_fn, lp, potential_lp, err, d)
+end
+
+function _take_bridgestan_error_message!(m::FastBridgeStanModel)
+    ptr = m.err[]
+    m.err[] = C_NULL
+    ptr == C_NULL && return ""
+    try
+        return unsafe_string(ptr)
+    finally
+        @ccall $(m.free_error_fn)(ptr::Cstring)::Cvoid
+    end
+end
+
+function fast_potential(m::FastBridgeStanModel, q::Vector{Float64})
+    m.potential_lp[] = 0.0
+    m.err[] = C_NULL
+    rc = @ccall $(m.log_density_fn)(
+        m.stanmodel::Ptr{BridgeStan.StanModelStruct},
+        true::Bool, true::Bool,
+        q::Ref{Cdouble}, m.potential_lp::Ref{Cdouble},
+        m.err::Ref{Cstring},
+    )::Cint
+    if rc != 0
+        throw(BridgeStanCallError(:log_density, rc, _take_bridgestan_error_message!(m))) # COV_EXCL_LINE
+    end
+    return -m.potential_lp[]
 end
 
 function Base.copy(m::FastBridgeStanModel)
@@ -41,6 +84,7 @@ end
 
 function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, out::Vector{Float64})
     m.lp[] = 0.0
+    m.err[] = C_NULL
     rc = @ccall $(m.grad_fn)(
         m.stanmodel::Ptr{BridgeStan.StanModelStruct},
         true::Bool, true::Bool,
@@ -48,13 +92,14 @@ function fast_log_density_gradient!(m::FastBridgeStanModel, q::Vector{Float64}, 
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan gradient failed (code $rc)") # COV_EXCL_LINE
+        throw(BridgeStanCallError(:gradient, rc, _take_bridgestan_error_message!(m))) # COV_EXCL_LINE
     end
     return out
 end
 
 function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Vector{Float64}, out::Vector{Float64})
     m.lp[] = 0.0
+    m.err[] = C_NULL
     rc = @ccall $(m.hvp_fn)(
         m.stanmodel::Ptr{BridgeStan.StanModelStruct},
         true::Bool, true::Bool,
@@ -63,7 +108,7 @@ function fast_log_density_hvp!(m::FastBridgeStanModel, q::Vector{Float64}, v::Ve
         m.err::Ref{Cstring},
     )::Cint
     if rc != 0
-        error("BridgeStan HVP failed (code $rc)") # COV_EXCL_LINE
+        throw(BridgeStanCallError(:hvp, rc, _take_bridgestan_error_message!(m))) # COV_EXCL_LINE
     end
     return out
 end
@@ -80,6 +125,9 @@ end
 
 Base.copy(g::BridgeStanGradient) = BridgeStanGradient(copy(g.model))
 PDMPSamplers._copy_callable(g::BridgeStanGradient) = copy(g)
+_potential_available(::BridgeStanGradient) = true
+_potential(g::BridgeStanGradient, x::Vector{Float64}) = fast_potential(g.model, x)
+_last_gradient_potential(g::BridgeStanGradient) = -g.model.lp[]
 
 struct BridgeStanHVP{M<:FastBridgeStanModel,V<:Vector{Float64}} <: Function
     model::M
@@ -98,7 +146,7 @@ PDMPSamplers._copy_callable(h::BridgeStanHVP) = copy(h)
 # ── PDMPModel constructors ───────────────────────────────────────────────────
 
 """
-    PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=true)
+    PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=false)
 
 Construct a `PDMPModel` from a BridgeStan StanModel.
 
@@ -109,10 +157,9 @@ Uses `FastBridgeStanModel` internally to cache function pointers and pre-allocat
 buffers, eliminating per-call dlsym/allocation overhead.
 
 When `hvp=false` (default), directional curvature is computed via scalar finite
-differences (`FiniteDiffVHV`), which reuses the base gradient from the rate computation
-and adds only one extra gradient call per grid point. When `hvp=true`, Stan's compiled
-Hessian-vector product is used instead, giving exact curvature at the cost of a full
-d-vector HVP per grid point (2-3x a gradient call).
+differences (`FiniteDiffVHV`), which reuses the base gradient from the rate
+computation and adds only one extra gradient call per grid point. When `hvp=true`,
+Stan's compiled Hessian-vector product is used instead.
 
 # Arguments
 - `sm::BridgeStan.StanModel`: A compiled Stan model
@@ -177,14 +224,15 @@ function PDMPModel(model_path::String, data_path::String=""; hvp::Bool=false, kw
     return PDMPModel(sm; hvp=hvp)
 end
 
+# TODO: move these to the R package only
 # Precompile entry-point signatures.
 # We cannot invoke these (no .so on disk at precompile time), but recording
 # the specialisations caches the inference work for these constructors.
-import PrecompileTools
-PrecompileTools.@compile_workload begin
-    precompile(PDMPModel, (BridgeStan.StanModel,))
-    precompile(PDMPModel, (String, String))
-    precompile(PDMPModel, (String,))
-end
+# import PrecompileTools
+# PrecompileTools.@compile_workload begin
+#     precompile(PDMPModel, (BridgeStan.StanModel,))
+#     precompile(PDMPModel, (String, String))
+#     precompile(PDMPModel, (String,))
+# end
 
 end # module

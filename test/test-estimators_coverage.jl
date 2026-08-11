@@ -1,5 +1,17 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+struct _TestMaskOccupation end
+const _test_mask_occupation = _TestMaskOccupation()
+
+function PDMPSamplers._integrate_segment(
+    ::_TestMaskOccupation,
+    ::PDMPSamplers.ContinuousDynamics,
+    x0, x1, θ0, θ1, t0, t1,
+    free::AbstractVector{Bool},
+)
+    return Float64.(free) .* (t1 - t0)
+end
+
 @testset "Estimators coverage" begin
 
     @testset "MutableBoomerang trapezoidal mean integration" begin
@@ -84,6 +96,56 @@
             @test buf[2] == 0.0  # frozen, μ=2.0: must not be counted
             @test buf[3] == 0.0  # frozen, μ=-1.5: must not be counted
             @test buf[4] == 0.0  # frozen, μ=0.5: must not be counted
+        end
+    end
+
+    @testset "ESS preserves sticky Boomerang masks" begin
+        times = [0.0, 0.2, 1.7, 2.0]
+        positions = zeros(1, length(times))
+        velocities = zeros(1, length(times))
+        masks = falses(1, length(times))
+        trace = PDMPTrace(
+            times, positions, velocities,
+            Boomerang(Diagonal([1.0]), [2.0], 0.0), masks)
+
+        # With every segment frozen, all exact batch means are identical even
+        # though an ordinary Boomerang trajectory would oscillate around μ=2.
+        @test ess(trace, [0.0], [1.0]; n_batches=3) == [3.0]
+    end
+
+    @testset "PDMPDiscretize keeps frozen Boomerang coordinates frozen" begin
+        # Regression: discretization must mirror sticky segment semantics. A
+        # sticky trace retains the free mask because x=0 and θ=0 alone are
+        # ambiguous under a Boomerang flow with nonzero reference mean.
+        d = 2
+        μ = [2.0, -1.0]
+        for flow in (Boomerang(Diagonal(ones(d)), μ), AdaptiveBoomerang(Diagonal(ones(d)), μ))
+            state0 = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 1.0], [0.0, 0.5]),
+                BitVector([false, true]))
+            state2 = StickyPDMPState(Ref(2.0), SkeletonPoint([0.0, 1.0], [0.0, 0.5]),
+                BitVector([false, true]))
+            trace = PDMPTrace(state0, flow)
+            push!(trace, state2)
+            samples = Matrix(PDMPDiscretize(trace, 0.5))
+
+            @test all(iszero, samples[:, 1])
+            @test any(!iszero, samples[:, 2])
+            @test mean(trace)[1] == 0.0
+            @test var(trace)[1] == 0.0
+            @test all(iszero, cov(trace)[1, :])
+            @test all(iszero, cov(trace)[:, 1])
+            @test PDMPSamplers.cdf(trace, 0.0; coordinate=1) == 1.0
+            @test quantile(trace, 0.25; coordinate=1) == 0.0
+            @test quantile(trace, [0.25, 0.5, 0.75]; coordinate=1) == zeros(3)
+            @test inclusion_probs(trace)[1] == 0.0
+            @test PDMPSamplers._integrate(trace, _test_mask_occupation) == [0.0, 1.0]
+
+            ordinary = PDMPTrace([
+                PDMPEvent(0.0, [0.0, 1.0], [0.0, 0.5]),
+                PDMPEvent(2.0, [0.0, 1.0], [0.0, 0.5]),
+            ], flow)
+            ordinary_samples = Matrix(PDMPDiscretize(ordinary, 0.5))
+            @test ordinary_samples[2, 1] ≈ μ[1] * (1 - cos(0.5))
         end
     end
 

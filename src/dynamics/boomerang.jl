@@ -32,6 +32,11 @@ All Boomerang dynamics methods dispatch on this type.
 """
 const AnyBoomerang = Union{Boomerang, MutableBoomerang}
 
+default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
+                                model_prior::AbstractModelPrior,
+                                ::AnyBoomerang) =
+    FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=true)
+
 
 """
     LowRankPrecision{T<:Real}
@@ -294,25 +299,8 @@ function refresh_velocity!(rng::Random.AbstractRNG, θ::AbstractVector, flow::An
     end
     return θ
 end
-function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::AnyBoomerang)
-    ΣL = flow.ΣL
-    # ΣL = cholesky(Symmetric(L*L')).L  # could cache this if many stickies
-    ΣLs = view(ΣL, state.free, :)
-    θ = state.ξ.θ
-    randn!(rng, θ)
-    u = similar(θ, sum(state.free))
-    mul!(u, ΣLs, θ)
-    j = 1
-    for i in eachindex(θ)
-        if state.free[i]
-            θ[i] = u[j]
-            j += 1
-        else
-            θ[i] = zero(eltype(θ))
-        end
-    end
-    return θ
-end
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::AnyBoomerang) = draw_stratum_velocity!(rng, state, flow)
 
 reflect!(::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(ξ, ∇ϕ, flow, cache)
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
@@ -362,7 +350,7 @@ function move_forward_time!(state::StickyPDMPState, τ::Real, flow::AnyBoomerang
     state
 end
 
-function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::BitVector)
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::AbstractVector{Bool})
     x, θ = ξ.x, ξ.θ
     μ = flow.μ
     s, c = sincos(τ)
@@ -417,7 +405,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
 )
     grad = _provider_grad(provider)
     return _boomerang_rate_and_derivative(
@@ -427,14 +415,14 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
     cached_gradient::AbstractVector,
 )
     return _boomerang_rate_and_derivative(
         state, flow, _provider_grad(provider), _provider_hvp(provider), cached_gradient)
 end
 
-function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
+function sticking_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
     μ = flow.μ[i]
@@ -524,26 +512,8 @@ function refresh_velocity!(rng::Random.AbstractRNG, θ::AbstractVector, flow::Lo
     return θ
 end
 
-function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::LowRankMutableBoomerang)
-    lrp = flow.Γ
-    θ = state.ξ.θ
-    # Sample θ_free ~ N(0, Σ[free,free]) where Σ = D + VΛV'
-    buf_r = lrp.buf_r1
-    randn!(rng, buf_r)
-    buf_r .*= lrp.Λsqrt  # Λ^{1/2} ε₂
-    for i in eachindex(θ)
-        if state.free[i]
-            val = lrp.Dsqrt[i] * randn(rng)
-            for k in eachindex(buf_r)
-                val += lrp.V[i, k] * buf_r[k]
-            end
-            θ[i] = val
-        else
-            θ[i] = zero(eltype(θ))
-        end
-    end
-    return θ
-end
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::LowRankMutableBoomerang) = draw_stratum_velocity!(rng, state, flow)
 
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::LowRankMutableBoomerang, cache)
     θ = ξ.θ

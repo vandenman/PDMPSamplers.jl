@@ -8,9 +8,9 @@ The code below is a llm-generated metaprogrammed drop-in replacement for
 the hand-written hot-garbage counter plumbing that used to be there.
 
 They are very useful for debugging and performance analysis.
-But most users don't need them, so the current design is that
-they are parametric so that end-users won't even notice they exist,
-assuming Julia compiles away the no-op methods.
+The default `StatisticCounter` keeps user-facing counts. Expensive grid/lazy/
+affine/componentwise diagnostics live in `DevelStatisticCounter` for research
+and performance work.
 
 
 Public API preserved:
@@ -325,6 +325,9 @@ end
     reflections_accepted::Int
     refreshment_events::Int
     sticky_events::Int
+    sticky_freezes::Int
+    sticky_unfreezes::Int
+    sticky_unfreeze_rejections::Int
     boundary_reflections::Int
     last_rejected::Bool
 end
@@ -335,6 +338,9 @@ end
         reflections_accepted,
         refreshment_events,
         sticky_events,
+        sticky_freezes,
+        sticky_unfreezes,
+        sticky_unfreeze_rejections,
         boundary_reflections,
     )
 
@@ -345,6 +351,9 @@ end
         reflections_accepted,
         refreshment_events,
         sticky_events,
+        sticky_freezes,
+        sticky_unfreezes,
+        sticky_unfreeze_rejections,
     )
 
     get_any(last_rejected)
@@ -364,22 +373,88 @@ end
     )
 end
 
+@counter_struct mutable struct RunSummaryCounter <: AbstractStatisticCounter
+    warmup_events::Int
+    main_events::Int
+    warmup_elapsed_time::Float64
+    main_elapsed_time::Float64
+    warmup_phase_elapsed_time::Float64
+    main_phase_elapsed_time::Float64
+    initialization_elapsed_time::Float64
+    transition_elapsed_time::Float64
+    warmup_adapter_finish_elapsed_time::Float64
+    main_sampler_initialization_elapsed_time::Float64
+    algorithm_warmup_finish_elapsed_time::Float64
+    finalization_elapsed_time::Float64
+    elapsed_time::Float64
+    stop_reason::Symbol
+end
+
+@counter_ops RunSummaryCounter begin
+    incval(
+        warmup_events,
+        main_events,
+        warmup_elapsed_time,
+        main_elapsed_time,
+    )
+
+    set(
+        initialization_elapsed_time,
+        warmup_phase_elapsed_time,
+        main_phase_elapsed_time,
+        transition_elapsed_time,
+        warmup_adapter_finish_elapsed_time,
+        main_sampler_initialization_elapsed_time,
+        algorithm_warmup_finish_elapsed_time,
+        finalization_elapsed_time,
+        elapsed_time,
+        stop_reason,
+    )
+end
+
 @counter_struct mutable struct GradientCallCounter <: AbstractStatisticCounter
     ∇f_calls::Int
     ∇²f_calls::Int
+    full_gradient_calls::Int
+    prior_gradient_calls::Int
+    fd_curvature_gradient_calls::Int
+    potential_calls::Int
+    residual_oracle_calls::Int
+    deterministic_gradient_calls::Int
 end
 
 @counter_ops GradientCallCounter begin
     inc(
         ∇f_calls,
         ∇²f_calls,
+        full_gradient_calls,
+        prior_gradient_calls,
+        fd_curvature_gradient_calls,
+        potential_calls,
+        residual_oracle_calls,
+        deterministic_gradient_calls,
     )
 
     get_sum(
         ∇f_calls,
         ∇²f_calls,
+        full_gradient_calls,
+        prior_gradient_calls,
+        fd_curvature_gradient_calls,
+        potential_calls,
+        residual_oracle_calls,
+        deterministic_gradient_calls,
     )
 end
+
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:full_gradient}) =
+    _inc_counter_full_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:prior_gradient}) =
+    _inc_counter_prior_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:ordinary_full_gradient}) =
+    _inc_counter_full_gradient_calls(stats)
+@inline _inc_gradient_purpose!(stats::AbstractStatisticCounter, ::Val{:deterministic_gradient}) =
+    _inc_counter_deterministic_gradient_calls(stats)
 
 @counter_struct mutable struct GridThinningCounter <: AbstractStatisticCounter
     grid_builds::Int
@@ -394,6 +469,22 @@ end
     grid_N_sum::Float64
     grid_tmax_sum::Float64
     grid_h_sum::Float64
+    grid_initial_N::Int
+    grid_final_N::Int
+    grid_initial_tmax::Float64
+    grid_final_tmax::Float64
+    grid_initial_h::Float64
+    grid_final_h::Float64
+    grid_warmup_objective_events::Float64
+    grid_warmup_objective_endpoint_gradients::Float64
+    grid_warmup_objective_acceptance_gradients::Float64
+    grid_warmup_objective_gradients_per_event::Float64
+    grid_warmup_objective_horizon_hits::Float64
+    grid_warmup_objective_horizon_rate::Float64
+    grid_warmup_objective_rejections::Float64
+    grid_warmup_objective_rejection_rate::Float64
+    grid_schedule_frozen::Bool
+    curvature_backend::Symbol
     grid_certificate_calls::Int
     grid_certificate_fallbacks::Int
     grid_budget_extensions::Int
@@ -411,6 +502,14 @@ end
     grid_bound_violations::Int
     grid_endpoint_derivative_points_loaded::Int
     grid_resets_from_dynamics_adaptation::Int
+    positive_variation_cells::Int
+    positive_variation_refinements::Int
+    positive_variation_fallbacks::Int
+    positive_variation_accepts::Int
+    positive_variation_skipped_cells::Int
+    shared_node_cells::Int
+    shared_node_two_point_cells::Int
+    shared_node_three_point_cells::Int
 end
 
 @counter_ops GridThinningCounter begin
@@ -433,6 +532,13 @@ end
         grid_acceptance_gradient_calls,
         grid_bound_violations,
         grid_resets_from_dynamics_adaptation,
+        positive_variation_cells,
+        positive_variation_refinements,
+        positive_variation_fallbacks,
+        positive_variation_accepts,
+        shared_node_cells,
+        shared_node_two_point_cells,
+        shared_node_three_point_cells,
     )
 
     incval(
@@ -446,12 +552,63 @@ end
         grid_budget_area_built,
         grid_budget_exponential_sum,
         grid_endpoint_derivative_points_loaded,
+        positive_variation_skipped_cells,
     )
 
-    set(grid_N_current)
+    set(
+        grid_N_current,
+        grid_initial_N,
+        grid_final_N,
+        grid_initial_tmax,
+        grid_final_tmax,
+        grid_initial_h,
+        grid_final_h,
+        grid_warmup_objective_events,
+        grid_warmup_objective_endpoint_gradients,
+        grid_warmup_objective_acceptance_gradients,
+        grid_warmup_objective_gradients_per_event,
+        grid_warmup_objective_horizon_hits,
+        grid_warmup_objective_horizon_rate,
+        grid_warmup_objective_rejections,
+        grid_warmup_objective_rejection_rate,
+        grid_schedule_frozen,
+        curvature_backend,
+    )
 
     get_sum(
         grid_acceptance_tests,
+        grid_endpoint_evaluations,
+        grid_endpoint_gradient_calls,
+        grid_endpoint_hessian_calls,
+        grid_endpoint_derivative_calls,
+        grid_acceptance_gradient_calls,
+        grid_cached_endpoint_reuses,
+        grid_budget_tail_restarts,
+        grid_points_evaluated,
+        grid_endpoint_derivative_points_loaded,
+        grid_resets_from_dynamics_adaptation,
+    )
+end
+
+@counter_struct mutable struct SubsamplingCounter <: AbstractStatisticCounter
+    subsampling_cell_roof_proposals::Int
+    subsampling_aggregate_accepts::Int
+    subsampling_subset_evaluations::Int
+    subsampling_final_reflections::Int
+end
+
+@counter_ops SubsamplingCounter begin
+    inc(
+        subsampling_cell_roof_proposals,
+        subsampling_aggregate_accepts,
+        subsampling_subset_evaluations,
+        subsampling_final_reflections,
+    )
+    get_sum(
+        subsampling_cell_roof_proposals,
+        subsampling_aggregate_accepts,
+        subsampling_subset_evaluations,
+        subsampling_final_reflections,
     )
 end
 
@@ -655,6 +812,42 @@ end
     main_gradient_calls::Int
     warmup_hessian_calls::Int
     main_hessian_calls::Int
+    warmup_full_gradient_calls::Int
+    main_full_gradient_calls::Int
+    warmup_prior_gradient_calls::Int
+    main_prior_gradient_calls::Int
+    warmup_fd_curvature_gradient_calls::Int
+    main_fd_curvature_gradient_calls::Int
+    warmup_potential_calls::Int
+    main_potential_calls::Int
+    warmup_exact_curvature_calls::Int
+    main_exact_curvature_calls::Int
+    warmup_grid_endpoint_evaluations::Int
+    main_grid_endpoint_evaluations::Int
+    warmup_grid_endpoint_gradient_calls::Int
+    main_grid_endpoint_gradient_calls::Int
+    warmup_grid_endpoint_hessian_calls::Int
+    main_grid_endpoint_hessian_calls::Int
+    warmup_grid_endpoint_derivative_calls::Int
+    main_grid_endpoint_derivative_calls::Int
+    warmup_grid_acceptance_gradient_calls::Int
+    main_grid_acceptance_gradient_calls::Int
+    warmup_grid_acceptance_tests::Int
+    main_grid_acceptance_tests::Int
+    warmup_grid_cached_endpoint_reuses::Int
+    main_grid_cached_endpoint_reuses::Int
+    warmup_grid_points_evaluated::Int
+    main_grid_points_evaluated::Int
+    warmup_grid_endpoint_derivative_points_loaded::Int
+    main_grid_endpoint_derivative_points_loaded::Int
+    warmup_subsampling_cell_roof_proposals::Int
+    main_subsampling_cell_roof_proposals::Int
+    warmup_subsampling_aggregate_accepts::Int
+    main_subsampling_aggregate_accepts::Int
+    warmup_subsampling_subset_evaluations::Int
+    main_subsampling_subset_evaluations::Int
+    warmup_subsampling_final_reflections::Int
+    main_subsampling_final_reflections::Int
     warmup_elapsed_time::Float64
     main_elapsed_time::Float64
     elapsed_time::Float64
@@ -663,19 +856,46 @@ end
 
 @counter_ops PhaseSummaryCounter begin
     incval(
-        warmup_events,
-        main_events,
         warmup_gradient_calls,
         main_gradient_calls,
         warmup_hessian_calls,
         main_hessian_calls,
-        warmup_elapsed_time,
-        main_elapsed_time,
-    )
-
-    set(
-        elapsed_time,
-        stop_reason,
+        warmup_full_gradient_calls,
+        main_full_gradient_calls,
+        warmup_prior_gradient_calls,
+        main_prior_gradient_calls,
+        warmup_fd_curvature_gradient_calls,
+        main_fd_curvature_gradient_calls,
+        warmup_potential_calls,
+        main_potential_calls,
+        warmup_exact_curvature_calls,
+        main_exact_curvature_calls,
+        warmup_grid_endpoint_evaluations,
+        main_grid_endpoint_evaluations,
+        warmup_grid_endpoint_gradient_calls,
+        main_grid_endpoint_gradient_calls,
+        warmup_grid_endpoint_hessian_calls,
+        main_grid_endpoint_hessian_calls,
+        warmup_grid_endpoint_derivative_calls,
+        main_grid_endpoint_derivative_calls,
+        warmup_grid_acceptance_gradient_calls,
+        main_grid_acceptance_gradient_calls,
+        warmup_grid_acceptance_tests,
+        main_grid_acceptance_tests,
+        warmup_grid_cached_endpoint_reuses,
+        main_grid_cached_endpoint_reuses,
+        warmup_grid_points_evaluated,
+        main_grid_points_evaluated,
+        warmup_grid_endpoint_derivative_points_loaded,
+        main_grid_endpoint_derivative_points_loaded,
+        warmup_subsampling_cell_roof_proposals,
+        main_subsampling_cell_roof_proposals,
+        warmup_subsampling_aggregate_accepts,
+        main_subsampling_aggregate_accepts,
+        warmup_subsampling_subset_evaluations,
+        main_subsampling_subset_evaluations,
+        warmup_subsampling_final_reflections,
+        main_subsampling_final_reflections,
     )
 end
 
@@ -696,6 +916,42 @@ end
         lazy_proposal_attempts,
         lazy_proposal_rejections,
     )
+
+    get_sum(
+        lazy_fallback_low_tightness,
+        lazy_fallback_bound_violation,
+        lazy_proposal_attempts,
+        lazy_proposal_rejections,
+    )
+end
+
+@counter_struct mutable struct BoomerangInterferenceCounter <: AbstractStatisticCounter
+    boomerang_interference_events::Int
+    boomerang_target_c_share_sum::Float64
+    boomerang_target_d_share_sum::Float64
+    boomerang_nuisance_driven_target_disturbances::Int
+end
+
+@counter_ops BoomerangInterferenceCounter begin
+    inc(
+        boomerang_interference_events,
+        boomerang_nuisance_driven_target_disturbances,
+    )
+
+    incval(
+        boomerang_target_c_share_sum,
+        boomerang_target_d_share_sum,
+    )
+
+    get_sum(
+        boomerang_interference_events,
+        boomerang_nuisance_driven_target_disturbances,
+    )
+
+    get_float(
+        boomerang_target_c_share_sum,
+        boomerang_target_d_share_sum,
+    )
 end
 
 # ===========================================================================================
@@ -707,9 +963,7 @@ end
     BasicEventCounter,
     SupportBoundaryCounter,
     GradientCallCounter,
-    GridThinningCounter,
-    PhaseSummaryCounter,
-    LazyBoundCounter,
+    RunSummaryCounter,
 )
 
 @counter_bundle(
@@ -717,7 +971,9 @@ end
     BasicEventCounter,
     SupportBoundaryCounter,
     GradientCallCounter,
+    RunSummaryCounter,
     GridThinningCounter,
+    SubsamplingCounter,
     ConstantBoundCounter,
     StickyStatsCounter,
     AffineBoundCounter,
@@ -725,4 +981,5 @@ end
     ComponentwiseAffineCounter,
     PhaseSummaryCounter,
     LazyBoundCounter,
+    BoomerangInterferenceCounter,
 )

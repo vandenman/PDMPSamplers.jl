@@ -1,6 +1,6 @@
 module PDMPSamplers
 
-using LinearAlgebra, Random, Statistics
+using LinearAlgebra, Random, SparseArrays, Statistics
 using Distributions
 using StatsBase
 using DataStructures: PriorityQueue, dequeue_pair!, enqueue!
@@ -8,6 +8,7 @@ using DataStructures: PriorityQueue, dequeue_pair!, enqueue!
 import PDMats
 import SpecialFunctions
 import LogExpFunctions
+using IrrationalConstants: log2π
 
 import FillArrays
 
@@ -17,8 +18,10 @@ import QuadGK
 import Roots
 
 import ADTypes
+import AliasTables
 import DifferentiationInterface as DI
 
+import ElasticArrays
 import ElasticArrays: ElasticArray, ElasticMatrix
 
 
@@ -38,6 +41,7 @@ include("statistic_counters.jl")
 include("PDMPState.jl")
 include("gradient_strategies.jl")
 include("model.jl")
+include("dependent_slabs.jl")
 
 # PDMP types
 # could do
@@ -48,6 +52,7 @@ include("dynamics/zigzag.jl")
 include("dynamics/bouncyparticle.jl")
 include("dynamics/boomerang.jl")
 include("dynamics/preconditioned.jl")
+include("dynamics/subsampling_trajectory_bounds.jl")
 
 # Gradient strategies
 # include("gradient_strategies.jl") # This line was moved up
@@ -62,7 +67,16 @@ include("poisson_time_strategies/rate_derivatives.jl")
 include("poisson_time_strategies/grid_boundary.jl")
 include("poisson_time_strategies/grid_bounds.jl")
 include("poisson_time_strategies/grid_affine_bounds.jl")
+include("poisson_time_strategies/grid_diagnostics.jl")
 include("poisson_time_strategies/gridthinning.jl")
+include("poisson_time_strategies/grid_schedule.jl")
+include("poisson_time_strategies/grid_event_constant.jl")
+include("poisson_time_strategies/grid_event_value_quadratic.jl")
+include("poisson_time_strategies/grid_event_dispatch.jl")
+include("poisson_time_strategies/grid_event_grid.jl")
+include("poisson_time_strategies/subsampled_gridthinning.jl")
+include("poisson_time_strategies/positive_variation_gridthinning.jl")
+include("poisson_time_strategies/vector_variation_thinning.jl")
 include("poisson_time_strategies/thinning.jl")
 include("poisson_time_strategies/sticky.jl")
 # these need to be implemented/ fixed
@@ -76,8 +90,6 @@ include("trace.jl")
 include("transforms.jl")
 include("estimators.jl")
 include("transformed_estimators.jl")
-include("adaptation/hcv.jl")
-include("adaptation/anchor_bank.jl")
 include("adaptation/adaptation.jl")
 include("stopping_criteria.jl")
 
@@ -123,6 +135,7 @@ export
     AbstractPreconditioner,
     DiagonalPreconditioner,
     DensePreconditioner,
+    set_dense_preconditioner!,
     # short hands
     PreconditionedZigZag,
     PreconditionedBPS,
@@ -137,29 +150,42 @@ export
     LogDensity,
     # Gradient strategies
     FullGradient,
-    SubsampledGradient,
+    SubsampledControlVariate,
+    SeparableResidualEnvelope,
+    BlockSeparableResidualEnvelope,
+    TrajectoryResidualEnvelope,
+    DampedHCVResidualEnvelope,
     CoordinateWiseGradient,
     compute_gradient!,
+    set_active_set!,
+    WarmupCurvatureBound,
+    GridWarmupTuning,
+    BoomerangAdaptationOptions,
 
-    # Hessian control variate
-    HCVState,
-    apply_hcv_correction!,
-    update_hcv!,
-
-    # Anchor bank
-    AnchorEntry,
-    AnchorBank,
-    has_active_anchor,
-    active_entry,
-    select_nearest!,
-    add_anchor!,
+    # Dependent Gaussian slab support
+    AbstractModelPrior,
+    BernoulliModelPrior,
+    BetaBernoulliModelPrior,
+    ExchangeableModelSizePrior,
+    AbstractSlabPrior,
+    AbstractExchangeableGaussianSlab,
+    DenseGaussianSlab,
+    IndependentZeroMeanGaussianSlab,
+    IndependentZeroMeanLogscaleGaussianSlab,
+    LogLinearGaussianScaleSlab,
+    CallbackGaussianSlab,
+    ExchangeableGaussianSlab,
+    ZeroMeanExchangeableGaussianSlab,
+    GlobalLogscaleExchangeableGaussianSlab,
+    ArbitrarySlabBoundary,
+    default_aggregate_unstick_clock,
+    stickable_coordinates,
+    DependentSlabTarget,
 
     # Adaptation
     AbstractAdapter,
     NoAdaptation,
     SequenceAdapter,
-    GradientResampler,
-    AnchorBankAdapter,
 
     # Event metadata
     PDMPEventMeta,
@@ -171,10 +197,11 @@ export
     # Poisson time strategies
     ThinningStrategy,
     GridThinningStrategy,
-    # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
     RootsPoissonTimeStrategy,
-    Sticky,
     ExactStrategy,
+    # OptimisticStrategy, # depends on improving optimistic_failsafe.jl
+    Sticky,
+    AggregateSticky,
     # StickyLoopState,
 
     # Bound strategies
@@ -192,6 +219,7 @@ export
     TotalWallTimeCriterion,
     ESSCriterion,
     OnlineESSCriterion,
+    AdaptiveWarmupCriterion,
     AnyCriterion,
     AllCriteria,
     stop_after,
@@ -243,6 +271,5 @@ export
 # test_boomerang_target,
 # test_boomerang_dynamics
 
-include("precompile_workload.jl")
 
 end # module PDMPSamplers

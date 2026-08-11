@@ -76,7 +76,9 @@ function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
         x0j = trace.positions[j, i]
         θ0j = trace.velocities[j, i]
         τ = trace.times[i+1] - trace.times[i]
-        if base isa AnyBoomerang
+        if trace.free_masks !== nothing && !trace.free_masks[j, i]
+            total_below += x0j ≤ q ? τ : 0.0
+        elseif base isa AnyBoomerang
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q, base.μ[j])
         else
             total_below += _time_below_segment(flow, x0j, θ0j, τ, q)
@@ -122,7 +124,9 @@ function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
         xj = trace.positions[j, k]
         lo = min(lo, xj)
         hi = max(hi, xj)
-        if is_boom
+        segment_is_free = k < length(trace) &&
+                          (trace.free_masks === nothing || trace.free_masks[j, k])
+        if is_boom && segment_is_free
             R = hypot(xj - base.μ[j], trace.velocities[j, k])
             lo = min(lo, base.μ[j] - R)
             hi = max(hi, base.μ[j] + R)
@@ -405,8 +409,12 @@ function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer
     if base isa AnyBoomerang
         lo, hi = _trace_coordinate_bounds(trace, coordinate)
         segments, total_time, μj = _precompute_boomerang_segments(trace, coordinate)
-        f(q) = _cdf_boomerang_precomputed(trace.flow, segments, total_time, μj, q) - p
-        return Roots.find_zero(f, (lo, hi), Roots.Bisection())
+        return _invert_monotone_cdf(
+            q -> _cdf_boomerang_precomputed(trace.flow, segments, total_time, μj, q),
+            lo,
+            hi,
+            p,
+        )
     end
     total_time, dc, pm = _collect_sweep_events(trace, coordinate)
     return _quantile_linear_sweep(total_time, dc, pm, [p * total_time])[1]
@@ -415,7 +423,7 @@ end
 """
     _precompute_boomerang_segments(trace, j) -> (segments, total_time, μj)
 
-Cache the per-segment data `(x0j, θ0j, τ)` needed by `_cdf_boomerang_precomputed`
+Cache the per-segment data `(x0j, θ0j, τ, free)` needed by `_cdf_boomerang_precomputed`
 for coordinate `j`. Precomputing avoids re-parsing the trace on every bisection step,
 reducing the O(N) CDF cost to a tight loop over a plain `Vector{NTuple}`.
 """
@@ -427,12 +435,13 @@ function _precompute_boomerang_segments(trace::PDMPTrace, j::Integer)
     base = _underlying_flow(trace.flow)
     μj = Float64(base.μ[j])
     n = length(trace)
-    segments = Vector{NTuple{3, Float64}}(undef, n - 1)
+    segments = Vector{Tuple{Float64, Float64, Float64, Bool}}(undef, n - 1)
     @inbounds for i in 1:n-1
         segments[i] = (
             Float64(trace.positions[j, i]),
             Float64(trace.velocities[j, i]),
             Float64(trace.times[i+1] - trace.times[i]),
+            trace.free_masks === nothing || trace.free_masks[j, i],
         )
     end
     total_time = Float64(trace.times[end] - trace.times[1])
@@ -450,17 +459,36 @@ has no analytic inverse — hence this function is called repeatedly by bisectio
 """
 function _cdf_boomerang_precomputed(
     flow::ContinuousDynamics,
-    segments::Vector{NTuple{3, Float64}},
+    segments::Vector{Tuple{Float64, Float64, Float64, Bool}},
     total_time::Float64,
     μj::Float64,
     q::Float64,
 )
     base = _underlying_flow(flow)
     total_below = 0.0
-    @inbounds for (x0j, θ0j, τ) in segments
-        total_below += _time_below_segment(base, x0j, θ0j, τ, q, μj)
+    @inbounds for (x0j, θ0j, τ, free) in segments
+        total_below += free ?
+            _time_below_segment(base, x0j, θ0j, τ, q, μj) :
+            (x0j ≤ q ? τ : 0.0)
     end
     return total_below / total_time
+end
+
+function _invert_monotone_cdf(cdf_fn, lo::Real, hi::Real, p::Real)
+    lo == hi && return Float64(lo)
+    left, right = Float64(lo), Float64(hi)
+    # Invert by the generalized-quantile definition inf{x: F(x) ≥ p}. Unlike
+    # root finding, this remains valid when sticky segments introduce atoms.
+    for _ in 1:100
+        mid = left + (right - left) / 2
+        if cdf_fn(mid) < p
+            left = mid
+        else
+            right = mid
+        end
+        right - left ≤ 8eps(max(abs(left), abs(right), 1.0)) && break
+    end
+    return right
 end
 
 """
@@ -481,8 +509,12 @@ function _quantile_boomerang_vector(trace::PDMPTrace, p::AbstractVector{<:Real},
 
     current_lo = lo
     for idx in order
-        f(q) = _cdf_boomerang_precomputed(flow, segments, total_time, μj, q) - p[idx]
-        qi = Roots.find_zero(f, (current_lo, hi), Roots.Bisection())
+        qi = _invert_monotone_cdf(
+            q -> _cdf_boomerang_precomputed(flow, segments, total_time, μj, q),
+            current_lo,
+            hi,
+            p[idx],
+        )
         results[idx] = qi
         current_lo = qi
     end
@@ -565,6 +597,9 @@ function ess(
     θt_next = similar(θt)
     xt_at_seg = similar(xt)
     θt_at_seg = similar(θt)
+    xt_at_chunk_end = similar(xt)
+    θt_at_chunk_end = similar(θt)
+    segment_index = 1
 
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
@@ -573,6 +608,8 @@ function ess(
 
         seg_start = t₀
         seg_end = t₁
+        free = trace isa PDMPTrace && trace.free_masks !== nothing ?
+            view(trace.free_masks, :, segment_index) : nothing
 
         while seg_start < seg_end && batch_idx <= n_batches
             chunk_end = min(seg_end, batch_end)
@@ -582,15 +619,26 @@ function ess(
                 copyto!(xt_at_seg, xt)
                 copyto!(θt_at_seg, θt)
                 if elapsed > 0
-                    move_forward_time!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow)
+                    _move_ess_point!(SkeletonPoint(xt_at_seg, θt_at_seg), elapsed, flow, free)
                 end
 
-                contribution = _integrate_segment(
-                    Statistics.mean, flow,
-                    xt_at_seg, xt_next,
-                    θt_at_seg, θt_next,
-                    seg_start, chunk_end
-                )
+                copyto!(xt_at_chunk_end, xt_at_seg)
+                copyto!(θt_at_chunk_end, θt_at_seg)
+                _move_ess_point!(
+                    SkeletonPoint(xt_at_chunk_end, θt_at_chunk_end),
+                    chunk_end - seg_start, flow, free)
+
+                contribution = isnothing(free) ?
+                    _integrate_segment(
+                        Statistics.mean, flow,
+                        xt_at_seg, xt_at_chunk_end,
+                        θt_at_seg, θt_at_chunk_end,
+                        seg_start, chunk_end) :
+                    _integrate_segment(
+                        Statistics.mean, flow,
+                        xt_at_seg, xt_at_chunk_end,
+                        θt_at_seg, θt_at_chunk_end,
+                        seg_start, chunk_end, free)
                 batch_integral .+= contribution
             end
 
@@ -608,6 +656,7 @@ function ess(
         t₀ = t₁
         copyto!(xt, xt_next)
         copyto!(θt, θt_next)
+        segment_index += 1
         next = iterate(iter, next[2])
     end
 
@@ -631,6 +680,15 @@ function ess(
     end
 
     return result
+end
+
+function _move_ess_point!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free)
+    if free !== nothing && _underlying_flow(flow) isa AnyBoomerang
+        move_forward_time!(ξ, τ, _underlying_flow(flow), free)
+    else
+        move_forward_time!(ξ, τ, flow)
+    end
+    return ξ
 end
 
 # Batch-means ESS for a single discrete column vector.
@@ -882,6 +940,216 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow
     return buf
 end
 
+# Sticky traces pass the segment's active mask after the time arguments. Each
+# statistic supplies its own mask-aware methods, keeping this protocol open to
+# additional user-defined statistics.
+function _integrate_segment(::typeof(Statistics.mean), flow::Union{ZigZag, BouncyParticle},
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean),
+                             ::Union{ZigZag, BouncyParticle},
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    @inbounds for i in eachindex(x0, free)
+        buf[i] += x0[i] * dt + (free[i] ? θ0[i] * dt^2 / 2 : 0.0)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.var), flow::Union{ZigZag, BouncyParticle},
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.var, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.var),
+                             ::Union{ZigZag, BouncyParticle},
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    @inbounds for i in eachindex(x0, free)
+        y = x0[i] - μ_est[i]
+        v = free[i] ? θ0[i] : 0.0
+        buf[i] += dt * (y^2 + y * v * dt + v^2 * dt^2 / 3)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.cov), flow::Union{ZigZag, BouncyParticle},
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = zeros(length(x0), length(x0))
+    return _integrate_segment!(result, Statistics.cov, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov),
+                             ::Union{ZigZag, BouncyParticle},
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    d = length(x0)
+    @inbounds for j in 1:d, i in j:d
+        yᵢ = x0[i] - μ_est[i]
+        yⱼ = x0[j] - μ_est[j]
+        vᵢ = free[i] ? θ0[i] : 0.0
+        vⱼ = free[j] ? θ0[j] : 0.0
+        val = dt * (yᵢ * yⱼ +
+                    (yᵢ * vⱼ + yⱼ * vᵢ) * dt / 2 +
+                    vᵢ * vⱼ * dt^2 / 3)
+        buf[i, j] += val
+        i != j && (buf[j, i] += val)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang,
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::Boomerang,
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    s, c = sincos(dt)
+    @inbounds for i in eachindex(x0, free)
+        buf[i] += free[i] ?
+            (x0[i] - flow.μ[i]) * s + θ0[i] * (1 - c) + flow.μ[i] * dt :
+            x0[i] * dt
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang,
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), ::MutableBoomerang,
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    @inbounds for i in eachindex(x0, free)
+        buf[i] += (free[i] ? (x0[i] + x1[i]) / 2 : x0[i]) * dt
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang,
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = similar(x0)
+    fill!(result, zero(eltype(result)))
+    return _integrate_segment!(result, Statistics.var, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.var), flow::AnyBoomerang,
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    s2 = sin(2dt)
+    @inbounds for i in eachindex(x0, free)
+        if free[i]
+            a = x0[i] - flow.μ[i]
+            b = θ0[i]
+            c0 = flow.μ[i] - μ_est[i]
+            buf[i] += (a^2 * (dt / 2 + s2 / 4) +
+                       b^2 * (dt / 2 - s2 / 4) +
+                       c0^2 * dt + a * b * s^2 +
+                       2a * c0 * s + 2b * c0 * (1 - c))
+        else
+            buf[i] += (x0[i] - μ_est[i])^2 * dt
+        end
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(Statistics.cov), flow::AnyBoomerang,
+                            x0, x1, θ0, θ1, t0, t1,
+                            free::AbstractVector{Bool}, μ_est)
+    result = zeros(length(x0), length(x0))
+    return _integrate_segment!(result, Statistics.cov, flow, x0, x1, θ0, θ1,
+                               t0, t1, free, μ_est)
+end
+
+function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), flow::AnyBoomerang,
+                             x0, x1, θ0, θ1, t0, t1,
+                             free::AbstractVector{Bool}, μ_est)
+    dt = t1 - t0
+    s, c = sincos(dt)
+    s2 = sin(2dt)
+    d = length(x0)
+    @inbounds for j in 1:d, i in j:d
+        aᵢ = free[i] ? x0[i] - flow.μ[i] : 0.0
+        bᵢ = free[i] ? θ0[i] : 0.0
+        cᵢ = (free[i] ? flow.μ[i] : x0[i]) - μ_est[i]
+        aⱼ = free[j] ? x0[j] - flow.μ[j] : 0.0
+        bⱼ = free[j] ? θ0[j] : 0.0
+        cⱼ = (free[j] ? flow.μ[j] : x0[j]) - μ_est[j]
+        val = (aᵢ * aⱼ * (dt / 2 + s2 / 4) +
+               bᵢ * bⱼ * (dt / 2 - s2 / 4) +
+               (aᵢ * bⱼ + aⱼ * bᵢ) * s^2 / 2 +
+               cᵢ * cⱼ * dt +
+               (aᵢ * cⱼ + aⱼ * cᵢ) * s +
+               (bᵢ * cⱼ + bⱼ * cᵢ) * (1 - c))
+        buf[i, j] += val
+        i != j && (buf[j, i] += val)
+    end
+    return buf
+end
+
+function _integrate_segment(::typeof(inclusion_probs), flow::ContinuousDynamics,
+                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    result = zeros(length(x0))
+    return _integrate_segment!(result, inclusion_probs, flow, x0, x1, θ0, θ1,
+                               t0, t1, free)
+end
+
+function _integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), ::ContinuousDynamics,
+                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
+    dt = t1 - t0
+    @inbounds for i in eachindex(free)
+        free[i] && (buf[i] += dt)
+    end
+    return buf
+end
+
+_integrate_segment(::typeof(inclusion_probs), flow::PreconditionedDynamics,
+                   x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool}) =
+    _integrate_segment(inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free)
+
+_integrate_segment!(buf::AbstractVector, ::typeof(inclusion_probs), flow::PreconditionedDynamics,
+                    x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool}) =
+    _integrate_segment!(buf, inclusion_probs, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free)
+
+const _MomentStatistic = Union{
+    typeof(Statistics.mean),
+    typeof(Statistics.var),
+    typeof(Statistics.cov),
+}
+
+_integrate_segment(f::_MomentStatistic, flow::PreconditionedDynamics,
+                   x0, x1, θ0, θ1, t0, t1,
+                   free::AbstractVector{Bool}, args...) =
+    _integrate_segment(f, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free, args...)
+
+_integrate_segment!(buf, f::_MomentStatistic, flow::PreconditionedDynamics,
+                    x0, x1, θ0, θ1, t0, t1,
+                    free::AbstractVector{Bool}, args...) =
+    _integrate_segment!(buf, f, flow.dynamics, x0, x1, θ0, θ1, t0, t1, free, args...)
+
 
 
 
@@ -1063,7 +1331,52 @@ function _integrate(trace::FactorizedTrace, ::typeof(inclusion_probs))
     return integral / total_time
 end
 
-function _integrate(trace::AbstractPDMPTrace, f, args...)
+function _integrate_masked(trace::PDMPTrace, f, args...)
+    n = length(trace)
+    n < 2 && error("Cannot compute statistics on a trace with fewer than 2 events")
+    flow = trace.flow
+    x0 = copy(view(trace.positions, :, 1))
+    x1 = copy(view(trace.positions, :, 2))
+    θ0 = copy(view(trace.velocities, :, 1))
+    θ1 = copy(view(trace.velocities, :, 2))
+    t0, t1 = trace.times[1], trace.times[2]
+    free = view(trace.free_masks, :, 1)
+    integral = _integrate_segment(f, flow, x0, x1, θ0, θ1, t0, t1, free, args...)
+    has_inplace = hasmethod(
+        _integrate_segment!,
+        Tuple{typeof(integral), typeof(f), typeof(flow), typeof(x0), typeof(x1),
+              typeof(θ0), typeof(θ1), typeof(t0), typeof(t1), typeof(free),
+              map(typeof, args)...},
+    )
+    @inbounds for k in 2:n-1
+        copyto!(x0, x1)
+        copyto!(θ0, θ1)
+        copyto!(x1, view(trace.positions, :, k + 1))
+        copyto!(θ1, view(trace.velocities, :, k + 1))
+        t0, t1 = trace.times[k], trace.times[k + 1]
+        free = view(trace.free_masks, :, k)
+        if has_inplace
+            _integrate_segment!(integral, f, flow, x0, x1, θ0, θ1, t0, t1,
+                                free, args...)
+        else
+            integral .+= _integrate_segment(f, flow, x0, x1, θ0, θ1, t0, t1,
+                                            free, args...)
+        end
+    end
+    total_time = trace.times[end] - trace.times[1]
+    return integral / total_time
+end
+
+function _integrate(trace::PDMPTrace, f, args...)
+    if trace.free_masks !== nothing
+        return _integrate_masked(trace, f, args...)
+    end
+    return _integrate_unmasked(trace, f, args...)
+end
+
+_integrate(trace::AbstractPDMPTrace, f, args...) = _integrate_unmasked(trace, f, args...)
+
+function _integrate_unmasked(trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
 
@@ -1118,7 +1431,18 @@ function _integrate(trace::AbstractPDMPTrace, f, args...)
     return integral / total_time
 end
 
-function _integrate!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...)
+function _integrate!(out::AbstractVector, trace::PDMPTrace, f, args...)
+    if trace.free_masks !== nothing
+        copyto!(out, _integrate_masked(trace, f, args...))
+        return out
+    end
+    return _integrate_unmasked!(out, trace, f, args...)
+end
+
+_integrate!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...) =
+    _integrate_unmasked!(out, trace, f, args...)
+
+function _integrate_unmasked!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
 

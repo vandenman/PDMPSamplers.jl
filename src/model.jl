@@ -2,7 +2,6 @@
 #
 # this file needs some more thought.
 # a lot of details work only for fullgradient
-# but we can make it more general, so it also works for subsampled gradients
 #
 #
 
@@ -62,7 +61,6 @@ function maybe_fix_grad(g::GradientStrategy, d::Integer)
     f = g.f
     f isa Base.Fix1 && return g
 
-    # TODO: needs similar handling for SubsampledGradient!
     f isa Function && return FullGradient(Base.Fix1((f), zeros(d)))
 end
 
@@ -77,6 +75,20 @@ function PDMPModel(f::Function, args...; kwargs...)
 end
 
 PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true, true)
+
+function PDMPModel(d::Integer, cv::SubsampledControlVariate)
+    length(cv.anchor) == d || throw(DimensionMismatch("anchor length must match model dimension"))
+    return PDMPModel(d, cv, cv.deterministic_hvp!, nothing, true, true)
+end
+
+PDMPModel(d::Integer, cv::SubsampledControlVariate, ::Nothing,
+    grad_inplace=true, hvp_inplace=true) = PDMPModel(d, cv)
+
+function PDMPModel(::Integer, ::SubsampledControlVariate, hvp,
+    grad_inplace=true, hvp_inplace=true)
+    throw(ArgumentError(
+        "a subsampling model's deterministic HVP must be supplied through SubsampledControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
+end
 
 function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADType, needs_hvp::Bool=false)
 
@@ -165,10 +177,45 @@ end
 
 function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
     grad_new = with_stats(model.grad, stats)
-    hvp_new = model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
+    hvp_new = _model_hvp_with_stats(model, grad_new, stats)
     vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
     joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
     PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
+end
+
+_model_hvp_with_stats(model::PDMPModel, grad, stats) =
+    model.hvp === nothing ? nothing : WithStatsHVP(model.hvp, stats)
+_model_hvp_with_stats(model::PDMPModel{<:SubsampledControlVariate}, grad, stats) =
+    grad.deterministic_hvp! === nothing ? nothing :
+        WithStatsHVP(InplaceHVP(grad.deterministic_hvp!, zeros(model.d)), stats)
+
+function set_active_set!(model::PDMPModel, free::BitVector)
+    length(free) == model.d || throw(DimensionMismatch("active set length $(length(free)) does not match model dimension $(model.d)"))
+    set_active_set!(model.grad, free)
+    model.hvp !== nothing && set_active_set!(model.hvp, free)
+    model.vhv !== nothing && set_active_set!(model.vhv, free)
+    model.joint !== nothing && set_active_set!(model.joint, free)
+    return nothing
+end
+
+_last_gradient_potential(::Any) = nothing
+_last_gradient_potential(model::PDMPModel) = _last_gradient_potential(model.grad)
+_last_gradient_potential(grad::FullGradient) = _last_gradient_potential(grad.f)
+_last_gradient_potential(ws::WithStats) = _last_gradient_potential(ws.f)
+
+_potential_available(::Any) = false
+_potential_available(model::PDMPModel) = _potential_available(model.grad)
+_potential_available(grad::FullGradient) = _potential_available(grad.f)
+_potential_available(ws::WithStats) = _potential_available(ws.f)
+
+function _potential(model::PDMPModel, x::Vector{Float64})
+    _potential_available(model) || throw(ArgumentError("potential-only evaluation is unavailable for this model"))
+    return _potential(model.grad, x)
+end
+_potential(grad::FullGradient, x::Vector{Float64}) = _potential(grad.f, x)
+function _potential(ws::WithStats, x::Vector{Float64})
+    _inc_counter_potential_calls(ws.stats)
+    return _potential(ws.f, x)
 end
 
 struct InplaceHVP{F, O<:AbstractVector} <: Function
@@ -180,22 +227,27 @@ function (h::InplaceHVP)(x::AbstractVector, v::AbstractVector)
     return h.out
 end
 _copy_callable(h::InplaceHVP) = InplaceHVP(_copy_callable(h.f), copy(h.out))
+set_active_set!(h::InplaceHVP, free::BitVector) = set_active_set!(h.f, free)
 
 struct WithStatsHVP{F,S} <: Function
     f::F
     stats::S
 end
+
 (ws::WithStatsHVP)(x::AbstractVector, v::AbstractVector) = (_inc_counter_∇²f_calls(ws.stats); ws.f(x, v))
 (ws::WithStatsHVP)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
+set_active_set!(ws::WithStatsHVP, free::BitVector) = set_active_set!(ws.f, free)
 
 struct WithStatsVHV{F,S} <: Function
     f::F
     stats::S
 end
+
 (ws::WithStatsVHV)(x::AbstractVector, v::AbstractVector, w::AbstractVector) = (_inc_counter_∇²f_calls(ws.stats); ws.f(x, v, w))
 (ws::WithStatsVHV)(args...) = (_inc_counter_∇²f_calls(ws.stats); ws.f(args...))
+set_active_set!(ws::WithStatsVHV, free::BitVector) = set_active_set!(ws.f, free)
 
-struct WithStatsJoint{F,S} <: Function
+struct WithStatsJoint{F,S} <: AbstractRateDerivativeProvider
     f::F
     stats::S
 end
@@ -203,6 +255,7 @@ function (ws::WithStatsJoint)(x::AbstractVector, v::AbstractVector)
     _inc_counter_∇²f_calls(ws.stats)
     ws.f(x, v)
 end
+set_active_set!(ws::WithStatsJoint, free::BitVector) = set_active_set!(ws.f, free)
 
 """
     _make_vhv_from_grad(grad_f!, d, backend)

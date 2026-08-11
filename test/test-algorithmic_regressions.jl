@@ -10,7 +10,7 @@
         θ = [0.7, 0.0, -0.4, 0.0]
         cache = (; z=zeros(d), tmp=zeros(d))
 
-        state_a = StickyPDMPState(0.0, SkeletonPoint(copy(x), copy(θ)), copy(free), zeros(d))
+        state_a = StickyPDMPState(0.0, SkeletonPoint(copy(x), copy(θ)), copy(free))
         state_b = copy(state_a)
         grad_a = [1.0, 2.0, -0.5, 3.0]
         grad_b = [1.0, 2_000.0, -0.5, -3_000.0]
@@ -21,6 +21,30 @@
         @test state_a.ξ.θ[free] ≈ state_b.ξ.θ[free]
         @test all(iszero, state_a.ξ.θ[.!free])
         @test all(iszero, state_b.ξ.θ[.!free])
+    end
+
+    @testset "Boomerang covariance entry kernels preserve representations" begin
+        dense_flow = AdaptiveBoomerang(3; scheme=:fullrank)
+        dense_L = [1.2 0.0 0.0; -0.3 0.8 0.0; 0.5 -0.2 1.1]
+        copyto!(dense_flow.ΣL.data, dense_L)
+        dense_cov = dense_L * dense_L'
+        for (i, j) in ((1, 1), (2, 2), (1, 3), (3, 2))
+            @test PDMPSamplers._boomerang_covariance_entry(dense_flow, i, j) ≈ dense_cov[i, j]
+        end
+        PDMPSamplers._boomerang_covariance_entry(dense_flow, 3, 2)
+        @test @allocated(PDMPSamplers._boomerang_covariance_entry(dense_flow, 3, 2)) == 0
+
+        lowrank_flow = AdaptiveBoomerang(3; scheme=:lowrank, rank=2)
+        lrp = lowrank_flow.Γ
+        lrp.D .= [0.7, 1.1, 1.6]
+        lrp.V .= [0.4 -0.2; 0.1 0.5; -0.3 0.25]
+        lrp.Λ .= [1.4, 0.6]
+        lowrank_cov = Diagonal(lrp.D) + lrp.V * Diagonal(lrp.Λ) * lrp.V'
+        for (i, j) in ((1, 1), (3, 3), (1, 2), (3, 2))
+            @test PDMPSamplers._boomerang_covariance_entry(lowrank_flow, i, j) ≈ lowrank_cov[i, j]
+        end
+        PDMPSamplers._boomerang_covariance_entry(lowrank_flow, 3, 2)
+        @test @allocated(PDMPSamplers._boomerang_covariance_entry(lowrank_flow, 3, 2)) == 0
     end
 
     @testset "StickyLoopState priority queue stays synchronized" begin
@@ -40,8 +64,7 @@
         state.free .= false
         state.ξ.x .= 0.0
         state.ξ.θ .= 0.0
-        state.old_velocity .= 1.0
-        PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
+        PDMPSamplers.rebuild_sticky_schedule!(rng, alg_, state, flow)
 
         pq_i, pq_t = first(alg_.sticky_pq)
         @test pq_t ≈ minimum(alg_.sticky_times)
@@ -69,10 +92,9 @@
         state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
 
         state.free .= true
-        state.old_velocity .= one(eltype(state.old_velocity))
         state.ξ.x .= [2.0, -1.0, 3.0, 4.0, 5.0]
         state.ξ.θ .= [1.0, 1.0, 1.0, 1.0, 1.0]
-        PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
+        PDMPSamplers.rebuild_sticky_schedule!(rng, alg_, state, flow)
 
         sticky_before = copy(alg_.sticky_times)
         PDMPSamplers.move_forward_time!(state, 0.25, flow)
@@ -83,7 +105,7 @@
         @test alg_.sticky_times[3] == sticky_before[3]
         @test alg_.sticky_times[4] == sticky_before[4]
         @test alg_.sticky_times[5] == sticky_before[5]
-        @test alg_.sticky_times[2] == state.t[] + PDMPSamplers.freezing_time(state.ξ, flow, 2)
+        @test alg_.sticky_times[2] == state.t[] + PDMPSamplers.sticking_time(state.ξ, flow, 2)
         @test last(first(alg_.sticky_pq)) == minimum(alg_.sticky_times)
 
         sticky_before_refresh = copy(alg_.sticky_times)
@@ -95,6 +117,55 @@
         PDMPSamplers.move_forward_time!(state, 0.1, flow)
         PDMPSamplers._update_sticky_schedule_after_horizon_hit!(rng, alg_, state, flow)
         @test alg_.sticky_times == sticky_before_horizon
+    end
+
+    @testset "Sticky GridThinning caps inner search at sticky horizon" begin
+        d = 2
+        target = gen_data(Distributions.ZeroMeanIsoNormal, d)
+        flow = Boomerang(Diagonal(ones(d)), zeros(d), 0.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = Sticky(GridThinningStrategy(t_max=2.0), fill(0.5, d))
+        ξ0 = SkeletonPoint([0.2, 1.0], [-1.0, 0.0])
+
+        rng = Random.Xoshiro(2468)
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        @test alg_ isa PDMPSamplers.StickyLoopState
+
+        tmax_before = alg_.inner_alg_state.t_max[]
+        sticky_time = first(alg_.sticky_pq)[2]
+        @test 0 < sticky_time < tmax_before
+
+        dt, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats)
+        @test event_type === :sticky
+        @test dt ≈ sticky_time - state.t[]
+        @test meta.i == first(alg_.sticky_pq)[1]
+        @test alg_.inner_alg_state.t_max[] == tmax_before
+    end
+
+    @testset "Sticky Boomerang horizon updates freeze times without redrawing independent unstick clocks" begin
+        d = 3
+        target = gen_data(Distributions.ZeroMeanIsoNormal, d)
+        flow = Boomerang(Diagonal(ones(d)), [0.2, -0.1, 0.3], 0.0)
+        grad = FullGradient(Base.Fix1(neg_gradient!, target))
+        model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
+        alg = Sticky(GridThinningStrategy(), fill(0.5, d))
+        ξ0 = SkeletonPoint([0.4, 0.0, -0.5], [-0.2, 0.0, 0.3])
+
+        rng = Random.Xoshiro(1357)
+        state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
+        state.free .= BitVector([true, false, true])
+        state.ξ.x .= [0.4, 0.0, -0.5]
+        state.ξ.θ .= [-0.2, 0.0, 0.3]
+        PDMPSamplers.rebuild_sticky_schedule!(rng, alg_, state, flow)
+
+        old_stuck_time = alg_.sticky_times[2]
+        PDMPSamplers.move_forward_time!(state, 0.1, flow)
+        PDMPSamplers._update_sticky_schedule_after_horizon_hit!(rng, alg_, state, flow)
+
+        @test alg_.sticky_times[1] ≈ state.t[] + PDMPSamplers.sticking_time(state.ξ, flow, 1)
+        @test alg_.sticky_times[3] ≈ state.t[] + PDMPSamplers.sticking_time(state.ξ, flow, 3)
+        @test alg_.sticky_times[2] == old_stuck_time
     end
 
     @testset "Sticky ZigZag fast-path does not enqueue non-stickable coordinates" begin
@@ -110,10 +181,20 @@
         rng = Random.Xoshiro(8765)
         state, _, alg_, _, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
 
+        frozen_nonstickable = SkeletonPoint([1.0, 0.0, 2.0, 0.0], [1.0, 0.0, -1.0, 0.0])
+        restored, _, _, _, _ = PDMPSamplers.initialize_state(
+            Random.Xoshiro(8766), flow, model, alg, 0.0, frozen_nonstickable)
+        @test restored.free == trues(d)
+        @test !iszero(restored.ξ.θ[2])
+        @test !iszero(restored.ξ.θ[4])
+        PDMPSamplers.move_forward_time!(restored, 1.0, flow)
+        @test !iszero(restored.ξ.x[2])
+        @test !iszero(restored.ξ.x[4])
+
         state.free .= true
         state.ξ.x .= [1.0, -1.0, 2.0, 3.0]
         state.ξ.θ .= [1.0, 1.0, 1.0, 1.0]
-        PDMPSamplers.update_all_stick_times!(rng, alg_, state, flow)
+        PDMPSamplers.rebuild_sticky_schedule!(rng, alg_, state, flow)
 
         @test !haskey(alg_.sticky_pq, 2)
         @test isinf(alg_.sticky_times[2])

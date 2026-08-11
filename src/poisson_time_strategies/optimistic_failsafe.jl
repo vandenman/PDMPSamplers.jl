@@ -141,13 +141,13 @@ function evaluate_grid_rates!(plb::PiecewiseLinearBound, state_orig::AbstractPDM
 
     copyto!(state_scratch, state_orig)
     ∇U_xt = grad_func(state_scratch.ξ.x)
-    plb.y_vals[1] = pos(λ(state_scratch.ξ, ∇U_xt, flow))
+    plb.y_vals[1] = pos(λ(state_scratch, ∇U_xt, flow))
 
     for i in 2:length(plb.y_vals)
         Δt = plb.t_grid[i] - plb.t_grid[i - 1]
         move_forward_time!(state_scratch, Δt, flow)
         ∇U_xt = grad_func(state_scratch.ξ.x)
-        plb.y_vals[i] = pos(λ(state_scratch.ξ, ∇U_xt, flow))
+        plb.y_vals[i] = pos(λ(state_scratch, ∇U_xt, flow))
     end
 end
 
@@ -219,7 +219,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         copyto!(state_, state2_)
         move_forward_time!(state_, τ, flow)
         ∇ϕx = compute_gradient!(state_, model.grad, flow, cache)
-        l_true = λ(state_.ξ, ∇ϕx, flow)
+        l_true = λ(state_, ∇ϕx, flow)
 
         if l_true > λ_tilde
             alg.bound_violations[] += 1
@@ -258,6 +258,21 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     end
 
     error("OptimisticStrategy: safety limit reached after $(alg.safety_limit) iterations")
+end
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::OptimisticState,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true)
 end
 
 # COV_EXCL_STOP

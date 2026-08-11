@@ -18,8 +18,8 @@ function is_satisfied(criterion::StoppingCriterion, state, trace_manager, stats)
     throw(MethodError(is_satisfied, (criterion, state, trace_manager, stats)))
 end
 
-stop_reason(::StoppingCriterion)::Symbol = :none
-stop_reason(criterion::StoppingCriterion, state, trace_manager, stats)::Symbol = stop_reason(criterion)
+stop_reason(::StoppingCriterion)::Symbol = :none # COV_EXCL_LINE
+stop_reason(criterion::StoppingCriterion, state, trace_manager, stats)::Symbol = stop_reason(criterion) # COV_EXCL_LINE
 
 """
     FixedTimeCriterion(T)
@@ -32,7 +32,7 @@ end
 
 FixedTimeCriterion(T::Real) = FixedTimeCriterion(Float64(T))
 is_satisfied(c::FixedTimeCriterion, state, trace_manager, stats) = state.t[] >= c.T
-stop_reason(::FixedTimeCriterion) = :reached_time
+stop_reason(::FixedTimeCriterion) = :reached_time # COV_EXCL_LINE
 
 """
     EventCountCriterion(max_events)
@@ -46,7 +46,7 @@ mutable struct EventCountCriterion <: StoppingCriterion
     const max_events::Int
     baseline::Int
     function EventCountCriterion(max_events::Integer)
-        max_events > 0 || throw(ArgumentError("max_events must be > 0, got $max_events"))
+        ispositive(max_events) || throw(ArgumentError("max_events must be > 0, got $max_events"))
         return new(max_events, 0)
     end
 end
@@ -61,7 +61,58 @@ function is_satisfied(c::EventCountCriterion, state, trace_manager, stats)
     return (total - c.baseline) >= c.max_events
 end
 
-stop_reason(::EventCountCriterion) = :reached_event_budget
+stop_reason(::EventCountCriterion) = :reached_event_budget # COV_EXCL_LINE
+
+# Internal phase-local criterion used for the common built-in stopping modes.
+# This keeps `_run_phase!` specialized on one concrete criterion type for
+# FixedTimeCriterion/EventCountCriterion cases, reducing compile variants
+# without introducing dynamic dispatch in the event loop.
+mutable struct _CommonPhaseCriterion <: StoppingCriterion
+    const T::Float64
+    const max_events::Int
+    const check_time::Bool
+    const check_events::Bool
+    const event_source::Union{Nothing,EventCountCriterion}
+    baseline::Int
+    reason::Symbol
+end
+
+function _CommonPhaseCriterion(;
+    T::Real=Inf,
+    max_events::Integer=typemax(Int),
+    check_time::Bool=isfinite(T),
+    check_events::Bool=max_events < typemax(Int),
+    event_source::Union{Nothing,EventCountCriterion}=nothing,
+)
+    return _CommonPhaseCriterion(
+        T, Int(max_events), check_time, check_events, event_source, 0, :none)
+end
+
+function initialize!(c::_CommonPhaseCriterion, state, trace_manager, stats)
+    c.reason = :none
+    if c.check_events
+        c.baseline = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
+        c.event_source !== nothing && (c.event_source.baseline = c.baseline)
+    end
+    return nothing
+end
+
+function is_satisfied(c::_CommonPhaseCriterion, state, trace_manager, stats)
+    if c.check_time && state.t[] >= c.T
+        c.reason = :reached_time
+        return true
+    end
+    if c.check_events
+        total = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
+        if (total - c.baseline) >= c.max_events
+            c.reason = :reached_event_budget
+            return true
+        end
+    end
+    return false
+end
+
+stop_reason(c::_CommonPhaseCriterion) = c.reason # COV_EXCL_LINE
 
 """
     WallTimeCriterion(seconds)
@@ -74,8 +125,8 @@ mutable struct WallTimeCriterion <: StoppingCriterion
 end
 
 function WallTimeCriterion(seconds::Real)
-    sec = Float64(seconds)
-    isfinite(sec) && sec > 0 || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
+    sec = seconds
+    isfinite(sec) && ispositive(sec) || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
     return WallTimeCriterion(sec, zero(UInt64))
 end
 
@@ -90,7 +141,7 @@ function is_satisfied(c::WallTimeCriterion, state, trace_manager, stats)
     return elapsed >= c.max_seconds
 end
 
-stop_reason(::WallTimeCriterion) = :reached_wall_time
+stop_reason(::WallTimeCriterion) = :reached_wall_time # COV_EXCL_LINE
 
 """
     TotalWallTimeCriterion(seconds)
@@ -104,8 +155,8 @@ mutable struct TotalWallTimeCriterion <: StoppingCriterion
 end
 
 function TotalWallTimeCriterion(seconds::Real)
-    sec = Float64(seconds)
-    isfinite(sec) && sec > 0 || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
+    sec = seconds
+    isfinite(sec) && ispositive(sec) || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
     return TotalWallTimeCriterion(sec, Ref(zero(UInt64)))
 end
 
@@ -122,7 +173,7 @@ function is_satisfied(c::TotalWallTimeCriterion, state, trace_manager, stats)
     return elapsed >= c.max_seconds
 end
 
-stop_reason(::TotalWallTimeCriterion) = :reached_wall_time
+stop_reason(::TotalWallTimeCriterion) = :reached_wall_time # COV_EXCL_LINE
 
 """
     ESSCriterion(target_ess; check_every=500, min_trace_length=10, trace_selector=:main)
@@ -146,9 +197,9 @@ function ESSCriterion(
     min_trace_length::Integer=10,
     trace_selector::Symbol=:main
 )
-    target = Float64(target_ess)
-    isfinite(target) && target > 0 || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
-    check_every > 0 || throw(ArgumentError("check_every must be > 0, got $check_every"))
+    target = target_ess
+    isfinite(target) && ispositive(target) || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
+    ispositive(check_every) || throw(ArgumentError("check_every must be > 0, got $check_every"))
     min_trace_length >= 2 || throw(ArgumentError("min_trace_length must be >= 2, got $min_trace_length"))
     trace_selector in (:main, :warmup) || throw(ArgumentError("trace_selector must be :main or :warmup, got $trace_selector"))
     return ESSCriterion(target, check_every, min_trace_length, 0, false, trace_selector)
@@ -181,7 +232,7 @@ function is_satisfied(c::ESSCriterion, state, trace_manager, stats)
     return c.satisfied
 end
 
-stop_reason(::ESSCriterion) = :reached_ess
+stop_reason(::ESSCriterion) = :reached_ess # COV_EXCL_LINE
 
 """
     OnlineESSCriterion(target_ess; check_every=500, min_samples=10, batch_size=50)
@@ -216,11 +267,11 @@ function OnlineESSCriterion(
     min_samples::Integer=10,
     batch_size::Integer=50
 )
-    target = Float64(target_ess)
-    isfinite(target) && target > 0 || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
-    check_every > 0 || throw(ArgumentError("check_every must be > 0, got $check_every"))
+    target = target_ess
+    isfinite(target) && ispositive(target) || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
+    ispositive(check_every) || throw(ArgumentError("check_every must be > 0, got $check_every"))
     min_samples >= 2 || throw(ArgumentError("min_samples must be >= 2, got $min_samples"))
-    batch_size > 0 || throw(ArgumentError("batch_size must be > 0, got $batch_size"))
+    ispositive(batch_size) || throw(ArgumentError("batch_size must be > 0, got $batch_size"))
     return OnlineESSCriterion(
         target,
         Int(check_every),
@@ -272,7 +323,7 @@ function _update_online_sample!(c::OnlineESSCriterion, x::AbstractVector)
     c.n_samples += 1
     n = c.n_samples
     @inbounds for i in eachindex(c.mean_samples)
-        xi = Float64(x[i])
+        xi = x[i]
         c.batch_sum[i] += xi
         δ = xi - c.mean_samples[i]
         c.mean_samples[i] += δ / n
@@ -284,7 +335,7 @@ function _update_online_sample!(c::OnlineESSCriterion, x::AbstractVector)
     if c.batch_fill == c.batch_size
         c.n_batches += 1
         nb = c.n_batches
-        inv_batch_size = inv(Float64(c.batch_size))
+        inv_batch_size = inv(c.batch_size)
         @inbounds for i in eachindex(c.mean_batches)
             bm = c.batch_sum[i] * inv_batch_size
             c.batch_sum[i] = 0.0
@@ -315,10 +366,10 @@ function is_satisfied(c::OnlineESSCriterion, state, trace_manager, stats)
     @inbounds for i in eachindex(c.scratch_ess)
         overall_var = c.m2_samples[i] / sample_denom
         batch_var = c.m2_batches[i] / batch_denom
-        if overall_var > 0 && batch_var > 0
+        if ispositive(overall_var) && ispositive(batch_var)
             c.scratch_ess[i] = c.n_batches * overall_var / batch_var
         else
-            c.scratch_ess[i] = Float64(c.n_batches)
+            c.scratch_ess[i] = c.n_batches
         end
     end
 
@@ -327,7 +378,99 @@ function is_satisfied(c::OnlineESSCriterion, state, trace_manager, stats)
     return c.satisfied
 end
 
-stop_reason(::OnlineESSCriterion) = :reached_ess
+stop_reason(::OnlineESSCriterion) = :reached_ess # COV_EXCL_LINE
+
+"""
+    AdaptiveWarmupCriterion(; min_time, max_time, stable_time,
+        min_events=100, check_every=25)
+
+Stop warmup after a minimum PDMP time and event count once no dynamics
+adaptation reset has been observed for `stable_time`. Always stops at
+`max_time`. This is a generic convergence proxy for adaptive dynamics such as
+AdaptiveBoomerang: it does not inspect model-specific coordinates, and it keeps
+the fixed maximum warmup cap as a safety fallback.
+"""
+mutable struct AdaptiveWarmupCriterion <: StoppingCriterion
+    min_time::Float64
+    max_time::Float64
+    stable_time::Float64
+    min_events::Int
+    check_every::Int
+    start_time::Float64
+    events_start::Int
+    events_since_check::Int
+    last_reset_count::Int
+    stable_start_time::Float64
+    satisfied::Bool
+    reason::Symbol
+end
+
+function AdaptiveWarmupCriterion(; min_time::Real, max_time::Real,
+    stable_time::Real, min_events::Integer=100, check_every::Integer=25)
+    min_t = min_time
+    max_t = max_time
+    stable_t = stable_time
+    isfinite(min_t) && min_t >= 0 ||
+        throw(ArgumentError("min_time must be finite and nonnegative"))
+    isfinite(max_t) && max_t > min_t ||
+        throw(ArgumentError("max_time must be finite and greater than min_time"))
+    isfinite(stable_t) && stable_t >= 0 ||
+        throw(ArgumentError("stable_time must be finite and nonnegative"))
+    min_events >= 0 || throw(ArgumentError("min_events must be nonnegative"))
+    ispositive(check_every) || throw(ArgumentError("check_every must be positive"))
+    return AdaptiveWarmupCriterion(min_t, max_t, stable_t, Int(min_events),
+        Int(check_every), 0.0, 0, 0, 0, 0.0, false, :none)
+end
+
+_phase_event_count(stats) =
+    _get_counter_reflections_events(stats) +
+    _get_counter_refreshment_events(stats) +
+    _get_counter_sticky_events(stats)
+
+function initialize!(c::AdaptiveWarmupCriterion, state, trace_manager, stats)
+    c.start_time = state.t[]
+    c.events_start = _phase_event_count(stats)
+    c.events_since_check = 0
+    c.last_reset_count = _get_counter_grid_resets_from_dynamics_adaptation(stats)
+    c.stable_start_time = state.t[]
+    c.satisfied = false
+    c.reason = :none
+    return nothing
+end
+
+function update!(c::AdaptiveWarmupCriterion, state, trace_manager, stats, event_type)
+    c.events_since_check += 1
+    reset_count = _get_counter_grid_resets_from_dynamics_adaptation(stats)
+    if reset_count != c.last_reset_count
+        c.last_reset_count = reset_count
+        c.stable_start_time = state.t[]
+    end
+    return nothing
+end
+
+function is_satisfied(c::AdaptiveWarmupCriterion, state, trace_manager, stats)
+    c.satisfied && return true
+    elapsed = state.t[] - c.start_time
+    if elapsed >= c.max_time
+        c.satisfied = true
+        c.reason = :reached_time
+        return true
+    end
+    c.events_since_check >= c.check_every || return false
+    c.events_since_check = 0
+    elapsed >= c.min_time || return false
+    events = _phase_event_count(stats) - c.events_start
+    events >= c.min_events || return false
+    stable_elapsed = state.t[] - c.stable_start_time
+    if stable_elapsed >= c.stable_time
+        c.satisfied = true
+        c.reason = :warmup_stabilized
+        return true
+    end
+    return false
+end
+
+stop_reason(c::AdaptiveWarmupCriterion) = c.reason # COV_EXCL_LINE
 
 """
     AnyCriterion(criteria...)
@@ -395,7 +538,7 @@ function stop_reason(c::AnyCriterion, state, trace_manager, stats)
     return :none
 end
 
-stop_reason(::AllCriteria) = :all_criteria_satisfied
+stop_reason(::AllCriteria) = :all_criteria_satisfied # COV_EXCL_LINE
 
 # Value copy: start_ns is overwritten by initialize! at the start of each phase,
 # unlike TotalWallTimeCriterion which uses a Ref to share a single global start time.
@@ -433,6 +576,25 @@ function Base.copy(c::OnlineESSCriterion)
 end
 
 Base.copy(c::FixedTimeCriterion) = c
+
+function Base.copy(c::AdaptiveWarmupCriterion)
+    copied = AdaptiveWarmupCriterion(;
+        min_time=c.min_time,
+        max_time=c.max_time,
+        stable_time=c.stable_time,
+        min_events=c.min_events,
+        check_every=c.check_every,
+    )
+    copied.start_time = c.start_time
+    copied.events_start = c.events_start
+    copied.events_since_check = c.events_since_check
+    copied.last_reset_count = c.last_reset_count
+    copied.stable_start_time = c.stable_start_time
+    copied.satisfied = c.satisfied
+    copied.reason = c.reason
+    return copied
+end
+
 function Base.copy(c::EventCountCriterion)
     ec = EventCountCriterion(c.max_events)
     ec.baseline = c.baseline

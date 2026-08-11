@@ -5,6 +5,8 @@ struct BoundaryHandling{M} <: BoundaryPolicy
 end
 
 _boundary_policy(opts::SupportBoundaryOptions) = opts.detect_boundaries ? BoundaryHandling{opts.mode}(opts) : NoBoundaryHandling()
+_detect_boundaries(::NoBoundaryHandling) = false
+_detect_boundaries(::BoundaryHandling) = true
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -14,19 +16,52 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::NoBoundaryHandling,
+    ::BoundaryPolicy,
+    max_horizon::Real,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats)
 
-_next_event_time_for_step(
+function _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
     flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
+    alg::SubsamplingThinningState,
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
     ::BoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats)
+    max_horizon::Real,
+)
+    throw(ArgumentError(
+        "support-boundary detection is not yet supported by SubsampledControlVariate ThinningStrategy"))
+end
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::SubsamplingThinningState,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::NoBoundaryHandling,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+        Float64(max_horizon), true, :horizon_hit)
+end
+
+_next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::Union{StickyLoopState,AggregateStickyLoopState},
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+) = next_event_time(rng, model, flow, alg, state, cache, stats,
+                    Float64(max_horizon), _detect_boundaries(policy))
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -36,8 +71,64 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::BoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats, Inf, true, :horizon_hit, true)
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+) = next_event_time(rng, model, flow, alg, state, cache, stats,
+                    Float64(max_horizon), true, :horizon_hit,
+                    _detect_boundaries(policy))
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::Union{VectorVariationAdaptiveState,PositiveVariationGridAdaptiveState},
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true, :horizon_hit,
+                           _detect_boundaries(policy))
+end
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::RootsPoissonTimeStrategy,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true, :horizon_hit)
+end
+
+function _bounded_inner_event_time(
+    rng::Random.AbstractRNG,
+    model::PDMPModel{<:GlobalGradientStrategy},
+    flow::ContinuousDynamics,
+    inner_alg_state::RootsPoissonTimeStrategy,
+    state::StickyPDMPState,
+    cache,
+    stats::AbstractStatisticCounter,
+    max_horizon::Float64,
+    ::Bool=false,
+)
+    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
+                           max_horizon, false, :sticky_horizon_hit)
+end
+
+function _cap_event_time_for_step(τ::Real, event_type::Symbol, meta, max_horizon::Real)
+    if isfinite(max_horizon) && τ > max_horizon
+        return Float64(max_horizon), :horizon_hit, EmptyMeta()
+    end
+    return τ, event_type, meta
+end
 
 # The default hot path deliberately has no support-boundary try/catch or option
 # plumbing; boundary recovery is handled by the typed BoundaryHandling method.
@@ -51,12 +142,14 @@ function _step!(
     stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ::NoBoundaryHandling,
-    phase::Symbol
+    phase::Symbol,
+    max_horizon::Real=Inf,
 ) where {FL<:ContinuousDynamics}
-    τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling())
-    @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+    τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling(), max_horizon)
+    τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
+    @assert ispositive(τ) || (iszero(τ) && event_type === :sticky) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-    needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+    needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
     needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
 
     return event_type
@@ -72,15 +165,17 @@ function _step!(
     stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     boundary_policy::BoundaryHandling,
-    phase::Symbol
+    phase::Symbol,
+    max_horizon::Real=Inf,
 ) where {FL<:ContinuousDynamics}
     support_boundary_options = boundary_policy.opts
     try
-        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy)
+        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy, max_horizon)
+        τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
 
-        @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+        @assert ispositive(τ) || (iszero(τ) && event_type === :sticky) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-        needs_saving, saving_args = handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
+        needs_saving, saving_args = handle_event!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
         needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
 
         return event_type
@@ -174,6 +269,9 @@ function _line_search_truncated_refresh_from_current_state!(
             _inc_counter_refreshment_events(stats)
             _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
+            if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
+                _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+            end
             record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end
@@ -253,7 +351,7 @@ _supports_line_search_truncated_refresh(::ContinuousDynamics) = false
 _supports_line_search_truncated_refresh(::BouncyParticle) = true
 _supports_line_search_truncated_refresh(flow::PreconditionedDynamics) = _supports_line_search_truncated_refresh(flow.dynamics)
 _supports_line_search_truncated_refresh_state(::AbstractPDMPState, flow::ContinuousDynamics) = _supports_line_search_truncated_refresh(flow)
-_supports_line_search_truncated_refresh_state(::StickyPDMPState, ::ContinuousDynamics) = false
+_supports_line_search_truncated_refresh_state(::StickyPDMPState, flow::ContinuousDynamics) = _supports_line_search_truncated_refresh(flow)
 _supports_capped_boundary_search(::PoissonTimeStrategy) = false
 _supports_capped_boundary_search(::GridAdaptiveState) = true
 
@@ -546,7 +644,7 @@ function _handle_capped_boundary_event!(
     support_boundary_options::SupportBoundaryOptions,
 )
     needs_saving, saving_args = try
-        handle_event!(rng, τ, model.grad, flow, alg, state, cache, event_type, meta, stats)
+        handle_event!(rng, τ, model, flow, alg, state, cache, event_type, meta, stats, phase)
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
@@ -591,6 +689,9 @@ function _boundary_refresh_from_localization!(
             _inc_counter_refreshment_events(stats)
             _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
+            if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
+                _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+            end
             record_event!(trace_manager, state, flow, nothing, phase)
             return :refresh
         end

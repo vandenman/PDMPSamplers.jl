@@ -5,8 +5,31 @@
     @testset "DensePreconditioner constructors and fields" begin
         dp = DensePreconditioner(4)
         @test dp.L ≈ Matrix{Float64}(I, 4, 4)
-        @test dp.Linv ≈ Matrix{Float64}(I, 4, 4)
-        @test dp.v_canonical == zeros(4)
+
+        @test_throws ArgumentError DensePreconditioner([1.0 1.0; 0.0 1.0])
+        @test_throws DimensionMismatch DensePreconditioner(ones(2, 3))
+        @test_throws MethodError DensePreconditioner(
+            Matrix{Float64}(I, 2, 2), zeros(2), 99.0)
+
+        old_L = copy(dp.L)
+        old_norm = dp.L_operator_norm
+        @test_throws SingularException set_dense_preconditioner!(dp, zeros(4, 4))
+        @test_throws ArgumentError set_dense_preconditioner!(dp,
+            [1.0 1.0 0.0 0.0; 0.0 1.0 0.0 0.0;
+             0.0 0.0 1.0 0.0; 0.0 0.0 0.0 1.0])
+        @test dp.L == old_L
+        @test dp.L_operator_norm == old_norm
+
+        updated = Diagonal([100.0, 1.0, 1.0, 1.0])
+        set_dense_preconditioner!(dp, updated)
+        @test dp.L == updated
+        @test dp.L_operator_norm == 100.0
+        canonical = [1.0, -1.0, 1.0, -1.0]
+        ξ = SkeletonPoint(zeros(4), dp.L * canonical)
+        flow = PreconditionedDynamics(dp, ZigZag(4))
+        state = PDMPState(0.0, ξ)
+        PDMPSamplers._synchronize_dense_zigzag_velocity!(state, flow)
+        @test state.boundary_scratch.canonical_signs ≈ canonical
     end
 
     @testset "subpreconditioner" begin
@@ -21,12 +44,11 @@
         @test length(sub_diag.scale) == 3
 
         dp_dense = DensePreconditioner(4)
-        dp_dense.L .= randn(4, 4)
-        dp_dense.Linv .= randn(4, 4)
+        set_dense_preconditioner!(dp_dense, LowerTriangular(randn(4, 4)) + 4I)
         sub_dense = PDMPSamplers.subpreconditioner(dp_dense, free)
         @test sub_dense isa DensePreconditioner
         @test size(sub_dense.L) == (3, 3)
-        @test size(sub_dense.Linv) == (3, 3)
+        @test sub_dense.L_operator_norm ≈ opnorm(sub_dense.L)
     end
 
     @testset "isfactorized dispatch" begin
@@ -54,7 +76,8 @@
         @test v2 == [2.0, 6.0, 12.0]
 
         dp = DensePreconditioner(3)
-        dp.L .= [2.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 4.0]
+        set_dense_preconditioner!(dp,
+            [2.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 4.0])
         v3 = [1.0, 2.0, 3.0]
         PDMPSamplers.transform_velocity!(v3, dp)
         @test v3 ≈ [2.0, 6.0, 12.0]
@@ -107,18 +130,16 @@
 
         # Set a non-trivial L
         L_new = [1.0 0.0 0.0; 0.5 1.0 0.0; 0.2 0.3 1.0]
-        M.L .= L_new
-        M.Linv .= inv(LowerTriangular(L_new))
-        M.v_canonical .= [1.0, -1.0, 1.0]
-
-        ξ = SkeletonPoint(randn(d), M.L * M.v_canonical)
+        set_dense_preconditioner!(M, L_new)
+        v = [1.0, -1.0, 1.0]
+        ξ = SkeletonPoint(randn(d), M.L * v)
+        state = PDMPState(0.0, ξ)
         ∇ϕ = randn(d)
 
-        rate = PDMPSamplers.λ(ξ, ∇ϕ, zz)
+        rate = PDMPSamplers.λ(state, ∇ϕ, zz)
         @test rate >= 0
 
         # Manual computation of the rate
-        v = M.v_canonical
         L = M.L
         expected_rate = 0.0
         for i in 1:d
@@ -136,31 +157,29 @@
 
         Σ_true = [1.0 0.5 0.2 0.1; 0.5 1.0 0.3 0.2; 0.2 0.3 1.0 0.4; 0.1 0.2 0.4 1.0]
         L_new = cholesky(Symmetric(Σ_true)).L
-        M.L .= L_new
-        M.Linv .= inv(LowerTriangular(L_new))
-        M.v_canonical .= [1.0, -1.0, 1.0, -1.0]
-
-        ξ = SkeletonPoint(randn(d), M.L * M.v_canonical)
+        set_dense_preconditioner!(M, L_new)
+        signs = [1.0, -1.0, 1.0, -1.0]
+        ξ = SkeletonPoint(randn(d), M.L * signs)
+        state = PDMPState(0.0, ξ)
         ∇ϕ = randn(d)
         cache = (; z=similar(ξ.x))
 
         θ_before = copy(ξ.θ)
-        PDMPSamplers.reflect!(ξ, ∇ϕ, zz, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), state, ∇ϕ, zz, cache)
         @test all(isfinite, ξ.θ)
         # Exactly one canonical coordinate should have flipped
-        n_flipped = sum(M.v_canonical[i] != [1.0, -1.0, 1.0, -1.0][i] for i in 1:d)
-        @test 0 ≤ n_flipped ≤ 1
+        recovered = M.L \ ξ.θ
+        @test count(i -> !isapprox(recovered[i], signs[i]; atol=1e-12), 1:d) == 1
     end
 
     @testset "DensePreconditionedZigZag reflect! zero-rate branch" begin
         d = 3
         zz = DensePreconditionedZigZag(d)
         M = zz.metric
-        M.v_canonical .= [1.0, -1.0, 1.0]
-
-        ξ = SkeletonPoint(randn(d), M.L * M.v_canonical)
+        signs = [1.0, -1.0, 1.0]
+        ξ = SkeletonPoint(randn(d), M.L * signs)
         # Set gradient so that all v_i * grad_z_i ≤ 0 → total_rate = 0
-        ∇ϕ = -(M.L') * M.v_canonical  # ensures v_i * (L'∇ϕ)_i = -v_i^2 ≤ 0
+        ∇ϕ = -inv(M.L') * signs
         cache = (; z=similar(ξ.x))
 
         PDMPSamplers.reflect!(ξ, ∇ϕ, zz, cache)
@@ -207,7 +226,8 @@
     @testset "initialize_velocity applies preconditioner" begin
         d = 3
         dp = DensePreconditioner(d)
-        dp.L .= [2.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 4.0]
+        set_dense_preconditioner!(dp,
+            [2.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 4.0])
 
         zz = PreconditionedDynamics(dp, ZigZag(d))
         Random.seed!(42)
@@ -220,7 +240,8 @@
     @testset "refresh_velocity! applies preconditioner" begin
         d = 3
         dp = DensePreconditioner(d)
-        dp.L .= [2.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 4.0]
+        set_dense_preconditioner!(dp,
+            [2.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 4.0])
 
         bps = PreconditionedDynamics(dp, BouncyParticle(d, 1.0))
         ξ = SkeletonPoint(randn(d), randn(d))
@@ -291,12 +312,12 @@
         ]
         trace = PDMPSamplers.PDMPTrace(events, pzz)
         ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(pzz, d))
-        state = StickyPDMPState(25.0, ξ, BitVector([true, false, true]), randn(d))
-        old_old_vel = copy(state.old_velocity)
+        state = StickyPDMPState(25.0, ξ, BitVector([true, false, true]))
+        state.ξ.θ[2] = 0.0
         PDMPSamplers.update_preconditioner!(pzz, trace, state)
         @test all(isfinite, pzz.metric.scale)
-        # old_velocity for frozen coordinate should be updated
-        @test state.old_velocity[2] != old_old_vel[2]
+        @test iszero(state.ξ.θ[2])
+        @test all(abs.(state.ξ.θ[state.free]) .== pzz.metric.scale[state.free])
     end
 
     @testset "update_preconditioner! DensePreconditioner" begin
@@ -312,7 +333,7 @@
         PDMPSamplers.update_preconditioner!(dzz, trace, state)
         @test dzz.metric.L != old_L
         @test all(isfinite, dzz.metric.L)
-        @test all(isfinite, dzz.metric.Linv)
+        @test dzz.metric.L_operator_norm ≈ opnorm(dzz.metric.L)
     end
 
     @testset "update_preconditioner! DensePreconditioner with BPS" begin
@@ -348,12 +369,12 @@
         @test dzz.metric.L == old_L
     end
 
-    @testset "freezing_time forwarding" begin
+    @testset "sticking_time forwarding" begin
         d = 3
         pzz = PreconditionedZigZag(d)
         ξ = SkeletonPoint([1.0, -1.0, 2.0], [1.0, 1.0, -1.0])
         for i in 1:d
-            t = PDMPSamplers.freezing_time(ξ, pzz, i)
+            t = PDMPSamplers.sticking_time(ξ, pzz, i)
             @test t >= 0
         end
     end
