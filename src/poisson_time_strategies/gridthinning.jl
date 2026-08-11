@@ -245,12 +245,12 @@ end
 
 _validate_grid_model(::ContinuousDynamics, ::PDMPModel) = nothing
 
-_validate_subsampling_grid_envelope(::ContinuousDynamics, ::SeparableResidualEnvelope) = nothing
+_validate_subsampling_grid_envelope(::ContinuousDynamics, ::AbstractResidualEnvelope) = nothing
 _validate_subsampling_grid_envelope(flow::PreconditionedDynamics,
-        envelope::SeparableResidualEnvelope) =
+        envelope::AbstractResidualEnvelope) =
     _validate_subsampling_grid_envelope(flow.dynamics, envelope)
 function _validate_subsampling_grid_envelope(::AnyBoomerang,
-        envelope::SeparableResidualEnvelope)
+        envelope::AbstractResidualEnvelope)
     envelope.component_cell_scales! === nothing && throw(ArgumentError(
         "SubsampledControlVariate GridThinning requires an explicit certified " *
         "component_cell_scales! callback for Boomerang trajectories"))

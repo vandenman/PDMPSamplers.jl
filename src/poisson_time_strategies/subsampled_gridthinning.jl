@@ -14,21 +14,90 @@ function _draw_uniform_without_replacement!(rng::Random.AbstractRNG, out::Abstra
     return out
 end
 
-function _draw_component(rng::Random.AbstractRNG, envelope::SeparableResidualEnvelope, B::Real)
+function _draw_component(rng::Random.AbstractRNG, envelope::AbstractResidualEnvelope, B::Real)
     u = rand(rng) * B
-    cumulative = zero(eltype(envelope.totals))
-    chosen = 0
-    scales = envelope.scales
-    totals = envelope.totals
-    for r in eachindex(totals)
-        mass = scales[r] * totals[r]
-        ispositive(mass) && (chosen = r)
-        cumulative += mass
-        if u < cumulative
-            return r
+    cumulative = envelope.cumulative_masses
+    component = min(searchsortedlast(cumulative, u) + 1,
+        lastindex(cumulative))
+    return component
+end
+
+_draw_distinguished(rng, envelope::SeparableResidualEnvelope, component) =
+    rand(rng, envelope.alias_tables[component])
+_draw_distinguished(rng, envelope::GroupedResidualEnvelope, component) =
+    rand(rng, envelope.members[component])
+
+function _draw_base_subset!(rng, cv::SubsampledControlVariate,
+        ::UniformSubsamplingDesign)
+    N = n_observations(cv.envelope)
+    return _draw_uniform_without_replacement!(
+        rng, cv.subset, N, cv.sampling_map)
+end
+
+function _draw_base_subset!(rng, cv::SubsampledControlVariate,
+        design::BalancedStratifiedSubsamplingDesign)
+    offset = 0
+    destination = 1
+    for _ in 1:design.n_strata
+        selected = @view cv.subset[
+            destination:(destination + design.per_stratum - 1)]
+        _draw_uniform_without_replacement!(rng, selected,
+            design.stratum_size, cv.sampling_map)
+        @inbounds for j in eachindex(selected)
+            selected[j] += offset
+        end
+        destination += design.per_stratum
+        offset += design.stratum_size
+    end
+    return cv.subset
+end
+
+function _draw_base_subset_conditional!(rng, cv::SubsampledControlVariate,
+        ::UniformSubsamplingDesign, distinguished::Int)
+    cv.subset[1] = distinguished
+    if cv.m > 1
+        _draw_uniform_without_replacement!(rng, view(cv.subset, 2:cv.m),
+            n_observations(cv.envelope), cv.sampling_map;
+            excluded=distinguished)
+    end
+    return cv.subset
+end
+
+function _draw_base_subset_conditional!(rng, cv::SubsampledControlVariate,
+        design::BalancedStratifiedSubsamplingDesign, distinguished::Int)
+    distinguished_stratum, local0 = divrem(
+        distinguished - 1, design.stratum_size)
+    distinguished_stratum += 1
+    distinguished_local = local0 + 1
+    destination = 1
+    for stratum in 1:design.n_strata
+        offset = (stratum - 1) * design.stratum_size
+        if stratum == distinguished_stratum
+            cv.subset[destination] = distinguished
+            destination += 1
+            count = design.per_stratum - 1
+            if count > 0
+                selected = @view cv.subset[destination:(destination + count - 1)]
+                _draw_uniform_without_replacement!(rng, selected,
+                    design.stratum_size, cv.sampling_map;
+                    excluded=distinguished_local)
+                @inbounds for j in eachindex(selected)
+                    selected[j] += offset
+                end
+                destination += count
+            end
+        else
+            selected = @view cv.subset[
+                destination:(destination + design.per_stratum - 1)]
+            _draw_uniform_without_replacement!(rng, selected,
+                design.stratum_size, cv.sampling_map)
+            @inbounds for j in eachindex(selected)
+                selected[j] += offset
+            end
+            destination += design.per_stratum
         end
     end
-    return chosen
+    return cv.subset
 end
 
 """
@@ -42,30 +111,43 @@ are reused without scanning observations.
 function draw_subset!(rng::Random.AbstractRNG, cv::SubsampledControlVariate,
     D::Real, B::Real)
     envelope = cv.envelope
-    weights = envelope.weights
     scales = envelope.scales
-    N = size(weights, 2)
+    N = n_observations(envelope)
     m = cv.m
     total = D + B
 
     if iszero(B) || (!iszero(D) && rand(rng) * total <= D)
-        _draw_uniform_without_replacement!(rng, cv.subset, N, cv.sampling_map)
+        _draw_base_subset!(rng, cv, cv.subset_design)
     else
         component = _draw_component(rng, envelope, B)
-        table = envelope.alias_tables[component]
-        distinguished = rand(rng, table)
-        cv.subset[1] = distinguished
-        if m > 1
-            _draw_uniform_without_replacement!(rng, view(cv.subset, 2:m), N,
-                cv.sampling_map; excluded=distinguished)
-        end
+        distinguished = _draw_distinguished(rng, envelope, component)
+        _draw_base_subset_conditional!(
+            rng, cv, cv.subset_design, distinguished)
     end
 
     subset_weight = 0.0
-    @inbounds for i in cv.subset, r in axes(weights, 1)
-        subset_weight += scales[r] * weights[r, i]
+    @inbounds for i in cv.subset
+        subset_weight += observation_residual_bound(envelope, i)
     end
     return D + (N / m) * subset_weight
+end
+
+_signed_subset_bound(state, gradient, ::ContinuousDynamics, D, M) = M
+function _signed_subset_bound(state, gradient,
+        ::Union{BouncyParticle,AnyBoomerang}, D, M)
+    residual_bound = max(0.0, M - D)
+    signed_deterministic = dot(state.ξ.θ, gradient)
+    return max(0.0, signed_deterministic + residual_bound)
+end
+function _signed_subset_bound(state, gradient,
+        flow::PreconditionedDynamics, D, M)
+    dynamics = flow.dynamics
+    if dynamics isa BouncyParticle || dynamics isa AnyBoomerang
+        residual_bound = max(0.0, M - D)
+        signed_deterministic = dot(state.ξ.θ, gradient)
+        return max(0.0, signed_deterministic + residual_bound)
+    end
+    return M
 end
 
 """Evaluate one aggregate-accepted subsampling proposal without advancing the live state."""
@@ -76,6 +158,18 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         τ::Real, D::Real, B::Real)
     copyto!(candidate, state)
     move_forward_time!(candidate, τ, flow)
+    scale = n_observations(cv.envelope) / cv.m
+    M_subset = draw_subset!(rng, cv, D, B)
+    residual_subset_bound = subsampling_residual_subset_bound(
+        cv.residual_oracle, candidate, flow, D, M_subset,
+        cv.subset, scale)
+    if iszero(residual_subset_bound) ||
+            (residual_subset_bound < M_subset &&
+             rand(rng) * M_subset > residual_subset_bound)
+        return (; accepted=false, G=nothing,
+            deterministic_actual=0.0, actual=0.0)
+    end
+
     _inc_counter_grid_acceptance_gradient_calls(stats)
     G = compute_gradient!(candidate, cv, flow, cache)
     deterministic_actual = λ(candidate, G, flow)
@@ -84,23 +178,40 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         return nothing
     end
 
-    M_subset = draw_subset!(rng, cv, D, B)
+    tight_subset_bound = subsampling_subset_bound(
+        cv.residual_oracle, candidate, G, flow, D,
+        residual_subset_bound, cv.subset, scale)
+    if iszero(tight_subset_bound) ||
+            (tight_subset_bound < residual_subset_bound &&
+             rand(rng) * residual_subset_bound > tight_subset_bound)
+        return (; accepted=false, G, deterministic_actual, actual=0.0)
+    end
     _inc_counter_subsampling_subset_evaluations(stats)
     fill!(cv.residual_buffer, 0.0)
     cv.residual_oracle(cv.residual_buffer, candidate.ξ.x, cv.subset, cv.anchor)
-    axpy!(size(cv.envelope.weights, 2) / cv.m, cv.residual_buffer, G)
-    actual = λ(candidate, G, flow)
+    actual = subsampling_candidate_rate!(cv.residual_oracle, candidate, G,
+        cv.residual_buffer, scale, flow,
+        deterministic_actual, cv.subset)
     _inc_counter_grid_acceptance_tests(stats)
     if _subsampling_bound_violation(
-            violation_policy, stats, actual, M_subset, :subset)
+            violation_policy, stats, actual, tight_subset_bound, :subset)
         return nothing
     end
-    accepted = ispositive(M_subset) && rand(rng) * M_subset <= actual
+    accepted = rand(rng) * tight_subset_bound <= actual
+    positive_residual_rate = λ(candidate, cv.residual_buffer, flow)
+    rmul!(cv.residual_buffer, -1)
+    negative_residual_rate = λ(candidate, cv.residual_buffer, flow)
+    rmul!(cv.residual_buffer, -1)
+    residual_rate = scale *
+        (positive_residual_rate + negative_residual_rate)
+    record_subsampling_proposal!(cv.residual_oracle,
+        D, B, tight_subset_bound, deterministic_actual, residual_rate,
+        actual, accepted)
     return (; accepted, G, deterministic_actual, actual)
 end
 
 function _append_subsampling_segment!(combined::PiecewiseAffineBound,
-    envelope::SeparableResidualEnvelope, state::AbstractPDMPState,
+    envelope::AbstractResidualEnvelope, state::AbstractPDMPState,
     flow::ContinuousDynamics,
     left::Float64, right::Float64, deterministic_left::Float64,
     deterministic_slope::Float64)
@@ -124,8 +235,8 @@ function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
             left = deterministic.t_breaks[j]
             left >= effective_horizon && break
             right = min(deterministic.t_breaks[j + 1], effective_horizon)
-            _append_subsampling_segment!(combined, cv.envelope, state, flow, left, right,
-                deterministic.y_left[j], deterministic.slopes[j])
+            _append_subsampling_segment!(combined, cv.envelope, state, flow,
+                left, right, deterministic.y_left[j], deterministic.slopes[j])
         end
     else
         pcb = alg.pcb
@@ -133,8 +244,8 @@ function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
             left = pcb.t_grid[j]
             left >= effective_horizon && break
             right = min(pcb.t_grid[j + 1], effective_horizon)
-            _append_subsampling_segment!(combined, cv.envelope, state, flow, left, right,
-                pos(pcb.Λ_vals[j]), zero(pcb.Λ_vals[j]))
+            _append_subsampling_segment!(combined, cv.envelope, state, flow,
+                left, right, pos(pcb.Λ_vals[j]), zero(pcb.Λ_vals[j]))
         end
     end
     return combined

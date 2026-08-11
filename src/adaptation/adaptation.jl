@@ -2,6 +2,7 @@
 struct NoAdaptation <: AbstractAdapter end
 adapt!(::Random.AbstractRNG, ::NoAdaptation, args...; kwargs...) = nothing
 adapt!(ad::AbstractAdapter, args...; kwargs...) = adapt!(Random.default_rng(), ad, args...;  kwargs...)
+finish_warmup!(::AbstractAdapter, args...) = false
 
 """
     BoomerangAdaptationOptions(; sticky_aware=true, sticky_min_free_time=10.0,
@@ -55,6 +56,14 @@ function adapt!(rng::Random.AbstractRNG, seq::SequenceAdapter, state, flow, grad
     end
 end
 
+function finish_warmup!(seq::SequenceAdapter, args...)
+    changed = false
+    for adapter in seq.adapters
+        changed |= finish_warmup!(adapter, args...)
+    end
+    return changed
+end
+
 
 # --- 2. The Atomic Adapters ---
 
@@ -92,12 +101,17 @@ end
 # phase, but populate new entries only from warmup traces. The callbacks take
 # the chain-local SubsampledControlVariate explicitly so copied/statistics-wrapped
 # models cannot accidentally refresh another chain's provider.
-mutable struct SubsamplingAnchorBankAdapter{F1,F2} <: AbstractAdapter
+mutable struct SubsamplingAnchorBankAdapter{F1,F2,F3} <: AbstractAdapter
     select_fn!::F1
     update_fn!::F2
+    finish_warmup_fn!::F3
     update_dt::Float64
     last_update::Float64
 end
+
+SubsamplingAnchorBankAdapter(select_fn!, update_fn!, update_dt, last_update) =
+    SubsamplingAnchorBankAdapter(select_fn!, update_fn!, (_args...) -> false,
+        update_dt, last_update)
 
 function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, flow,
         grad::SubsampledControlVariate, trace_mgr; phase::Symbol=:warmup, kwargs...)
@@ -110,6 +124,11 @@ function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, f
         end
     end
     return nothing
+end
+
+function finish_warmup!(ad::SubsamplingAnchorBankAdapter, state, flow,
+        grad::SubsampledControlVariate, trace_mgr, stats)
+    return Bool(ad.finish_warmup_fn!(grad, state, flow, trace_mgr, stats))
 end
 
 

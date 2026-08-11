@@ -395,6 +395,8 @@
         na2 = PDMPSamplers.NoAdaptation()
         seq = PDMPSamplers.SequenceAdapter((na1, na2))
         PDMPSamplers.adapt!(seq, nothing, nothing, nothing, nothing)
+        @test !PDMPSamplers.finish_warmup!(
+            seq, nothing, nothing, nothing, nothing, nothing)
     end
 
     @testset "subsampling anchor-bank selection continues after warmup" begin
@@ -416,6 +418,16 @@
         @test selected[] == 1
         @test updated[] == 0
         @test ad.last_update == 0.0
+
+        finished = Ref(0)
+        staged = PDMPSamplers.SubsamplingAnchorBankAdapter(
+            (cv, x, phase) -> nothing,
+            (cv, trace) -> nothing,
+            (cv, args...) -> (finished[] += 1; true),
+            1.0, 0.0)
+        @test PDMPSamplers.finish_warmup!(staged, state, nothing, grad,
+            trace_mgr, PDMPSamplers.StatisticCounter())
+        @test finished[] == 1
     end
 
 end

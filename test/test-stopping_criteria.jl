@@ -109,6 +109,20 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test stats_a.sticky_events == stats_b.sticky_events
         @test stats_a.stop_reason == :reached_time
         @test stats_b.stop_reason == :reached_time
+        @test stats_a.initialization_elapsed_time >= 0
+        @test stats_a.warmup_phase_elapsed_time >= stats_a.warmup_elapsed_time
+        @test stats_a.main_phase_elapsed_time >= stats_a.main_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.warmup_adapter_finish_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.main_sampler_initialization_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.algorithm_warmup_finish_elapsed_time
+        @test stats_a.finalization_elapsed_time >= 0
+        accounted = stats_a.initialization_elapsed_time +
+            stats_a.warmup_phase_elapsed_time + stats_a.transition_elapsed_time +
+            stats_a.main_phase_elapsed_time + stats_a.finalization_elapsed_time
+        @test stats_a.elapsed_time >= accounted
     end
 
     @testset "Unit criteria in sampler" begin

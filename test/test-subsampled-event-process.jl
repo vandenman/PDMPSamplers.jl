@@ -76,11 +76,14 @@ end
         @test envelope.totals == [3.0, 7.0]
         @test all(!isnothing, envelope.alias_tables)
         @test length(envelope.scales) == 2
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        @test PDMPSamplers.total_residual_bound(
+            envelope, state, BouncyParticle(1, 0.0), 0.0) == 10.0
+        @test envelope.cumulative_masses == [3.0, 10.0]
 
         affine = SeparableResidualEnvelope(ones(1, 1),
             (out, state, flow, t) -> (out[1] = t);
             certified_affine=true)
-        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
         PDMPSamplers.component_cell_scales!(affine.cell_scales, affine,
             state, BouncyParticle(1, 0.0), 1.0, 2.0)
         @test affine.cell_scales == [2.0]
@@ -88,6 +91,31 @@ end
         nonaffine = (out, state, flow, t) -> (out[1] = 1 - (2t - 1)^2)
         @test_throws ArgumentError SeparableResidualEnvelope(
             ones(1, 1), nonaffine)
+
+        grouped_scales = [2.0, 3.0, 5.0, 7.0]
+        grouped_callback = (out, state, flow, args...) ->
+            copyto!(out, grouped_scales)
+        grouped = PDMPSamplers.GroupedResidualEnvelope(
+            [1 1 2; 3 4 4], 4, grouped_callback;
+            component_cell_scales! = grouped_callback)
+        @test grouped.totals == [2.0, 1.0, 1.0, 2.0]
+        @test PDMPSamplers.n_observations(grouped) == 3
+        PDMPSamplers.component_scales!(grouped.scales, grouped,
+            state, BouncyParticle(1, 0.0), 0.0)
+        @test [PDMPSamplers.observation_residual_bound(grouped, i)
+            for i in 1:3] == [7.0, 9.0, 10.0]
+        @test PDMPSamplers.total_residual_bound(
+            grouped, state, BouncyParticle(1, 0.0), 0.0) == 26.0
+        @test grouped.cumulative_masses == [4.0, 7.0, 12.0, 26.0]
+        grouped_cv = SubsampledControlVariate(
+            (out, x) -> fill!(out, 0.0),
+            (out, x, subset, anchor) -> fill!(out, 0.0),
+            grouped, [0.0], 1)
+        grouped_subset_bound = PDMPSamplers.draw_subset!(
+            MersenneTwister(81), grouped_cv, 0.0, 26.0)
+        @test grouped_subset_bound == 3 *
+            PDMPSamplers.observation_residual_bound(
+                grouped, only(grouped_cv.subset))
     end
 
     @testset "trajectory residual geometry dominates every supported flow" begin
@@ -296,6 +324,48 @@ end
                     uniform_probability * subset_bound / (D + B)
                 @test counts[S] / draws ≈ exact atol=0.012
             end
+        end
+    end
+
+    @testset "balanced stratified size-biased subset law" begin
+        rng = Random.Xoshiro(0x57a71f1ed)
+        weights = reshape([0.2, 0.7, 1.1, 0.4, 1.7, 0.9], 1, :)
+        scales = [1.3]
+        envelope = SeparableResidualEnvelope(weights,
+            (out, state, flow, t) -> copyto!(out, scales);
+            certified_affine=true)
+        design = PDMPSamplers.balanced_stratified_subsampling_design(6, 2, 4)
+        oracle = (out, x, subset, anchor) -> fill!(out, 0.0)
+        cv = SubsampledControlVariate(
+            (out, x) -> fill!(out, 0.0), oracle, envelope, [0.0], 4;
+            subset_design=design)
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        B = PDMPSamplers.total_residual_bound(envelope, state, 0.0)
+        D = 0.8
+        subsets = Tuple[]
+        for left in _enumerated_subsets(3, 2), right0 in _enumerated_subsets(3, 2)
+            right = Tuple(i + 3 for i in right0)
+            push!(subsets, Tuple(sort(vcat(collect(left), collect(right)))))
+        end
+        counts = Dict(S => 0 for S in subsets)
+        draws = 30_000
+        balanced = true
+        max_bound_error = 0.0
+        for _ in 1:draws
+            M = PDMPSamplers.draw_subset!(rng, cv, D, B)
+            S = _subset_key(cv.subset)
+            balanced &= count(<=(3), S) == 2 && count(>(3), S) == 2
+            counts[S] += 1
+            expected_M = D + 6 / 4 * sum(scales[1] * weights[1, i] for i in S)
+            max_bound_error = max(max_bound_error, abs(M - expected_M))
+        end
+        @test balanced
+        @test max_bound_error < 1e-12
+        uniform_probability = 1 / length(subsets)
+        for S in subsets
+            subset_bound = D + 6 / 4 * sum(scales[1] * weights[1, i] for i in S)
+            exact = uniform_probability * subset_bound / (D + B)
+            @test counts[S] / draws ≈ exact atol=0.01
         end
     end
 
@@ -1018,9 +1088,22 @@ end
                 gaussian_subsampling_model(flow),
                 GridThinningStrategy(N=10, t_max=1.0, lazy=false,
                     bound_violation=:throw), 0.0, 20.0, 2.0;
-                seed=8300 + seed, progress=false)
+                seed=8300 + seed, progress=false,
+                statistic_counter=PDMPSamplers.DevelStatisticCounter)
             @test length(trace) > 2
             @test stats.residual_oracle_calls > 0
+            @test stats.warmup_subsampling_cell_roof_proposals +
+                stats.main_subsampling_cell_roof_proposals ==
+                stats.subsampling_cell_roof_proposals
+            @test stats.warmup_subsampling_aggregate_accepts +
+                stats.main_subsampling_aggregate_accepts ==
+                stats.subsampling_aggregate_accepts
+            @test stats.warmup_subsampling_subset_evaluations +
+                stats.main_subsampling_subset_evaluations ==
+                stats.subsampling_subset_evaluations
+            @test stats.warmup_subsampling_final_reflections +
+                stats.main_subsampling_final_reflections ==
+                stats.subsampling_final_reflections
         end
 
         for (seed, flow) in enumerate((
@@ -1032,7 +1115,7 @@ end
             alg = Sticky(GridThinningStrategy(N=8, t_max=0.8, lazy=false,
                 bound_violation=:throw), [1.0])
             trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
-                gaussian_subsampling_model(flow), alg, 0.0, 8.0;
+                gaussian_subsampling_model(flow), alg, 0.0, 12.0;
                 seed=8400 + seed, progress=false)
             @test length(trace) > 1
             @test stats.residual_oracle_calls > 0

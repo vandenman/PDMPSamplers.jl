@@ -50,7 +50,9 @@ chosen dynamics' event rate. For BPS this is
 `sum(abs(v[j] * r_i(x)[j]), j)`, which is the bound needed by its
 coordinatewise flip rates.
 """
-struct SeparableResidualEnvelope{F,C}
+abstract type AbstractResidualEnvelope end
+
+struct SeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
     weights::Matrix{Float64}
     component_scales!::F
     component_cell_scales!::C
@@ -58,6 +60,53 @@ struct SeparableResidualEnvelope{F,C}
     alias_tables::Vector{Union{Nothing,AliasTables.AliasTable{UInt64,Int}}}
     scales::Vector{Float64}
     cell_scales::Vector{Float64}
+    cumulative_masses::Vector{Float64}
+end
+
+"""
+    GroupedResidualEnvelope(groups, component_scales!;
+                            component_cell_scales!)
+
+Compact separable envelope for one-hot component memberships. `groups[k, i]`
+is the component containing observation `i` in partition `k`. This represents
+the same bound as a zero-one component-by-observation matrix without storing
+that dense matrix or one full alias table per component.
+"""
+struct GroupedResidualEnvelope{F,C} <: AbstractResidualEnvelope
+    groups::Matrix{Int}
+    members::Vector{Vector{Int}}
+    component_scales!::F
+    component_cell_scales!::C
+    totals::Vector{Float64}
+    scales::Vector{Float64}
+    cell_scales::Vector{Float64}
+    cumulative_masses::Vector{Float64}
+end
+
+function GroupedResidualEnvelope(groups::AbstractMatrix{<:Integer},
+        n_components::Integer, component_scales!;
+        component_cell_scales! = nothing)
+    n_components >= 1 || throw(ArgumentError(
+        "grouped residual envelope must have at least one component"))
+    stored_groups = Matrix{Int}(groups)
+    isempty(stored_groups) && throw(ArgumentError(
+        "grouped residual envelope memberships must be nonempty"))
+    all(group -> 1 <= group <= n_components, stored_groups) ||
+        throw(ArgumentError("grouped residual envelope memberships are out of range"))
+    members = [Int[] for _ in 1:n_components]
+    totals = zeros(Float64, n_components)
+    @inbounds for observation in axes(stored_groups, 2), partition in axes(stored_groups, 1)
+        component = stored_groups[partition, observation]
+        push!(members[component], observation)
+        totals[component] += 1.0
+    end
+    all(member -> !isempty(member), members) || throw(ArgumentError(
+        "every grouped residual-envelope component must contain an observation"))
+    component_cell_scales! === nothing && throw(ArgumentError(
+        "grouped residual envelopes require an explicit certified component_cell_scales! callback"))
+    return GroupedResidualEnvelope(stored_groups, members, component_scales!,
+        component_cell_scales!, totals, zeros(n_components), zeros(n_components),
+        zeros(n_components))
 end
 
 """Internal wrapper recording the caller's explicit affine certification."""
@@ -86,6 +135,7 @@ function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
     return SeparableResidualEnvelope(stored_weights, stored_scales,
         component_cell_scales!, totals,
         tables, zeros(Float64, size(stored_weights, 1)),
+        zeros(Float64, size(stored_weights, 1)),
         zeros(Float64, size(stored_weights, 1)))
 end
 
@@ -107,9 +157,9 @@ _trajectory_scale_anchor(scales::TrajectoryComponentScales) = scales.anchor
 _trajectory_scale_anchor(scales::DampedHCVComponentScales) = scales.anchor
 _trajectory_scale_anchor(scales::CertifiedAffineComponentScales) =
     _trajectory_scale_anchor(scales.callback)
-_trajectory_scale_anchor(envelope::SeparableResidualEnvelope) =
+_trajectory_scale_anchor(envelope::AbstractResidualEnvelope) =
     _trajectory_scale_anchor(envelope.component_scales!)
-function _subsampling_anchor_owner(envelope::SeparableResidualEnvelope, fallback)
+function _subsampling_anchor_owner(envelope::AbstractResidualEnvelope, fallback)
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     return trajectory_anchor === nothing ? fallback : trajectory_anchor
 end
@@ -180,13 +230,39 @@ type stable. Changing envelope `weights`
 requires reconstructing the envelope because `totals` and `alias_tables` are
 derived from them.
 """
-mutable struct SubsampledControlVariate{F,O,E<:SeparableResidualEnvelope,H,R} <: GlobalGradientStrategy
+abstract type AbstractSubsamplingDesign end
+struct UniformSubsamplingDesign <: AbstractSubsamplingDesign end
+
+"""Internal balanced design for equal-size contiguous observation strata."""
+struct BalancedStratifiedSubsamplingDesign <: AbstractSubsamplingDesign
+    n_strata::Int
+    stratum_size::Int
+    per_stratum::Int
+end
+
+function balanced_stratified_subsampling_design(N::Integer, n_strata::Integer,
+        m::Integer)
+    n_strata >= 1 || throw(ArgumentError("number of subsampling strata must be positive"))
+    N % n_strata == 0 || throw(ArgumentError(
+        "balanced subsampling strata must have equal sizes"))
+    m % n_strata == 0 || throw(ArgumentError(
+        "subsample size must be divisible by the number of strata"))
+    stratum_size = N ÷ n_strata
+    per_stratum = m ÷ n_strata
+    1 <= per_stratum <= stratum_size || throw(ArgumentError(
+        "each subsampling stratum must contribute between one and all entries"))
+    return BalancedStratifiedSubsamplingDesign(
+        Int(n_strata), Int(stratum_size), Int(per_stratum))
+end
+
+mutable struct SubsampledControlVariate{F,O,E<:AbstractResidualEnvelope,H,R,D<:AbstractSubsamplingDesign} <: GlobalGradientStrategy
     deterministic_gradient!::F
     residual_oracle::O
     envelope::E
     anchor::Vector{Float64}
     deterministic_hvp!::H
     refresh_anchor_callback!::R
+    subset_design::D
     m::Int
     subset::Vector{Int}
     residual_buffer::Vector{Float64}
@@ -194,10 +270,17 @@ mutable struct SubsampledControlVariate{F,O,E<:SeparableResidualEnvelope,H,R} <:
 end
 
 function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
-    envelope::SeparableResidualEnvelope, anchor::AbstractVector, m::Integer;
-    deterministic_hvp! = nothing, refresh_anchor! = nothing)
-    N = size(envelope.weights, 2)
+    envelope::AbstractResidualEnvelope, anchor::AbstractVector, m::Integer;
+    deterministic_hvp! = nothing, refresh_anchor! = nothing,
+    subset_design::AbstractSubsamplingDesign=UniformSubsamplingDesign())
+    N = n_observations(envelope)
     1 <= m <= N || throw(ArgumentError("minibatch size m must lie in 1:N"))
+    if subset_design isa BalancedStratifiedSubsamplingDesign
+        subset_design.n_strata * subset_design.stratum_size == N ||
+            throw(DimensionMismatch("balanced subset design does not cover the envelope columns"))
+        subset_design.n_strata * subset_design.per_stratum == m ||
+            throw(DimensionMismatch("balanced subset design does not match minibatch size m"))
+    end
     requested_anchor = collect(Float64, anchor)
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     if trajectory_anchor !== nothing
@@ -206,11 +289,11 @@ function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
     end
     active_anchor = _subsampling_anchor_owner(envelope, requested_anchor)
     return SubsampledControlVariate(deterministic_gradient!, residual_oracle, envelope,
-        active_anchor, deterministic_hvp!, refresh_anchor!, Int(m),
+        active_anchor, deterministic_hvp!, refresh_anchor!, subset_design, Int(m),
         Vector{Int}(undef, m), zeros(Float64, length(active_anchor)), Dict{Int,Int}())
 end
 
-function _validate_subsampling_anchor(envelope::SeparableResidualEnvelope, anchor)
+function _validate_subsampling_anchor(envelope::AbstractResidualEnvelope, anchor)
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     trajectory_anchor === nothing || trajectory_anchor == anchor || throw(ArgumentError(
         "subsampling residual envelope does not match the active anchor"))
@@ -218,7 +301,7 @@ function _validate_subsampling_anchor(envelope::SeparableResidualEnvelope, ancho
 end
 
 function _validated_refreshed_envelope(cv::SubsampledControlVariate,
-        envelope::SeparableResidualEnvelope, requested)
+        envelope::AbstractResidualEnvelope, requested)
     typeof(envelope) === typeof(cv.envelope) || throw(ArgumentError(
         "anchor-refresh provider must return the same concrete envelope type; " *
         "reconstruct the SubsampledControlVariate to change callback types"))
@@ -226,7 +309,7 @@ function _validated_refreshed_envelope(cv::SubsampledControlVariate,
     return envelope
 end
 _validated_refreshed_envelope(cv::SubsampledControlVariate, value, requested) = throw(ArgumentError(
-    "anchor-refresh provider must return a SeparableResidualEnvelope"))
+    "anchor-refresh provider must return an AbstractResidualEnvelope"))
 
 function refresh_anchor!(cv::SubsampledControlVariate, anchor::AbstractVector)
     callback = cv.refresh_anchor_callback!
@@ -246,11 +329,12 @@ function _reconstruct_subsampling(cv::SubsampledControlVariate;
         residual_oracle = cv.residual_oracle,
         envelope = deepcopy(cv.envelope),
         deterministic_hvp! = cv.deterministic_hvp!,
-        refresh_anchor_callback! = cv.refresh_anchor_callback!)
+        refresh_anchor_callback! = cv.refresh_anchor_callback!,
+        subset_design = cv.subset_design)
     return SubsampledControlVariate(deterministic_gradient!, residual_oracle,
         envelope, copy(cv.anchor), cv.m;
         deterministic_hvp! = deterministic_hvp!,
-        refresh_anchor! = refresh_anchor_callback!)
+        refresh_anchor! = refresh_anchor_callback!, subset_design)
 end
 
 function Base.copy(cv::SubsampledControlVariate)
@@ -264,7 +348,7 @@ function Base.copy(cv::SubsampledControlVariate)
         refresh_anchor_callback! = _copy_callable(cv.refresh_anchor_callback!))
 end
 
-function component_scales!(out, envelope::SeparableResidualEnvelope, state, flow, t)
+function component_scales!(out, envelope::AbstractResidualEnvelope, state, flow, t)
     envelope.component_scales!(out, state, flow, t)
     return _validate_component_scales(out, envelope.totals, "component")
 end
@@ -277,10 +361,10 @@ function _validate_component_scales(out, totals, kind)
     return out
 end
 
-component_scales!(out, envelope::SeparableResidualEnvelope, state, t) =
+component_scales!(out, envelope::AbstractResidualEnvelope, state, t) =
     component_scales!(out, envelope, state, nothing, t)
 
-function component_cell_scales!(out, envelope::SeparableResidualEnvelope,
+function component_cell_scales!(out, envelope::AbstractResidualEnvelope,
         state, flow, left, right)
     callback = envelope.component_cell_scales!
     if callback === nothing
@@ -299,13 +383,57 @@ function component_cell_scales!(out, envelope::SeparableResidualEnvelope,
     return _validate_component_scales(out, envelope.totals, "component cell")
 end
 
-function total_residual_bound(envelope::SeparableResidualEnvelope, state, flow, t)
+function total_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t)
     scales = component_scales!(envelope.scales, envelope, state, flow, t)
-    return dot(scales, envelope.totals)
+    cumulative = 0.0
+    @inbounds for component in eachindex(scales, envelope.totals)
+        cumulative += scales[component] * envelope.totals[component]
+        envelope.cumulative_masses[component] = cumulative
+    end
+    return cumulative
 end
 
-total_residual_bound(envelope::SeparableResidualEnvelope, state, t) =
+total_residual_bound(envelope::AbstractResidualEnvelope, state, t) =
     total_residual_bound(envelope, state, nothing, t)
+
+n_observations(envelope::SeparableResidualEnvelope) = size(envelope.weights, 2)
+n_observations(envelope::GroupedResidualEnvelope) = size(envelope.groups, 2)
+
+function observation_residual_bound(envelope::SeparableResidualEnvelope,
+        observation::Integer)
+    result = 0.0
+    @inbounds for component in axes(envelope.weights, 1)
+        result += envelope.scales[component] *
+            envelope.weights[component, observation]
+    end
+    return result
+end
+
+function observation_residual_bound(envelope::GroupedResidualEnvelope,
+        observation::Integer)
+    result = 0.0
+    @inbounds for partition in axes(envelope.groups, 1)
+        result += envelope.scales[envelope.groups[partition, observation]]
+    end
+    return result
+end
+
+"""Install a sampled residual in `gradient` and return its complete event rate."""
+function subsampling_candidate_rate!(oracle, state, gradient, residual,
+        scale, flow, deterministic_rate, subset)
+    axpy!(scale, residual, gradient)
+    return λ(state, gradient, flow)
+end
+
+"""Internal observation hook for proposal-weighted subsampling diagnostics."""
+record_subsampling_proposal!(oracle, args...) = nothing
+
+"""Internal hook for cheaply tightening a sampled subset's event-rate bound."""
+subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
+    _signed_subset_bound(state, gradient, flow, D, M)
+
+"""Internal pre-gradient hook for tightening a sampled residual bound."""
+subsampling_residual_subset_bound(oracle, state, flow, D, M, subset, scale) = M
 
 deterministic_gradient!(out, cv::SubsampledControlVariate, x) = cv.deterministic_gradient!(out, x)
 
@@ -326,7 +454,16 @@ function (ws::WithResidualStats)(args...)
     _inc_counter_residual_oracle_calls(ws.stats)
     return ws.f(args...)
 end
-
+subsampling_candidate_rate!(oracle::WithResidualStats, args...) =
+    subsampling_candidate_rate!(oracle.f, args...)
+record_subsampling_proposal!(oracle::WithResidualStats, args...) =
+    record_subsampling_proposal!(oracle.f, args...)
+subsampling_subset_bound(oracle::WithResidualStats, state, gradient, flow,
+        D, M, subset, scale) = subsampling_subset_bound(
+    oracle.f, state, gradient, flow, D, M, subset, scale)
+subsampling_residual_subset_bound(oracle::WithResidualStats, state, flow,
+        D, M, subset, scale) = subsampling_residual_subset_bound(
+    oracle.f, state, flow, D, M, subset, scale)
 function with_stats(cv::SubsampledControlVariate, stats::AbstractStatisticCounter)
     return _reconstruct_subsampling(cv;
         deterministic_gradient! = WithStats(

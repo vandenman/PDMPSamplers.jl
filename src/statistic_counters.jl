@@ -378,6 +378,14 @@ end
     main_events::Int
     warmup_elapsed_time::Float64
     main_elapsed_time::Float64
+    warmup_phase_elapsed_time::Float64
+    main_phase_elapsed_time::Float64
+    initialization_elapsed_time::Float64
+    transition_elapsed_time::Float64
+    warmup_adapter_finish_elapsed_time::Float64
+    main_sampler_initialization_elapsed_time::Float64
+    algorithm_warmup_finish_elapsed_time::Float64
+    finalization_elapsed_time::Float64
     elapsed_time::Float64
     stop_reason::Symbol
 end
@@ -391,6 +399,14 @@ end
     )
 
     set(
+        initialization_elapsed_time,
+        warmup_phase_elapsed_time,
+        main_phase_elapsed_time,
+        transition_elapsed_time,
+        warmup_adapter_finish_elapsed_time,
+        main_sampler_initialization_elapsed_time,
+        algorithm_warmup_finish_elapsed_time,
+        finalization_elapsed_time,
         elapsed_time,
         stop_reason,
     )
@@ -824,6 +840,14 @@ end
     main_grid_points_evaluated::Int
     warmup_grid_endpoint_derivative_points_loaded::Int
     main_grid_endpoint_derivative_points_loaded::Int
+    warmup_subsampling_cell_roof_proposals::Int
+    main_subsampling_cell_roof_proposals::Int
+    warmup_subsampling_aggregate_accepts::Int
+    main_subsampling_aggregate_accepts::Int
+    warmup_subsampling_subset_evaluations::Int
+    main_subsampling_subset_evaluations::Int
+    warmup_subsampling_final_reflections::Int
+    main_subsampling_final_reflections::Int
     warmup_elapsed_time::Float64
     main_elapsed_time::Float64
     elapsed_time::Float64
@@ -864,6 +888,14 @@ end
         main_grid_points_evaluated,
         warmup_grid_endpoint_derivative_points_loaded,
         main_grid_endpoint_derivative_points_loaded,
+        warmup_subsampling_cell_roof_proposals,
+        main_subsampling_cell_roof_proposals,
+        warmup_subsampling_aggregate_accepts,
+        main_subsampling_aggregate_accepts,
+        warmup_subsampling_subset_evaluations,
+        main_subsampling_subset_evaluations,
+        warmup_subsampling_final_reflections,
+        main_subsampling_final_reflections,
     )
 end
 

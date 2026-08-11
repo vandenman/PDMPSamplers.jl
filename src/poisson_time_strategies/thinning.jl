@@ -150,7 +150,7 @@ function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:GlobalGradientSt
 end
 
 function _subsampling_thinning_residual_coefficients(
-        envelope::SeparableResidualEnvelope, state::AbstractPDMPState,
+        envelope::AbstractResidualEnvelope, state::AbstractPDMPState,
         flow::ContinuousDynamics)
     return _subsampling_thinning_residual_coefficients(
         envelope, state, flow, flow)
