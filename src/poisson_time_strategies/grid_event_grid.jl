@@ -430,8 +430,15 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 return τ_refresh, :refresh, default_return
             end
 
+            # Keep the candidate's sticky stratum synchronized.  A full
+            # `copyto!(state2_, state)` would also copy the O(d²) boundary
+            # velocity cache on every proposal; this scratch state does not
+            # need that cache, so invalidate it after copying the state fields
+            # that determine transport and rates.
             state2_.t[] = state.t[]
             copyto!(state2_.ξ, state.ξ)
+            copyto!(state2_.free, state.free)
+            state2_.boundary_scratch.active_factor_valid = false
             move_forward_time!(state2_, τ_proposal, flow)
             _inc_counter_grid_acceptance_gradient_calls(stats)
             ∇ϕx = _compute_grid_gradient_or_throw!(

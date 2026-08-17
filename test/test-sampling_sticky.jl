@@ -1,5 +1,19 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+@testset "BPS sticky transport preserves frozen coordinates" begin
+    flow = BouncyParticle(4, 0.0)
+    state = StickyPDMPState(0.0,
+        SkeletonPoint([0.3, 0.0, -0.2, 0.0],
+                       [1.0, 7.0, -2.0, -11.0]),
+        BitVector([true, false, true, false]))
+
+    PDMPSamplers.move_forward_time!(state, 0.75, flow)
+
+    @test state.t[] == 0.75
+    @test state.ξ.x ≈ [1.05, 0.0, -1.7, 0.0]
+    @test state.ξ.θ == [1.0, 7.0, -2.0, -11.0]
+end
+
 @testset "Sticky PDMP Sampler Tests" begin
 
     pdmp_types = (ZigZag, BouncyParticle, Boomerang, MutableBoomerang,

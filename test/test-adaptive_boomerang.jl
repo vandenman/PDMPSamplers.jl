@@ -216,7 +216,7 @@
 
         @test length(trace) > 100
         @test all(isfinite, mean(trace))
-        @test all(isfinite, flow.μ)
+        @test all(iszero, flow.μ)
         @test all(x -> x > 0, diag(flow.Γ))
     end
 

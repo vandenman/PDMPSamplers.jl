@@ -208,6 +208,9 @@ _copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metr
 _copy_algorithm(alg::PoissonTimeStrategy) = deepcopy(alg)
 _copy_adapter(adapter::AbstractAdapter) = deepcopy(adapter)
 
+_adaptation_can_stick(::PoissonTimeStrategy) = nothing
+_adaptation_can_stick(alg::Union{Sticky,AggregateSticky}) = alg.can_stick
+
 initialize_flow_state!(::AbstractPDMPState, ::ContinuousDynamics) = nothing
 
 function Base.copy(model::PDMPModel)
@@ -399,6 +402,7 @@ function _run_phase!(
         update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, adaptation_grad, trace_manager; phase, stats)
+        _handle_gradient_adaptation!(adapter, alg_)
         _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats)
 
         if phase === :main
@@ -412,6 +416,15 @@ function _run_phase!(
         check_health!(health, stats)
         _update_progress!(progress, prg, tstop, T, progress_stops, state)
     end
+end
+
+function _handle_gradient_adaptation!(
+    adapter::AbstractAdapter,
+    alg_::PoissonTimeStrategy,
+)
+    did_gradient_adapt(adapter) || return nothing
+    _invalidate_cached_gradient!(alg_)
+    return nothing
 end
 
 function _handle_dynamics_adaptation!(
@@ -618,7 +631,8 @@ function _pdmp_sample_single(
     trace_manager = TraceManager(state, flow, alg, t_warmup_abs)
     health = HealthMonitor()
     adapter = adapter isa NoAdaptation ? default_warmup_adapter(
-        flow, main_model.grad, t_warmup, t₀) : adapter
+        flow, main_model.grad, t_warmup, t₀;
+        can_stick=_adaptation_can_stick(alg)) : adapter
 
     warmup_criterion = _phase_criterion(warmup_stop, t_warmup_abs)
     stop_criterion = _phase_criterion(stop, T)

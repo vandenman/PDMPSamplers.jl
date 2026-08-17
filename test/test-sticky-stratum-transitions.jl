@@ -1,5 +1,11 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+function _recorded_free_masks(trace)
+    hasproperty(trace, :free_masks) && return Matrix(trace.free_masks)
+    dense = PDMPTrace(trace)
+    return .!(iszero.(dense.positions) .& iszero.(dense.velocities))
+end
+
 function _dense_stratum_factor(state, flow)
     scratch = PDMPSamplers._dense_zigzag_stratum!(state, flow)
     k = scratch.active_count
@@ -174,9 +180,11 @@ end
             @test last_event_time(trace) == horizon
             @test stats.stop_reason == :reached_time
             @test stats.sticky_unfreezes == 0
-            @test all(.!trace.free_masks)
-            @test all(iszero, trace.positions)
-            @test all(iszero, trace.velocities)
+            masks = _recorded_free_masks(trace)
+            dense = trace isa PDMPTrace ? trace : PDMPTrace(trace)
+            @test all(.!masks)
+            @test all(iszero, dense.positions)
+            @test all(iszero, dense.velocities)
         end
     end
 
@@ -425,11 +433,12 @@ end
             @test stats.sticky_unfreezes >= 2
             @test length(trace) >= 10
             @test all(isfinite, last(trace).velocity)
-            ntrace = size(trace.free_masks, 2)
-            @test count(view(trace.free_masks, :, 1:(ntrace - 1)) .&
-                        .!view(trace.free_masks, :, 2:ntrace)) >= 2
-            @test count(.!view(trace.free_masks, :, 1:(ntrace - 1)) .&
-                        view(trace.free_masks, :, 2:ntrace)) >= 2
+            masks = _recorded_free_masks(trace)
+            ntrace = size(masks, 2)
+            @test count(view(masks, :, 1:(ntrace - 1)) .&
+                        .!view(masks, :, 2:ntrace)) >= 2
+            @test count(.!view(masks, :, 1:(ntrace - 1)) .&
+                        view(masks, :, 2:ntrace)) >= 2
         end
     end
 
@@ -459,11 +468,12 @@ end
             @test stats.sticky_unfreezes >= 1
             @test length(trace) >= 5
             @test all(isfinite, last(trace).velocity)
-            ntrace = size(trace.free_masks, 2)
-            @test count(view(trace.free_masks, :, 1:(ntrace - 1)) .&
-                        .!view(trace.free_masks, :, 2:ntrace)) >= 1
-            @test count(.!view(trace.free_masks, :, 1:(ntrace - 1)) .&
-                        view(trace.free_masks, :, 2:ntrace)) >= 1
+            masks = _recorded_free_masks(trace)
+            ntrace = size(masks, 2)
+            @test count(view(masks, :, 1:(ntrace - 1)) .&
+                        .!view(masks, :, 2:ntrace)) >= 1
+            @test count(.!view(masks, :, 1:(ntrace - 1)) .&
+                        view(masks, :, 2:ntrace)) >= 1
         end
     end
 

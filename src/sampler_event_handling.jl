@@ -92,6 +92,7 @@ function _handle_global_event_impl!(
             if flow isa ZigZag
                 i = meta.i
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
+                saving_args = i
             else
                 ∇ϕx = _compute_exact_reflection_gradient!(state, gradient_strategy, flow, cache, alg, τ, wrap_boundary)
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
@@ -140,7 +141,7 @@ function _handle_global_event_impl!(
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = transition_accepted
         transition_accepted || _set_counter_last_rejected(stats, true)
-        if isfactorized(flow) && !_is_sticky_loop_state(alg)
+        if isfactorized(flow)
             saving_args = i
         end
 
@@ -152,7 +153,10 @@ function _handle_global_event_impl!(
     end
 
     _check_sticky_times!(alg, state)
-    _is_sticky_loop_state(alg) && (saving_args = nothing)
+    # Dense sticky traces need a complete state snapshot.  A factorized flow
+    # instead needs the changed coordinate so its sparse trace can replay the
+    # event exactly (including stick/un-stick transitions).
+    (_is_sticky_loop_state(alg) && !isfactorized(flow)) && (saving_args = nothing)
     return needs_saving, saving_args
 end
 

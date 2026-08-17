@@ -36,7 +36,13 @@ function move_forward_time!(state::PDMPState, τ::Real, flow::BouncyParticle)
 end
 function move_forward_time!(state::StickyPDMPState, τ::Real, flow::BouncyParticle)
     state.t[] += τ
-    move_forward_time!(state.ξ, τ, flow)
+    # Frozen sticky coordinates are boundary states, not points moving with
+    # their retained velocity. Advancing the complete SkeletonPoint here
+    # transports a frozen coordinate away from x = θ = 0 and makes the next
+    # state validation fail. Boomerang's sticky flow uses the same rule.
+    @inbounds for i in eachindex(state.free, state.ξ.x, state.ξ.θ)
+        state.free[i] && (state.ξ.x[i] += τ * state.ξ.θ[i])
+    end
     # LinearAlgebra.axpy!(τ, state.ξ.θ, state.ξ.x)
     state
 end

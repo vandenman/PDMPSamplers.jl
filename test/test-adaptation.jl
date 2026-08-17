@@ -131,6 +131,34 @@
         @test all(diag(flow.Γ) .> 0)
     end
 
+    @testset "sticky diagonal adaptation uses a globally zero-centred reference" begin
+        d = 3
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        flow.μ .= [8.0, 8.0, 8.0]
+        flow.Γ[3, 3] = 4.0
+        flow.L[3, 3] = 2.0
+        flow.ΣL[3, 3] = 0.5
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        ws.total_time = 20.0
+        ws.sum_x_dt .= [40.0, 40.0, 20.0]
+        ws.sum_x2_dt .= [100.0, 100.0, 40.0]
+        ws.free_time .= [20.0, 20.0, 5.0]
+        PDMPSamplers._ensure_free_moments!(ws)
+        ws.free_sum_x_dt .= [40.0, 40.0, 5.0]
+        ws.free_sum_x2_dt .= [100.0, 100.0, 10.0]
+        can_stick = BitVector([true, false, true])
+
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
+            PDMPSamplers.BoomerangAdaptationOptions(), can_stick)
+
+        @test flow.μ[1] == 0.0
+        @test flow.Γ[1, 1] ≈ 0.2 # inverse E[x^2 | free] = 1 / 5
+        @test flow.μ[2] == 0.0
+        @test flow.Γ[2, 2] ≈ 0.2 # inverse total E[x^2] = 1 / 5
+        @test flow.μ[3] == 0.0
+        @test flow.Γ[3, 3] == 4.0 # too little free time: retain scale
+    end
+
     @testset "update_boomerang! fullrank with WelfordBoomerangStats" begin
         d = 4
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
@@ -283,6 +311,14 @@
         ad_diag = PDMPSamplers.default_dynamics_adapter(flow_diag, 5.0, 0.0)
         @test ad_diag isa PDMPSamplers.BoomerangAdapter
         @test ad_diag.scheme == :diagonal
+        @test !any(ad_diag.can_stick)
+
+        sticky_mask = BitVector([true, false, true])
+        ad_sticky = PDMPSamplers.default_dynamics_adapter(
+            flow_diag, 5.0, 0.0; can_stick=sticky_mask)
+        @test ad_sticky.can_stick == sticky_mask
+        @test_throws DimensionMismatch PDMPSamplers.BoomerangAdapter(
+            5.0, 0.0, 3; can_stick=trues(2))
 
         flow_full = AdaptiveBoomerang(4; scheme=:fullrank)
         ad_full = PDMPSamplers.default_dynamics_adapter(flow_full, 5.0, 0.0)
@@ -434,7 +470,7 @@
         selected = Ref(0)
         updated = Ref(0)
         ad = PDMPSamplers.SubsamplingAnchorBankAdapter(
-            (cv, x, phase) -> (selected[] += phase === :main),
+            (cv, state, flow, phase) -> (selected[] += phase === :main),
             (cv, trace) -> (updated[] += 1),
             1.0, 0.0)
 
@@ -442,10 +478,24 @@
         @test selected[] == 1
         @test updated[] == 0
         @test ad.last_update == 0.0
+        @test !PDMPSamplers.did_gradient_adapt(ad)
+
+        changed = PDMPSamplers.SubsamplingAnchorBankAdapter(
+            (cv, state, flow, phase) -> true,
+            (cv, trace) -> nothing,
+            1.0, 0.0)
+        PDMPSamplers.adapt!(changed, state, nothing, grad, trace_mgr;
+            phase=:main)
+        @test PDMPSamplers.did_gradient_adapt(changed)
+        grid = PDMPSamplers._build_grid_adaptive_state(
+            GridThinningStrategy(; N=5, t_max=1.0), state, 5, 5, Inf)
+        grid.has_cached_gradient[] = true
+        PDMPSamplers._handle_gradient_adaptation!(changed, grid)
+        @test !grid.has_cached_gradient[]
 
         finished = Ref(0)
         staged = PDMPSamplers.SubsamplingAnchorBankAdapter(
-            (cv, x, phase) -> nothing,
+            (cv, state, flow, phase) -> nothing,
             (cv, trace) -> nothing,
             (cv, args...) -> (finished[] += 1; true),
             1.0, 0.0)

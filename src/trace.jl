@@ -2,7 +2,12 @@
 # _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
 # is this type stable? isfactorized depends only on the type of flow though
 _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = isfactorized(flow) ? FactorizedTrace : PDMPTrace
-_trace_type(::ContinuousDynamics, ::Union{Sticky,AggregateSticky}) = PDMPTrace
+_trace_type(flow::ContinuousDynamics, ::Union{Sticky,AggregateSticky}) =
+    isfactorized(flow) ? FactorizedTrace : PDMPTrace
+# Sticky ZigZag events still alter only one coordinate at a time.  Preserve
+# that coordinate in the event handler and use the sparse factorized trace;
+# forcing this case through PDMPTrace stores two dense d-vectors (and a mask)
+# per event and then copies both matrices again in `compact`.
 # _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
 # _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
 

@@ -6,6 +6,24 @@ import StatsBase
 
 @testset "BetaBernoulli Distribution Tests" begin
 
+    @testset "Sticky rate counts only model indicators" begin
+        mpdfs = fill(0.5, 5)
+        can_stick = Bool[false, true, true, false, true]
+        free = Bool[true, true, false, true, true]
+        κ = BetaBernoulliKappa(1.0, 4.0, mpdfs, can_stick)
+        # Two of the three model indicators are active.  The two always-active
+        # coordinates must not enter either the numerator or denominator.
+        @test κ(3, zeros(5), free) == (1 + 2) / (4 + 3 - 2 - 1) * 0.5
+        @test_throws ArgumentError κ(1, zeros(5), free)
+        @test_throws DimensionMismatch BetaBernoulliKappa(
+            1.0, 4.0, mpdfs, trues(4))
+
+        # The historical constructor retains its all-stickable semantics.
+        all_κ = BetaBernoulliKappa(1.0, 4.0, fill(0.5, 3))
+        @test all_κ(2, zeros(3), Bool[true, false, true]) ==
+            (1 + 2) / (4 + 3 - 2 - 1) * 0.5
+    end
+
     @testset "Constructor Tests" begin
 
         # (args..., expected_type)

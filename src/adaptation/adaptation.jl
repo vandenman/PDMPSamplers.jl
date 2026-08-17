@@ -11,6 +11,12 @@ finish_warmup!(::AbstractAdapter, args...) = false
         min_λref=0.01, max_λref=10.0)
 
 Explicit configuration for `AdaptiveBoomerang` warmup adaptation.
+
+When `sticky_aware` is true and the sampler supplies a nonempty stickability
+mask, diagonal adaptation uses a globally zero-centred reference. Its scales
+are raw second moments; stickable coordinates use free-stratum moments and
+retain their previous scale until `sticky_min_free_time` has accumulated.
+Full-rank and low-rank adaptation currently retain their original law.
 """
 struct BoomerangAdaptationOptions
     sticky_aware::Bool
@@ -107,15 +113,20 @@ mutable struct SubsamplingAnchorBankAdapter{F1,F2,F3} <: AbstractAdapter
     finish_warmup_fn!::F3
     update_dt::Float64
     last_update::Float64
+    did_update::Bool
 end
 
 SubsamplingAnchorBankAdapter(select_fn!, update_fn!, update_dt, last_update) =
     SubsamplingAnchorBankAdapter(select_fn!, update_fn!, (_args...) -> false,
-        update_dt, last_update)
+        update_dt, last_update, false)
+SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
+        update_dt, last_update) =
+    SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
+        update_dt, last_update, false)
 
 function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, flow,
         grad::SubsampledControlVariate, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    ad.select_fn!(grad, state.ξ.x, phase)
+    ad.did_update = ad.select_fn!(grad, state, flow, phase) === true
     if phase === :warmup && state.t[] - ad.last_update >= ad.update_dt
         trace = get_warmup_trace(trace_mgr)
         if _has_integrable_segment(trace)
@@ -125,6 +136,8 @@ function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, f
     end
     return nothing
 end
+
+did_gradient_adapt(ad::SubsamplingAnchorBankAdapter) = ad.did_update
 
 function finish_warmup!(ad::SubsamplingAnchorBankAdapter, state, flow,
         grad::SubsampledControlVariate, trace_mgr, stats)
@@ -136,10 +149,11 @@ end
 
 # --- Dynamics Factory ---
 # Fallback: Swallow extra args (precond_dt, t0)
-default_dynamics_adapter(::ContinuousDynamics, args...) = NoAdaptation()
+default_dynamics_adapter(::ContinuousDynamics, args...; kwargs...) = NoAdaptation()
 
 # Specific:
-function default_dynamics_adapter(::PreconditionedDynamics, precond_dt, t0, t_warmup=0.0)
+function default_dynamics_adapter(::PreconditionedDynamics, precond_dt, t0,
+        t_warmup=0.0; kwargs...)
     return PreconditionerAdapter(precond_dt, t0, 0, :default, false)
 end
 
@@ -150,9 +164,12 @@ default_gradient_adapter(::Any, args...) = NoAdaptation()
 
 # --- 4. The Top-Level Interface ---
 
-function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy, precond_dt=10.0, t_warmup=100.0, t0=0.0)
+function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy,
+        precond_dt=10.0, t_warmup=100.0, t0=0.0;
+        can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
     # Explicitly pass positional args to the sub-factories
-    adpt_flow = default_dynamics_adapter(flow, precond_dt, t0, t_warmup)
+    adpt_flow = default_dynamics_adapter(
+        flow, precond_dt, t0, t_warmup; can_stick)
     adpt_grad = default_gradient_adapter(grad, t_warmup, t0)
 
     # Clean return logic
@@ -166,12 +183,13 @@ end
 """Construct the default adapter on a shared warmup adaptation schedule."""
 function default_warmup_adapter(flow::ContinuousDynamics,
         grad::GradientStrategy, t_warmup::Real, t0::Real=0.0;
-        warmup_adaptation_interval::Union{Nothing,Real}=nothing)
+        warmup_adaptation_interval::Union{Nothing,Real}=nothing,
+        can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
     interval = isnothing(warmup_adaptation_interval) ?
         float(t_warmup) / 10 : float(warmup_adaptation_interval)
     isfinite(interval) && interval >= 0 || throw(ArgumentError(
         "warmup_adaptation_interval must be finite and nonnegative"))
-    return default_adapter(flow, grad, interval, t_warmup, t0)
+    return default_adapter(flow, grad, interval, t_warmup, t0; can_stick)
 end
 
 # --- 5. Boomerang Adaptation ---
@@ -541,14 +559,20 @@ mutable struct BoomerangAdapter{S, W, O} <: AbstractAdapter
     did_update::Bool
     const workspace::W
     const options::O
+    const can_stick::BitVector
 end
 
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal,
-    options::BoomerangAdaptationOptions=BoomerangAdaptationOptions())
+    options::BoomerangAdaptationOptions=BoomerangAdaptationOptions(),
+    can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
+    stickable = isnothing(can_stick) ? falses(d) : BitVector(can_stick)
+    length(stickable) == d || throw(DimensionMismatch(
+        "can_stick length $(length(stickable)) does not match dimension $d"))
     stats = WelfordBoomerangStats(d; fullrank=(scheme == :fullrank || scheme == :lowrank))
     needs_ws = scheme == :fullrank || scheme == :lowrank
     ws = needs_ws ? FullrankWorkspace(d) : nothing
-    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false, ws, options)
+    BoomerangAdapter(base_dt, t0, 0, scheme, stats, false, ws, options,
+        stickable)
 end
 
 function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerangStats}, state, flow::MutableBoomerang, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
@@ -560,7 +584,8 @@ function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerang
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
-        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace, ad.options)
+        update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace,
+            ad.options, ad.can_stick)
         _invalidate_boundary_velocity_cache!(state)
         refresh_velocity!(rng, state, flow)
         _boomerang_stats_reset_start!(ad.stats, state)
@@ -588,6 +613,8 @@ did_dynamics_adapt(::AbstractAdapter) = false
 did_dynamics_adapt(ad::PreconditionerAdapter) = ad.did_update
 did_dynamics_adapt(ad::BoomerangAdapter) = ad.did_update
 did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
+did_gradient_adapt(::AbstractAdapter) = false
+did_gradient_adapt(seq::SequenceAdapter) = any(did_gradient_adapt, seq.adapters)
 
 
 # --- 6. update_boomerang! implementations ---
@@ -610,17 +637,46 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
 end
 
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
-    ::Val{:diagonal}, ::Nothing, options::BoomerangAdaptationOptions)
+    ::Val{:diagonal}, ::Nothing, options::BoomerangAdaptationOptions,
+    can_stick::AbstractVector{Bool}=falses(length(flow.μ)))
     _has_data(stats) || return flow
     d = length(flow.μ)
+    length(can_stick) == d || throw(DimensionMismatch(
+        "can_stick length $(length(can_stick)) does not match dimension $d"))
     T = stats.total_time
+    # A nonzero reference centre in any coordinate changes every global
+    # Boomerang orbit and hence the reflection-mediated route by which sticky
+    # coordinates reach their boundary.  On a sticky target, use a coherent
+    # zero-centred reference for the whole diagonal flow and adapt only its
+    # second moments.  This retains scale adaptation without fitting the
+    # currently occupied model's location.
+    zero_center_sticky_target = options.sticky_aware && any(can_stick)
     @inbounds for i in 1:d
         μ_total = stats.sum_x_dt[i] / T
         σ2_total = max(stats.sum_x2_dt[i] / T - μ_total * μ_total, BOOM_DIAG_FLOOR^2)
         Ti_free = stats.free_time[i]
         μi = μ_total
         σ2 = σ2_total
-        if options.sticky_aware && Ti_free >= options.sticky_min_free_time
+        if zero_center_sticky_target
+            μi = 0.0
+            if !can_stick[i]
+                # Non-stickable coordinates are always in the continuous
+                # stratum.  For a zero-centred reference, their KL-optimal
+                # diagonal scale is E[x²], rather than Var(x).
+                σ2 = max(stats.sum_x2_dt[i] / T, BOOM_DIAG_FLOOR^2)
+            elseif Ti_free >= options.sticky_min_free_time && ispositive(Ti_free)
+                use_total_free_moments = isempty(stats.free_sum_x2_dt) || Ti_free == T
+                sx2_free = use_total_free_moments ?
+                    stats.sum_x2_dt[i] : stats.free_sum_x2_dt[i]
+                # The KL-optimal zero-centered Gaussian scale is the raw
+                # second moment, not variance around the active-model mean.
+                σ2 = max(sx2_free / Ti_free, BOOM_DIAG_FLOOR^2)
+            else
+                # Insufficient time in the free stratum: preserve the current
+                # scale rather than allowing spike time to collapse it.
+                σ2 = 1.0 / flow.Γ[i, i]
+            end
+        elseif options.sticky_aware && Ti_free >= options.sticky_min_free_time
             use_total_free_moments = isempty(stats.free_sum_x_dt) || Ti_free == T
             sx_free = use_total_free_moments ? stats.sum_x_dt[i] : stats.free_sum_x_dt[i]
             sx2_free = use_total_free_moments ? stats.sum_x2_dt[i] : stats.free_sum_x2_dt[i]
@@ -665,7 +721,8 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
 end
 
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
-    ::Val{:fullrank}, ws::FullrankWorkspace, ::BoomerangAdaptationOptions)
+    ::Val{:fullrank}, ws::FullrankWorkspace, ::BoomerangAdaptationOptions,
+    can_stick::AbstractVector{Bool}=falses(length(flow.μ)))
     _has_data(stats) || return flow
     d = length(flow.μ)
     vec_d = ws.vec_d
@@ -776,7 +833,8 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
 end
 
 function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
-    ::Val{:lowrank}, ws::FullrankWorkspace, ::BoomerangAdaptationOptions)
+    ::Val{:lowrank}, ws::FullrankWorkspace, ::BoomerangAdaptationOptions,
+    can_stick::AbstractVector{Bool}=falses(length(flow.μ)))
     _has_data(stats) || return flow
 
     lrp = flow.Γ::LowRankPrecision
@@ -953,7 +1011,8 @@ adapt!(::Random.AbstractRNG, ::RefreshRateAdapter, state, flow, grad, trace_mgr;
 did_dynamics_adapt(::RefreshRateAdapter) = false
 
 function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warmup=0.0;
-    options::BoomerangAdaptationOptions=BoomerangAdaptationOptions())
+    options::BoomerangAdaptationOptions=BoomerangAdaptationOptions(),
+    can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
     d = length(flow.μ)
     if flow.Γ isa Diagonal
         scheme = :diagonal
@@ -962,7 +1021,8 @@ function default_dynamics_adapter(flow::MutableBoomerang, precond_dt, t0, t_warm
     else
         scheme = :fullrank
     end
-    boom_adapter = BoomerangAdapter(Float64(precond_dt), Float64(t0), d; scheme, options)
+    boom_adapter = BoomerangAdapter(
+        Float64(precond_dt), Float64(t0), d; scheme, options, can_stick)
     if t_warmup > 0 && options.adapt_refresh
         λref_start = Float64(t0 + t_warmup * 0.5)
         λref_adapter = RefreshRateAdapter(Float64(precond_dt * 2), λref_start;

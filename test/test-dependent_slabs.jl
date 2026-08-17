@@ -2213,6 +2213,25 @@ end
 
         one_beta_provider = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
         one_beta_clock = SummedRateClock(one_beta_provider, BernoulliModelPrior([0.5]))
+
+        @testset "dependent sticky strategy survives exact warmup transition" begin
+            make_strategy() = AggregateSticky(
+                GridThinningStrategy(),
+                SummedRateClock(one_beta_provider,
+                    BernoulliModelPrior([0.5])),
+                BitVector([true, false]))
+            warmup_model = PDMPModel(d,
+                FullGradient((out, x) -> (fill!(out, 0.0); out)), nothing)
+            chains = pdmp_sample(
+                SkeletonPoint([0.25, 0.0], [1.0, 1.0]),
+                ZigZag(d), [warmup_model], make_strategy(),
+                0.0, 0.8, 0.2;
+                warmup_models=[warmup_model],
+                warmup_algorithm=make_strategy(),
+                progress=false, seed=9021)
+            @test length(chains.traces) == 1
+            @test chains.stats[1].warmup_phase_elapsed_time >= 0.0
+        end
         @test stickable_coordinates(one_beta_clock) == [1]
         accepted_subset = AggregateSticky(GridThinningStrategy(), one_beta_clock,
             BitVector([true, false]))
@@ -2221,7 +2240,10 @@ end
         @test accepted_subset_internal.stickable_indices == [1]
         nuisance_trace, _ = pdmp_sample(ξ, ZigZag(2), model, accepted_subset,
             0.0, 0.2; seed=122, progress=false)
-        @test all(view(nuisance_trace.free_masks, 2, :))
+        nuisance_dense = PDMPTrace(nuisance_trace)
+        nuisance_free = .!(iszero.(nuisance_dense.positions) .&
+            iszero.(nuisance_dense.velocities))
+        @test all(view(nuisance_free, 2, :))
         invalid_mask = AggregateSticky(GridThinningStrategy(), one_beta_clock,
             BitVector([true, true]))
         invalid_error = try

@@ -969,6 +969,7 @@ end
 
             @test stats.sticky_events >= 4
             @test residual_calls_while_frozen[] > 0
+            @test (trace isa PDMPSamplers.FactorizedTrace) == isfactorized(flow)
             if hasproperty(trace, :free_masks)
                 frozen = findall(.!trace.free_masks[1, :])
                 @test !isempty(frozen)

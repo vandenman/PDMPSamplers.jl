@@ -122,6 +122,7 @@ end
 
         trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
 
+        @test trace isa PDMPSamplers.FactorizedTrace
         @test length(trace) > 100
 
         # non-zero coefficients should have higher inclusion probability than zero ones
