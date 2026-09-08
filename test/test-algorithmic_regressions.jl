@@ -2,6 +2,24 @@
 
 @testset "Algorithmic regressions" begin
 
+    @testset "Boomerang boundary root at zero advances to the next crossing" begin
+        flow = Boomerang(Diagonal([2.0]), [0.5], 0.0)
+        # x(t) = 0.5 - 0.5 cos(t) + v sin(t).  At x=0 the root at
+        # t=0 is the current boundary, so the next root must be strictly
+        # inside the period whenever v != 0.
+        for velocity in (0.2, 0.5, 1.0, -0.5)
+            ξ = SkeletonPoint([0.0], [velocity])
+            τ = PDMPSamplers.sticking_time(ξ, flow, 1)
+            @test 0.0 < τ < 2π
+            xτ = flow.μ[1] + (ξ.x[1] - flow.μ[1]) * cos(τ) +
+                ξ.θ[1] * sin(τ)
+            @test xτ ≈ 0.0 atol = 1e-12
+        end
+        # A zero boundary velocity is a tangent root and returns one period.
+        @test PDMPSamplers.sticking_time(
+            SkeletonPoint([0.0], [0.0]), flow, 1) == 2π
+    end
+
     @testset "Sticky Boomerang reflection ignores frozen gradients" begin
         d = 4
         flow = Boomerang(Diagonal([2.0, 3.0, 4.0, 5.0]), zeros(d))
@@ -24,6 +42,25 @@
     end
 
     @testset "Boomerang covariance entry kernels preserve representations" begin
+        diagonal_flow = Boomerang(Diagonal([0.25, 1.0, 4.0]), zeros(3), 0.0)
+        @test PDMPSamplers._boomerang_covariance_entry(
+            diagonal_flow, 1, 1) ≈ 4.0
+        @test PDMPSamplers._boomerang_covariance_entry(
+            diagonal_flow, 2, 2) ≈ 1.0
+        @test PDMPSamplers._boomerang_covariance_entry(
+            diagonal_flow, 1, 2) == 0.0
+        PDMPSamplers._boomerang_covariance_entry(diagonal_flow, 2, 2)
+        @test @allocated(PDMPSamplers._boomerang_covariance_entry(
+            diagonal_flow, 2, 2)) == 0
+
+        mutable_diagonal_flow = MutableBoomerang(
+            Diagonal([0.25, 1.0, 4.0]), zeros(3), 0.0, 0.0,
+            diagonal_flow.L, diagonal_flow.ΣL, nothing)
+        @test PDMPSamplers._boomerang_covariance_entry(
+            mutable_diagonal_flow, 3, 3) ≈ 0.25
+        @test PDMPSamplers._boomerang_covariance_entry(
+            mutable_diagonal_flow, 1, 3) == 0.0
+
         dense_flow = AdaptiveBoomerang(3; scheme=:fullrank)
         dense_L = [1.2 0.0 0.0; -0.3 0.8 0.0; 0.5 -0.2 1.1]
         copyto!(dense_flow.ΣL.data, dense_L)
@@ -45,6 +82,16 @@
         end
         PDMPSamplers._boomerang_covariance_entry(lowrank_flow, 3, 2)
         @test @allocated(PDMPSamplers._boomerang_covariance_entry(lowrank_flow, 3, 2)) == 0
+
+        # Regression for the exact type intersection reported by Aqua:
+        # LowRankPrecision with a Diagonal stored factor must use the
+        # low-rank covariance representation, not the diagonal-factor method.
+        lowrank_diagonal_storage = MutableBoomerang(lrp, zeros(3), 0.0, 0.0,
+            Diagonal(ones(3)), Diagonal(ones(3)), nothing)
+        @test PDMPSamplers._boomerang_covariance_entry(
+            lowrank_diagonal_storage, 1, 2) ≈ lowrank_cov[1, 2]
+        @test @allocated(PDMPSamplers._boomerang_covariance_entry(
+            lowrank_diagonal_storage, 1, 2)) == 0
     end
 
     @testset "StickyLoopState priority queue stays synchronized" begin

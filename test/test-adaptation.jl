@@ -1,6 +1,40 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+mutable struct WarmupGradientRecordingAdapter <: PDMPSamplers.AbstractAdapter
+    expected::Any
+    adapt_matched::Bool
+    finish_matched::Bool
+end
+
+function PDMPSamplers.adapt!(::Random.AbstractRNG,
+        adapter::WarmupGradientRecordingAdapter, state, flow, grad, trace;
+        phase::Symbol=:warmup, kwargs...)
+    phase === :warmup && (adapter.adapt_matched |= grad === adapter.expected)
+    return nothing
+end
+
+function PDMPSamplers.finish_warmup!(adapter::WarmupGradientRecordingAdapter,
+        state, flow, grad, trace, stats)
+    adapter.finish_matched = grad === adapter.expected
+    return false
+end
+
 @testset "Adaptation" begin
+
+    @testset "switching-phase adaptation uses the warmup gradient" begin
+        retained = PDMPModel(1,
+            FullGradient((out, x) -> (out[1] = x[1] + 10; out)), nothing)
+        warmup = PDMPModel(1,
+            FullGradient((out, x) -> (out[1] = 1000.0; out)), nothing)
+        adapter = WarmupGradientRecordingAdapter(warmup.grad, false, false)
+        pdmp_sample(SkeletonPoint([1.0], [-1.0]), ZigZag(1), retained,
+            GridThinningStrategy(; N=4, t_max=0.1), 0.0, 0.1, 0.05;
+            warmup_model=warmup,
+            warmup_algorithm=GridThinningStrategy(; N=4, t_max=0.1),
+            adapter, seed=90817, progress=false)
+        @test adapter.finish_matched
+        @test adapter.adapt_matched
+    end
 
     @testset "WelfordBoomerangStats basic" begin
         d = 3
@@ -280,6 +314,33 @@
         ad = PDMPSamplers.default_dynamics_adapter(precond, 10.0, 0.0)
         @test ad isa PDMPSamplers.PreconditionerAdapter
         @test ad.dt == 10.0
+        @test ad.initial_dt == 10.0
+        @test ad.max_scale_expansion == 2.0
+    end
+
+    @testset "dense preconditioner adaptation preserves unmasked compatibility" begin
+        flow = DensePreconditionedZigZag(2)
+        state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, -1.0]))
+        manager = PDMPSamplers.TraceManager(
+            state, flow, GridThinningStrategy(), 2.0)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        state.t[] = 1.0
+        state.ξ.x .= [1.0, -1.0]
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        state.t[] = 2.0
+        adapter = PDMPSamplers.default_dynamics_adapter(
+            flow, 1.0, 0.0; can_stick=falses(2))
+        PDMPSamplers.adapt!(Random.default_rng(), adapter, state, flow,
+            nothing, manager; phase=:warmup)
+        @test adapter.did_update
+        @test all(isfinite, flow.metric.L)
+        @test_throws ArgumentError PDMPSamplers.adapt!(
+            Random.default_rng(),
+            PDMPSamplers.default_dynamics_adapter(
+                DensePreconditionedZigZag(2), 1.0, 0.0;
+                can_stick=BitVector([true, false])),
+            state, DensePreconditionedZigZag(2), nothing, manager;
+            phase=:warmup)
     end
 
     @testset "default warmup adapter supports explicit matched schedules" begin
@@ -290,6 +351,7 @@
         ad = PDMPSamplers.default_warmup_adapter(flow, grad, 5.0, 0.0)
         @test ad.adapters[1] isa PDMPSamplers.PreconditionerAdapter
         @test ad.adapters[1].dt == 0.5
+        @test ad.adapters[1].initial_dt == 0.5
 
         short = PDMPSamplers.default_warmup_adapter(flow, grad, 0.5, 0.0)
         @test short.adapters[1].dt == 0.05
@@ -300,10 +362,41 @@
         explicit = PDMPSamplers.default_warmup_adapter(
             flow, grad, 5.0, 0.0; warmup_adaptation_interval=1.25)
         @test explicit.adapters[1].dt == 1.25
+        @test explicit.adapters[1].initial_dt == 1.25
+
+        long = PDMPSamplers.default_warmup_adapter(flow, grad, 500.0, 0.0)
+        @test long.adapters[1].dt == 50.0
+        @test long.adapters[1].initial_dt == 10.0
+        explicit_long = PDMPSamplers.default_warmup_adapter(
+            flow, grad, 500.0, 0.0; warmup_adaptation_interval=50.0)
+        @test explicit_long.adapters[1].dt == 50.0
+        @test explicit_long.adapters[1].initial_dt == 50.0
         @test_throws ArgumentError PDMPSamplers.default_warmup_adapter(
             flow, grad, 5.0, 0.0; warmup_adaptation_interval=-0.1)
         @test_throws ArgumentError PDMPSamplers.default_warmup_adapter(
             flow, grad, 5.0, 0.0; warmup_adaptation_interval=Inf)
+    end
+
+    @testset "dynamics adaptation records velocity discontinuities" begin
+        flow = PreconditionedBPS(1)
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        manager = PDMPSamplers.TraceManager(
+            state, flow, GridThinningStrategy(), 3.0)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        state.t[] = 1.0
+        state.ξ.x[1] = 1.0
+        state.ξ.θ[1] = -1.0
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        state.ξ.θ[1] = 2.0
+        PDMPSamplers.record_dynamics_adaptation!(
+            manager, state, flow, :warmup)
+        state.t[] = 2.0
+        state.ξ.x[1] = 3.0
+        state.ξ.θ[1] = -2.0
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        trace = PDMPSamplers.get_warmup_trace(manager)
+        @test trace.times == [0.0, 1.0, 1.0, 2.0]
+        @test Statistics.mean(trace)[1] ≈ 1.25
     end
 
     @testset "default_dynamics_adapter for MutableBoomerang" begin

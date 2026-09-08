@@ -5,18 +5,9 @@ _grid_fd_provider(alg::GridAdaptiveState, stats) = FiniteDiffVHV(alg.grad_provid
 function _grid_event_provider(model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState, stats)
     backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
     backend === :finite_difference && return _grid_fd_provider(alg, stats)
-    joint_func = model.joint
-    if joint_func !== nothing && _joint_compatible(flow)
-        return joint_func
-    end
-    vhv_func = model.vhv
-    if vhv_func !== nothing
-        return _grid_vhv_provider(alg, model)
-    end
-    hvp_func = model.hvp
-    hvp_func === nothing && throw(ArgumentError(
+    alg.exact_provider === nothing && throw(ArgumentError(
         "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
-    return _grid_hvp_provider(alg, model)
+    return alg.exact_provider
 end
 
 function _next_event_time_with_provider!(
@@ -33,12 +24,45 @@ function _next_event_time_with_provider!(
     max_horizon_event::Symbol,
     probe_failure_handler::GridBoundaryProbe,
 )::GridEvent where {FL<:ContinuousDynamics}
-    if alg.lazy_enabled[]
+    # A provider-owned interval certificate is already the complete cell
+    # construction.  Sending it through the derivative-based lazy builder
+    # silently discards that certificate (and was the normal full-gradient
+    # OMRF path).  Lazy endpoint construction is only applicable when no
+    # direct certificate is available.
+    if alg.lazy_enabled[] &&
+            !has_direct_deterministic_rate_cell_bound(grad_and_hvp)
         return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
             max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
     end
     return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+function _next_event_time_resolved_provider!(rng::Random.AbstractRNG,
+    provider, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+    alg::GridAdaptiveState, state::AbstractPDMPState, cache,
+    stats::AbstractStatisticCounter, max_horizon::Float64,
+    include_refresh::Bool, max_horizon_event::Symbol,
+    probe_failure_handler::GridBoundaryProbe)::GridEvent where {FL<:ContinuousDynamics}
+    # This function barrier is important: `GridAdaptiveState.exact_provider` is
+    # intentionally type-erased, whereas the direct-certificate trait must be
+    # resolved on the concrete provider without boxing in the proposal loop.
+    if has_direct_deterministic_rate_cell_bound(provider)
+        return _next_event_time_with_provider!(rng, provider, model, flow, alg,
+            state, cache, stats, max_horizon, include_refresh,
+            max_horizon_event, probe_failure_handler)
+    end
+    if alg.bound in (:value_quadratic, :shared_node)
+        return _next_event_time_value_quadratic!(
+            rng, model, flow, alg, state, cache, stats,
+            max_horizon, include_refresh, max_horizon_event,
+            probe_failure_handler)
+    end
+    state_ = alg.state_cache
+    copyto!(state_, state)
+    return _next_event_time_with_provider!(rng, provider, model, flow, alg,
+        state, cache, stats, max_horizon, include_refresh,
+        max_horizon_event, probe_failure_handler)
 end
 
 @inline function _has_exact_curvature_provider(model::PDMPModel, flow::ContinuousDynamics)
@@ -77,23 +101,36 @@ function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<
             max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
     end
 
-    if alg.bound in (:value_quadratic, :shared_node)
-        return _next_event_time_value_quadratic!(
-            rng, model, flow, alg, state, cache, stats,
-            max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
 
-    state_ = alg.state_cache
-    copyto!(state_, state)
-
+    # A provider-owned direct interval certificate supersedes derivative-based
+    # value-quadratic construction for this event search.  Probe only the first
+    # deterministic cell; `_grid_bound_modes` repeats the call and carries the
+    # certified value into the ordinary grid builder.
     provider = _grid_event_provider(model, flow, alg, stats)
-    return _next_event_time_with_provider!(rng, provider, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+    return _next_event_time_resolved_provider!(rng, provider, model, flow, alg,
+        state, cache, stats, max_horizon, include_refresh, max_horizon_event,
+        probe_failure_handler)
 end
 
 function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState, flow::ContinuousDynamics, provider)
-    use_linear = _use_linear_bound(alg, state, flow, provider)
-    use_single_pass_signed = _use_signed_grid_bound(alg, state, flow, provider)
+    use_direct = has_direct_deterministic_rate_cell_bound(provider)
+    direct_first = use_direct ? deterministic_rate_cell_bound(provider, state,
+        flow, alg.pcb.t_grid[1], alg.pcb.t_grid[2]) : nothing
+    use_linear = !use_direct && _use_linear_bound(alg, state, flow, provider)
+    # Subsampled GridThinning also reaches this dispatcher.  Its historical
+    # value-quadratic path accidentally fell through to the endpoint-tangent
+    # construction, which ignores `curvature_bound`.  Use the same signed-rate
+    # flat cell construction as the global value-quadratic path for scalar-rate
+    # flows.  Correctness still requires the caller-supplied curvature value or
+    # callback to be a genuine uniform cell certificate.
+    use_value_quadratic = alg.bound === :value_quadratic &&
+        _can_use_value_quadratic_grid(flow, alg.curvature_bound) &&
+        _can_use_signed_grid_bound(alg, state, flow, provider)
+    use_single_pass_signed = !use_direct &&
+        (_use_signed_grid_bound(alg, state, flow, provider) || use_value_quadratic)
     return (;
+        use_direct,
+        direct_first,
         use_linear,
         use_single_pass_signed,
         use_constant_batched_signed=!use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, provider),
@@ -105,7 +142,37 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
     probe_failure_handler::GridBoundaryProbe, modes; cached_gradient=nothing, cached_y0::Float64=NaN, cached_d0::Float64=NaN,
     cached_g0::Float64=NaN, cached_dg0::Float64=NaN, start_cell::Integer=1, initial_integral::Float64=0.0, append::Bool=false)
 
-    if modes.use_single_pass_signed
+    _inc_counter_grid_bound_evaluations(stats)
+    _grid_t0 = time_ns()
+    if modes.use_direct
+        cumulative = initial_integral
+        n_cells_bounded = start_cell - 1
+        for cell in start_cell:_grid_cell_count(
+                pcb.t_grid, length(pcb.Λ_vals), effective_horizon)
+            left = pcb.t_grid[cell]
+            right = min(pcb.t_grid[cell + 1], effective_horizon)
+            value = cell == 1 ? modes.direct_first :
+                deterministic_rate_cell_bound(provider, state, flow, left, right)
+            value === nothing && throw(ArgumentError(
+                "direct deterministic cell certificate disappeared within one grid"))
+            isfinite(value) && value >= 0 || throw(DomainError(value,
+                "direct deterministic cell certificate must be finite and nonnegative"))
+            pcb.Λ_vals[cell] = nextfloat(Float64(value))
+            pcb.y_vals[cell] = NaN
+            pcb.d_vals[cell] = NaN
+            cumulative += pcb.Λ_vals[cell] * (right - left)
+            n_cells_bounded = cell
+            cumulative >= cumulative_exp && break
+        end
+        if n_cells_bounded < length(pcb.Λ_vals)
+            for cell in (n_cells_bounded + 1):length(pcb.Λ_vals)
+                pcb.Λ_vals[cell] = 0.0
+            end
+        end
+        _inc_counter_grid_builds(stats)
+        _inc_counter_grid_points_evaluated(stats,
+            max(0, n_cells_bounded - start_cell + 1))
+    elseif modes.use_single_pass_signed
         n_cells_bounded = construct_rate_bound_grid!(alg.affine_bound, pcb, state, flow, provider, alg.curvature_bound;
             cached_gradient, early_stop_threshold=cumulative_exp, state_cache, stats, max_time=effective_horizon,
             build_affine=modes.use_linear, linear_area_threshold=alg.linear_area_threshold, linear_min_area_gain=alg.linear_min_area_gain,
@@ -128,5 +195,6 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
     _record_grid_schedule!(stats, alg)
     built_area = _grid_built_area(pcb, alg.affine_bound, modes.use_linear)
     _record_budget_grid_build!(stats, n_cells_bounded, built_area, cumulative_exp, append)
+    _inc_counter_grid_bound_seconds(stats, (time_ns() - _grid_t0) * 1.0e-9)
     return n_cells_bounded, built_area
 end

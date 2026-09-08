@@ -1,11 +1,12 @@
-struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector},V<:AbstractVector} <: PoissonTimeStrategy
+struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector},V<:AbstractVector,
+        Q<:PriorityQueue{Int,Float64}} <: PoissonTimeStrategy
     # A' could be the internal version of the wrapped algorithm
     inner_alg_state::T # this should perhaps be the more generic, i.e., _to_internal(Sticky.alg, ...)!
     κ::U
     can_stick::BitVector
     sticky_times::Vector{Float64}  # Absolute times of next stick/unstick event
     stickable_indices::Vector{Int}
-    sticky_pq::PriorityQueue{Int,Float64}
+    sticky_pq::Q
     empty_∇ϕx::V
 end
 
@@ -36,13 +37,14 @@ the one clock event shared by all currently frozen stickable coordinates.
 Every reschedule must keep these absolute times at or after the state's current
 time, and active-set changes invalidate and rebuild the aggregate event.
 """
-mutable struct AggregateStickyLoopState{T<:PoissonTimeStrategy,C<:AbstractAggregateUnstickClock,V<:AbstractVector} <: PoissonTimeStrategy
+mutable struct AggregateStickyLoopState{T<:PoissonTimeStrategy,C<:AbstractAggregateUnstickClock,
+        V<:AbstractVector,Q<:PriorityQueue{Int,Float64}} <: PoissonTimeStrategy
     inner_alg_state::T
     clock::C
     can_stick::BitVector
     sticky_times::Vector{Float64}
     stickable_indices::Vector{Int}
-    sticky_pq::PriorityQueue{Int,Float64}
+    sticky_pq::Q
     aggregate_unstick_time::Float64
     empty_∇ϕx::V
 end

@@ -4,6 +4,7 @@ const ChebyshevResidualAggregateClock = PDMPSamplers.ChebyshevResidualAggregateC
 const ExponentialSumAggregateClock = PDMPSamplers.ExponentialSumAggregateClock
 const FixedCovarianceCache = PDMPSamplers.FixedCovarianceCache
 const FourierResidualAggregateClock = PDMPSamplers.FourierResidualAggregateClock
+const HarmonicLogLinearAggregateClock = PDMPSamplers.HarmonicLogLinearAggregateClock
 const LinearGaussianAggregateClock = PDMPSamplers.LinearGaussianAggregateClock
 const NoSlabCache = PDMPSamplers.NoSlabCache
 const SummedRateClock = PDMPSamplers.SummedRateClock
@@ -36,6 +37,162 @@ function PDMPSamplers.move_forward_time!(state::PDMPSamplers.AbstractPDMPState,
     state.t[] += τ
     state.ξ.x .+= τ .* state.ξ.θ
     return state
+end
+
+@testset "Fourier Boomerang log-linear aggregate clocks" begin
+    beta = [1, 2, 3, 4]
+    logscale = [5, 6, 7, 8]
+    x = [0.1, -0.2, 0.3, -0.4, 0.2, -0.1, 0.3, -0.2]
+    θ = [0.4, -0.3, 0.2, -0.1, 0.7, -0.5, 0.6, -0.4]
+    free = BitVector([false, false, true, false, true, true, true, true])
+    can_stick = BitVector([true, true, false, true, false, false, false, false])
+    prior = BetaBernoulliModelPrior(4, 1.0, 1.0)
+    flow = Boomerang(8)
+
+    designs = (
+        [1.0 0.0 0.0 0.0;
+         0.0 1.0 0.0 0.0;
+         0.0 0.0 1.0 0.0;
+         0.0 0.0 0.0 1.0],
+        [1.0 0.0 0.0 0.0;
+         1.0 0.0 0.0 0.0;
+         0.0 1.0 0.0 0.0;
+         0.0 0.0 1.0 1.0],
+    )
+
+    for design in designs
+        provider = LogLinearGaussianScaleSlab(
+            beta, logscale, log.([1.2, 0.9, 1.1, 0.8]), design)
+        state = StickyPDMPState(
+            Ref(0.0), SkeletonPoint(copy(x), copy(θ)), copy(free))
+        # Keep the legacy Fourier implementation under direct coverage while
+        # the production default uses the cheaper certified harmonic-cell
+        # clock for this log-linear slab.
+        @test PDMPSamplers.default_aggregate_unstick_clock(
+            provider, prior, flow) isa HarmonicLogLinearAggregateClock
+        clock = FourierResidualAggregateClock(provider, prior)
+        @test clock isa FourierResidualAggregateClock
+        @test PDMPSamplers.residual_envelope_capability(
+            clock, flow, 8π) isa PDMPSamplers._CertifiedResidualEnvelopeCapability
+
+        direct_rate = function (t)
+            active = BitVector(state.free[beta])
+            total = 0.0
+            for j in eachindex(beta)
+                (can_stick[beta[j]] && !active[j]) || continue
+                ell = PDMPSamplers._loglinear_boomerang_logscale_coeffs(
+                    provider, flow, state, j)
+                c0, cc, cs = ell
+                logscale_t = c0 + cc * cos(t) + cs * sin(t)
+                C = PDMPSamplers._boundary_proposal_clock_constant(
+                    flow, state, beta[j])
+                total += exp(log_model_add_odds(prior, active, j) -
+                    0.5 * log(2π) - logscale_t + log(C))
+            end
+            total
+        end
+
+        for t in range(0.0, 8π; length=33)
+            exact = direct_rate(t)
+            @test PDMPSamplers.rate(clock, flow, state, t, can_stick) ≈ exact rtol=1e-11
+            upper = PDMPSamplers.boundary_rate_upper(
+                clock, flow, state, can_stick, max(0.0, t - 0.1), t + 0.1)
+            @test upper + 1e-12 >= exact
+        end
+
+        env, _ = PDMPSamplers.build_residual_envelope(
+            clock, flow, state, 8π, can_stick)
+        for t in range(0.0, 8π; length=129)
+            @test PDMPSamplers._envelope_rate(env, t) + 1e-10 >= direct_rate(t)
+        end
+
+        rng = MersenneTwister(445)
+        event_time = PDMPSamplers.sample_time(
+            rng, clock, flow, state, 8π, can_stick)
+        @test isfinite(event_time)
+        @test event_time >= 0.0
+        @test PDMPSamplers.sample_label(
+            rng, clock, flow, state, event_time, can_stick) in beta
+        @test thinning_diagnostics(clock).fallbacks == 0
+
+        preconditioned = PreconditionedDynamics(
+            DiagonalPreconditioner(ones(8)), flow)
+        pre_clock = PDMPSamplers.default_aggregate_unstick_clock(
+            provider, prior, preconditioned)
+        @test pre_clock isa HarmonicLogLinearAggregateClock
+    end
+end
+
+@testset "Adaptive Boomerang Fourier clock survives diagonal adaptation" begin
+    d = 8
+    beta = [1, 2, 3, 4]
+    logscale = [5, 6, 7, 8]
+    design = Matrix{Float64}(I, 4, 4)
+    provider = LogLinearGaussianScaleSlab(
+        beta, logscale, zeros(4), design)
+    prior = BetaBernoulliModelPrior(4, 1.0, 1.0)
+    flow = AdaptiveBoomerang(d; λref=0.0, scheme=:diagonal)
+    state = StickyPDMPState(
+        Ref(0.0), SkeletonPoint(randn(d), randn(d)),
+        BitVector([false, false, true, false, true, true, true, true]))
+    can_stick = BitVector([true, true, false, true, false, false, false, false])
+    @test PDMPSamplers.default_aggregate_unstick_clock(
+        provider, prior, flow) isa HarmonicLogLinearAggregateClock
+    clock = FourierResidualAggregateClock(provider, prior)
+    reference = SummedRateClock(provider, prior)
+
+    @test flow isa MutableBoomerang
+    @test clock isa FourierResidualAggregateClock
+    rate_before = PDMPSamplers._residual_target_rate(
+        clock, flow, state, can_stick, 0.7)
+    @test rate_before ≈ PDMPSamplers.rate(
+        reference, flow, state, 0.7, can_stick) rtol=1e-10
+    for t in rand(MersenneTwister(121), 20) .* 8π
+        @test PDMPSamplers.boundary_rate_upper(
+            clock, flow, state, can_stick, max(0.0, t - 0.15), t + 0.15) +
+            1e-10 >= PDMPSamplers._residual_target_rate(
+                clock, flow, state, can_stick, t)
+    end
+
+    adapter = PDMPSamplers.BoomerangAdapter(
+        1.0, 0.0, d; scheme=:diagonal, can_stick=falses(d))
+    stats = adapter.stats
+    stats.total_time = 2.0
+    stats.sum_x_dt .= collect(1.0:d)
+    stats.sum_x2_dt .= collect(1.0:d).^2 .+ collect(1.0:d)
+    old_cov = PDMPSamplers._boomerang_covariance_entry(flow, 1, 1)
+    state.t[] = 2.0
+    PDMPSamplers.adapt!(
+        MersenneTwister(122), adapter, state, flow, nothing, nothing;
+        phase=:warmup)
+    new_cov = PDMPSamplers._boomerang_covariance_entry(flow, 1, 1)
+    @test new_cov != old_cov
+    @test adapter.no_updates_done == 1
+    rate_after = PDMPSamplers._residual_target_rate(
+        clock, flow, state, can_stick, 0.7)
+    @test rate_after ≈ PDMPSamplers.rate(
+        reference, flow, state, 0.7, can_stick) rtol=1e-10
+    @test rate_after != rate_before
+    @test thinning_diagnostics(clock).fallbacks == 0
+
+    dense_covariance = dot(view(flow.ΣL, 1, :), view(flow.ΣL, 1, :))
+    @test PDMPSamplers._boomerang_covariance_entry(flow, 1, 1) ≈ dense_covariance
+
+    bad_provider = LogLinearGaussianScaleSlab(
+        beta, logscale, zeros(4), design)
+    bad_provider.log_base_scales[1] = NaN
+    bad_clock = FourierResidualAggregateClock(bad_provider, prior)
+    @test_throws DomainError PDMPSamplers._residual_target_rate(
+        bad_clock, flow, state, can_stick, 0.2)
+    @test_throws DomainError PDMPSamplers.build_residual_envelope(
+        bad_clock, flow, state, 1.0, can_stick)
+
+    bad_flow = AdaptiveBoomerang(d; λref=0.0, scheme=:diagonal)
+    bad_flow.ΣL.diag[1] = NaN
+    bad_clock2 = PDMPSamplers.default_aggregate_unstick_clock(
+        provider, prior, bad_flow)
+    @test_throws DomainError PDMPSamplers.rate(
+        bad_clock2, bad_flow, state, 0.2, can_stick)
 end
 
 struct _DeclaredStickableClock{V} <: PDMPSamplers.AbstractAggregateUnstickClock
@@ -304,6 +461,21 @@ end
         expected_exch = zeros(length(x))
         expected_exch[indices[[1, 3]]] .= exch_cov[[1, 3], [1, 3]] \ (x[indices[[1, 3]]] - exch_mean[[1, 3]])
         @test generic_empty_out ≈ expected_exch
+        _active_prior_grad_alloc(
+            exch, generic_empty_out, x, BitVector([true, false, true]))
+        @test _active_prior_grad_alloc(
+            exch, generic_empty_out, x, BitVector([true, false, true])) == 0
+
+        zero_exch = ZeroMeanExchangeableGaussianSlab(indices, 1.3, 0.1)
+        zero_exch_out = fill(NaN, length(x))
+        active_prior_grad!(zero_exch, zero_exch_out, x, active)
+        zero_exch_cov = Matrix(1.3I, 3, 3) .+ 0.1
+        expected_zero_exch = zeros(length(x))
+        expected_zero_exch[indices[A]] .=
+            zero_exch_cov[A, A] \ x[indices[A]]
+        @test zero_exch_out ≈ expected_zero_exch
+        _active_prior_grad_alloc(zero_exch, zero_exch_out, x, active)
+        @test _active_prior_grad_alloc(zero_exch, zero_exch_out, x, active) == 0
 
         κ = [0.2, 0.5, 0.8]
         indep = IndependentZeroMeanGaussianSlab(κ, indices)
@@ -815,6 +987,37 @@ end
                   PDMPSamplers.sample_label(MersenneTwister(202), exch_clock, flow_i, exch_state, exch_can_stick)
         end
 
+        preconditioned_bps = PreconditionedBPS(
+            4; refresh_rate=0.0, scale=[0.03, 0.4, 1.2, 2.0])
+        for τi in (0.0, 0.2, 0.9)
+            @test PDMPSamplers.rate(
+                exch_clock, preconditioned_bps, exch_state, τi,
+                exch_can_stick) ≈ PDMPSamplers.rate(
+                exch_clock.fallback, preconditioned_bps, exch_state, τi,
+                exch_can_stick)
+        end
+        for T_i in (0.3, 1.5)
+            @test PDMPSamplers.cumulative_hazard(
+                exch_clock, preconditioned_bps, exch_state, 0.0, T_i,
+                exch_can_stick) ≈ PDMPSamplers.cumulative_hazard(
+                exch_clock.fallback, preconditioned_bps, exch_state, 0.0, T_i,
+                exch_can_stick) rtol=1e-8 atol=1e-9
+        end
+        @test PDMPSamplers.sample_time(
+            MersenneTwister(211), exch_clock, preconditioned_bps,
+            exch_state, 2.0, exch_can_stick) ≈
+            PDMPSamplers.sample_time(
+                MersenneTwister(211), exch_clock.fallback,
+                preconditioned_bps, exch_state, 2.0,
+                exch_can_stick) rtol=1e-7 atol=1e-8
+        @test PDMPSamplers.sample_label(
+            MersenneTwister(212), exch_clock, preconditioned_bps,
+            exch_state, 0.7, exch_can_stick) ==
+            PDMPSamplers.sample_label(
+                MersenneTwister(212), exch_clock.fallback,
+                preconditioned_bps, exch_state, 0.7,
+                exch_can_stick)
+
         zero_slope_state = StickyPDMPState(
             Ref(0.0),
             SkeletonPoint([0.8, 0.0, -0.2, 0.0], [1.0, 0.0, -1.0, 0.0]),
@@ -906,6 +1109,82 @@ end
         @test clock_copy.model_prior !== clock.model_prior
         @test clock_copy.rtol == clock.rtol
         @test clock_copy.atol == clock.atol
+    end
+
+    @testset "Preconditioned exponential-sum clock and stable interval hazards" begin
+        provider = LogLinearGaussianScaleSlab(
+            [1, 2, 3], [4, 5], log.([1.5, 2.0, 2.5]),
+            [1.0 0.0; 0.5 -0.25; 0.0 0.75])
+        odds = BernoulliModelPrior(fill(0.5, 3))
+        clock = ExponentialSumAggregateClock(provider, odds)
+        state = StickyPDMPState(
+            Ref(0.0),
+            SkeletonPoint([0.0, 0.0, 0.0, 0.2, -0.1],
+                          [0.0, 0.0, 0.0, 0.3, -0.2]),
+            falses(5))
+        can_stick = BitVector([true, true, true, false, false])
+        flows = (
+            ZigZag(5),
+            BouncyParticle(5, 0.0),
+            PreconditionedZigZag(5; scale=[2.0, 0.5, 1.25, 1.0, 1.0]),
+            PreconditionedBPS(5; refresh_rate=0.0,
+                              scale=[2.0, 0.5, 1.25, 1.0, 1.0]),
+        )
+        preconditioned_boomerang = PreconditionedDynamics(
+            DiagonalPreconditioner(ones(5)), Boomerang(5))
+        boomerang_clock = default_aggregate_unstick_clock(
+            provider, odds, preconditioned_boomerang)
+        boomerang_method = which(PDMPSamplers.sample_time,
+            (MersenneTwister, typeof(boomerang_clock),
+             typeof(preconditioned_boomerang), typeof(state), Float64, BitVector))
+        @test !occursin("linear_clocks.jl", String(boomerang_method.file))
+        for flow in flows
+            indices = beta_indices(provider)
+            direct_rate(t) = sum(begin
+                j = findfirst(==(i), indices)
+                logρ = log_model_add_odds(odds, falses(3), j)
+                log_s = PDMPSamplers._independent_log_scale(provider,
+                    state.ξ.x, j) + PDMPSamplers._independent_log_scale_slope(
+                    provider, state.ξ.θ, j) * t
+                C = PDMPSamplers._boundary_proposal_clock_constant(flow, state, i)
+                C * exp(logρ - 0.5 * log(2π) - log_s)
+            end for i in indices)
+            for t in (0.0, 0.4, 1.2)
+                @test PDMPSamplers.rate(clock, flow, state, t, can_stick) ≈ direct_rate(t)
+            end
+            H = PDMPSamplers.cumulative_hazard(clock, flow, state, 0.0, 1.7, can_stick)
+            H_quad, _ = PDMPSamplers.QuadGK.quadgk(direct_rate, 0.0, 1.7;
+                rtol=1e-10, atol=1e-12)
+            @test H ≈ H_quad rtol=1e-9 atol=1e-10
+            τ = PDMPSamplers.sample_time(MersenneTwister(991), clock, flow,
+                state, 2.0, can_stick)
+            if isfinite(τ)
+                threshold = rand(MersenneTwister(991), Exponential())
+                @test PDMPSamplers.cumulative_hazard(clock, flow, state,
+                    0.0, τ, can_stick) ≈ threshold rtol=1e-7 atol=1e-8
+            end
+            labels = [PDMPSamplers.sample_label(MersenneTwister(1000 + k),
+                clock, flow, state, 0.4, can_stick) for k in 1:1000]
+            @test all(in(indices), labels)
+            @test all(isfinite, labels)
+        end
+
+        for (slope, t0, t1) in ((0.0, 0.0, 2.0), (3.0, 0.2, 1.7),
+                                (-3.0, 0.2, 1.7))
+            h = PDMPSamplers._exponential_component_interval_hazard(
+                log(0.7), slope, t0, t1)
+            @test isfinite(h) && h >= 0.0
+            @test PDMPSamplers._exponential_component_interval_hazard(
+                log(0.7), slope, t0, t1 + 0.5) >= h
+        end
+        @test PDMPSamplers._exponential_component_interval_hazard(
+            -700.0, 1.0e308, 1.0, 2.0) == 0.0
+        @test isinf(PDMPSamplers._exponential_component_interval_hazard(
+            0.0, -1.0e308, 0.0, 2.0))
+        @test !isnan(PDMPSamplers._exponential_component_interval_hazard(
+            0.0, -100.0, 1.0e3, 1.0e3 + 1.0))
+        @test_throws DomainError PDMPSamplers._safe_exp_logvalue(NaN;
+            logc=1.0, slope=-2.0, t0=0.0, t1=1.0)
     end
 
     @testset "Global logscale exchangeable scalar segment" begin
@@ -2409,7 +2688,11 @@ end
         adapted_flow.Γ.data .= inv([1.0 0.4; 0.4 2.0])
         copyto!(adapted_flow.ΣL.data, cholesky(Symmetric([1.0 0.4; 0.4 2.0])).L)
         copyto!(adapted_flow.L.data, cholesky(Symmetric(adapted_flow.Γ.data)).L)
-        PDMPSamplers._handle_dynamics_adaptation!(MersenneTwister(142), _AlwaysAdaptedAdapter(), adapted_alg, adapted_state, adapted_flow, PDMPSamplers.StatisticCounter())
+        adapted_trace = PDMPSamplers.TraceManager(
+            adapted_state, adapted_flow, alg, 1.0)
+        PDMPSamplers._handle_dynamics_adaptation!(MersenneTwister(142),
+            _AlwaysAdaptedAdapter(), adapted_alg, adapted_state, adapted_flow,
+            PDMPSamplers.StatisticCounter(), adapted_trace, :warmup)
         @test adapted_alg.aggregate_unstick_time != -123.0
         @test adapted_alg.aggregate_unstick_time >= adapted_state.t[]
 

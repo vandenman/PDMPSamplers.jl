@@ -13,11 +13,64 @@ a `StickyPDMPState`. The default method is a no-op.
 """
 set_active_set!(object, free::BitVector) = nothing
 
+"""
+    deterministic_rate_cell_bound(provider, state, flow, left, right)
+
+Optional direct certificate for the deterministic event-rate contribution on
+the complete closed cell `[left,right]`.  Returning `nothing` retains the
+ordinary derivative/curvature grid construction.  Implementations must return
+a finite, nonnegative, outward-enclosing bound; the grid never repairs an
+underestimate after proposals have been drawn.
+"""
+deterministic_rate_cell_bound(provider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, left::Real, right::Real) = nothing
+has_direct_deterministic_rate_cell_bound(provider) = false
+
+# Direct deterministic certificates belong to the gradient/target, not to the
+# mechanism used to obtain rate derivatives.  Preserve that capability for
+# every grid provider so finite-difference, VHV, and HVP selection cannot
+# silently change which cell certificate is installed.
+deterministic_rate_cell_bound(provider::VHVProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::VHVProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::FiniteDiffVHV,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::FiniteDiffVHV) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::GradHVPProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::GradHVPProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::GradientOnlyProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::GradientOnlyProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::GradientProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.gradient_strategy, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::GradientProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.gradient_strategy)
+
 function set_active_set!(f::Base.Fix1, free::BitVector)
     set_active_set!(f.f, free)
     set_active_set!(f.x, free)
     return nothing
 end
+
 function set_active_set!(f::Base.Fix2, free::BitVector)
     set_active_set!(f.f, free)
     set_active_set!(f.x, free)
@@ -51,6 +104,15 @@ chosen dynamics' event rate. For BPS this is
 coordinatewise flip rates.
 """
 abstract type AbstractResidualEnvelope end
+
+"""
+    prepare_residual_horizon!(envelope, state, flow, horizon)
+
+Optional hook for residual envelopes whose certificate is shared across a
+complete finite event-search horizon. Ordinary envelopes require no setup.
+"""
+prepare_residual_horizon!(::AbstractResidualEnvelope, state, flow, horizon) =
+    nothing
 
 struct SeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
     weights::Matrix{Float64}
@@ -334,6 +396,20 @@ mutable struct SubsampledControlVariate{F,O,E<:AbstractResidualEnvelope,H,R,D<:A
     sampling_map::Dict{Int,Int}
 end
 
+deterministic_rate_cell_bound(strategy::FullGradient,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        strategy.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(strategy::FullGradient) =
+    has_direct_deterministic_rate_cell_bound(strategy.f)
+
+deterministic_rate_cell_bound(strategy::SubsampledControlVariate,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        strategy.deterministic_gradient!, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(strategy::SubsampledControlVariate) =
+    has_direct_deterministic_rate_cell_bound(strategy.deterministic_gradient!)
+
 function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
     envelope::AbstractResidualEnvelope, anchor::AbstractVector, m::Integer;
     deterministic_hvp! = nothing, refresh_anchor! = nothing,
@@ -376,17 +452,22 @@ end
 _validated_refreshed_envelope(cv::SubsampledControlVariate, value, requested) = throw(ArgumentError(
     "anchor-refresh provider must return an AbstractResidualEnvelope"))
 
-function refresh_anchor!(cv::SubsampledControlVariate, anchor::AbstractVector)
+function refresh_anchor_owned!(cv::SubsampledControlVariate,
+        requested::Vector{Float64})
     callback = cv.refresh_anchor_callback!
     callback === nothing && throw(ArgumentError(
         "this SubsampledControlVariate has no anchor-refresh provider"))
-    length(anchor) == length(cv.anchor) || throw(DimensionMismatch(
+    length(requested) == length(cv.anchor) || throw(DimensionMismatch(
         "new subsampling anchor has the wrong dimension"))
-    requested = collect(Float64, anchor)
-    new_envelope = _validated_refreshed_envelope(cv, callback(requested), requested)
-    cv.envelope = new_envelope
-    cv.anchor = _subsampling_anchor_owner(new_envelope, requested)
+    new_envelope = _validated_refreshed_envelope(
+        cv, callback(requested), requested)::typeof(cv.envelope)
+    setfield!(cv, :envelope, new_envelope)
+    setfield!(cv, :anchor, _subsampling_anchor_owner(new_envelope, requested))
     return cv
+end
+
+function refresh_anchor!(cv::SubsampledControlVariate, anchor::AbstractVector)
+    return refresh_anchor_owned!(cv, collect(Float64, anchor))
 end
 
 function _reconstruct_subsampling(cv::SubsampledControlVariate;
@@ -448,6 +529,29 @@ function component_cell_scales!(out, envelope::AbstractResidualEnvelope,
     return _validate_component_scales(out, envelope.totals, "component cell")
 end
 
+"""
+    ResidualAffineCell
+
+Certified affine residual roof for one closed trajectory cell. `left` and
+`slope` describe the aggregate residual bound
+`left + slope * (t - t_left)`. The endpoint component/term masses are kept
+with the certificate so a provider can use the same representation when
+sampling a distinguished factor from the proposal clock.
+"""
+struct ResidualAffineCell{L,R,LT,RT}
+    left::Float64
+    slope::Float64
+    left_components::L
+    right_components::R
+    left_terms::LT
+    right_terms::RT
+end
+
+# Providers with a tighter affine residual roof specialize this hook. The
+# default preserves the established constant closed-cell roof.
+residual_affine_cell_bound(::AbstractResidualEnvelope, state, flow, left, right) =
+    nothing
+
 function total_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t)
     scales = component_scales!(envelope.scales, envelope, state, flow, t)
     cumulative = 0.0
@@ -468,6 +572,16 @@ total_residual_bound(envelope::AbstractResidualEnvelope, state, t) =
 screening_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t) =
     total_residual_bound(envelope, state, flow, t)
 prepare_residual_sampling!(::AbstractResidualEnvelope, state, flow, t) = nothing
+
+# Providers may return a generation token after pointwise screening and
+# consume it when candidate evaluation is for exactly that screened state.
+# The default is deliberately non-reusable; provider implementations must
+# opt in and validate their own token before skipping preparation.
+residual_sampling_generation(::AbstractResidualEnvelope) = nothing
+residual_sampling_generation(envelope::AbstractResidualEnvelope, state) =
+    residual_sampling_generation(envelope)
+reuse_screened_residual_sampling!(::AbstractResidualEnvelope, state, flow, t,
+    ::Any) = false
 
 n_observations(envelope::SeparableResidualEnvelope) = size(envelope.weights, 2)
 n_observations(envelope::BlockSeparableResidualEnvelope) =
@@ -518,6 +632,8 @@ end
 
 """Internal observation hook for proposal-weighted subsampling diagnostics."""
 record_subsampling_proposal!(oracle, args...) = nothing
+record_subsampling_candidate!(oracle, args...) = nothing
+record_subsampling_mark_source!(oracle, residual_source::Bool) = nothing
 
 """Internal hook for cheaply tightening a sampled subset's event-rate bound."""
 subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
@@ -525,6 +641,18 @@ subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
 
 """Internal pre-gradient hook for tightening a sampled residual bound."""
 subsampling_residual_subset_bound(oracle, state, flow, D, M, subset, scale) = M
+needs_subsampling_residual_gradient(oracle) = false
+subsampling_residual_subset_bound(oracle, state, gradient, flow,
+        D, M, subset, scale) = subsampling_residual_subset_bound(
+    oracle, state, flow, D, M, subset, scale)
+
+"""Copy a residual prepared while tightening the selected subset bound.
+
+Specialized analytic oracles may prepare a selected residual in a
+preallocated workspace.  Returning `false` keeps the existing residual-oracle
+call as the fallback for all other strategies.
+"""
+subsampling_cached_residual!(oracle, out, state, subset, anchor) = false
 
 deterministic_gradient!(out, cv::SubsampledControlVariate, x) = cv.deterministic_gradient!(out, x)
 
@@ -549,12 +677,25 @@ subsampling_candidate_rate!(oracle::WithResidualStats, args...) =
     subsampling_candidate_rate!(oracle.f, args...)
 record_subsampling_proposal!(oracle::WithResidualStats, args...) =
     record_subsampling_proposal!(oracle.f, args...)
+record_subsampling_candidate!(oracle::WithResidualStats, args...) =
+    record_subsampling_candidate!(oracle.f, args...)
+record_subsampling_mark_source!(oracle::WithResidualStats, residual_source::Bool) =
+    record_subsampling_mark_source!(oracle.f, residual_source)
 subsampling_subset_bound(oracle::WithResidualStats, state, gradient, flow,
         D, M, subset, scale) = subsampling_subset_bound(
     oracle.f, state, gradient, flow, D, M, subset, scale)
 subsampling_residual_subset_bound(oracle::WithResidualStats, state, flow,
         D, M, subset, scale) = subsampling_residual_subset_bound(
     oracle.f, state, flow, D, M, subset, scale)
+needs_subsampling_residual_gradient(oracle::WithResidualStats) =
+    needs_subsampling_residual_gradient(oracle.f)
+subsampling_residual_subset_bound(oracle::WithResidualStats, state, gradient,
+        flow, D, M, subset, scale) = subsampling_residual_subset_bound(
+    oracle.f, state, gradient, flow, D, M, subset, scale)
+subsampling_cached_residual!(oracle::WithResidualStats, out, state, subset, anchor) =
+    subsampling_cached_residual!(oracle.f, out, state, subset, anchor)
+subsampling_failure_context(oracle::WithResidualStats, envelope, subset) =
+    subsampling_failure_context(oracle.f, envelope, subset)
 function with_stats(cv::SubsampledControlVariate, stats::AbstractStatisticCounter)
     return _reconstruct_subsampling(cv;
         deterministic_gradient! = WithStats(
@@ -579,6 +720,12 @@ WithStats(f::F, stats::S, ::Val{P}) where {F,S,P} = WithStats{F,S,P}(f, stats)
     ws.f(args...)
 end
 set_active_set!(ws::WithStats, free::BitVector) = set_active_set!(ws.f, free)
+deterministic_rate_cell_bound(ws::WithStats,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        ws.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(ws::WithStats) =
+    has_direct_deterministic_rate_cell_bound(ws.f)
 
 struct WithFDCurvatureStats{F,S} <: Function
     f::F
@@ -590,6 +737,12 @@ end
     ws.f(args...)
 end
 set_active_set!(ws::WithFDCurvatureStats, free::BitVector) = set_active_set!(ws.f, free)
+deterministic_rate_cell_bound(ws::WithFDCurvatureStats,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        ws.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(ws::WithFDCurvatureStats) =
+    has_direct_deterministic_rate_cell_bound(ws.f)
 
 
 # Gradient computation interface
@@ -599,6 +752,7 @@ set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_
 function set_active_set!(strategy::SubsampledControlVariate, free::BitVector)
     set_active_set!(strategy.deterministic_gradient!, free)
     set_active_set!(strategy.residual_oracle, free)
+    set_active_set!(strategy.envelope, free)
     return nothing
 end
 

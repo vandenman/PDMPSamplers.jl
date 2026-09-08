@@ -256,6 +256,12 @@ function (ws::WithStatsJoint)(x::AbstractVector, v::AbstractVector)
     ws.f(x, v)
 end
 set_active_set!(ws::WithStatsJoint, free::BitVector) = set_active_set!(ws.f, free)
+deterministic_rate_cell_bound(ws::WithStatsJoint,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        ws.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(ws::WithStatsJoint) =
+    has_direct_deterministic_rate_cell_bound(ws.f)
 
 """
     _make_vhv_from_grad(grad_f!, d, backend)

@@ -22,7 +22,7 @@ struct _FourierResidualCell
     residual_area::Float64
 end
 
-struct _FourierResidualEnvelope
+mutable struct _FourierResidualEnvelope
     horizon::Float64
     a0::Float64
     a::Vector{Float64}
@@ -76,7 +76,7 @@ function _GaussianBoundaryWorkspace(m::Integer)
         nothing, 0)
 end
 
-mutable struct _ResidualEnvelopeWorkspace{C,B}
+mutable struct _ResidualEnvelopeWorkspace{C,B,E}
     coeffs::Vector{Float64}
     aux_coeffs::Vector{Float64}
     cells::Vector{C}
@@ -86,6 +86,7 @@ mutable struct _ResidualEnvelopeWorkspace{C,B}
     temp2::Vector{Float64}
     temp3::Vector{Float64}
     boundary::B
+    envelope::E
 end
 
 _chebyshev_residual_workspace(order::Integer, max_cells::Integer, ::Integer) =
@@ -94,19 +95,37 @@ _chebyshev_residual_workspace(order::Integer, max_cells::Integer, ::Integer) =
         Vector{Float64}(undef, Int(max_cells) + 1),
         Vector{Float64}(undef, Int(max_cells) + 1),
         zeros(Float64, Int(order) + 1), zeros(Float64, Int(order) + 1),
-        zeros(Float64, Int(order) + 1), nothing)
+        zeros(Float64, Int(order) + 1), nothing, nothing)
 
-_fourier_residual_workspace(order::Integer, cells::Integer, m::Integer) =
-    _ResidualEnvelopeWorkspace(zeros(Float64, Int(order)),
-        zeros(Float64, Int(order)), Vector{_FourierResidualCell}(undef, Int(cells)),
-        Vector{Float64}(undef, Int(cells) + 1),
-        Vector{Float64}(undef, Int(cells) + 1), Float64[], Float64[], Float64[],
-        _GaussianBoundaryWorkspace(m))
+function _fourier_residual_workspace(order::Integer, cells::Integer, m::Integer)
+    coeffs = zeros(Float64, Int(order))
+    aux = zeros(Float64, Int(order))
+    stored_cells = Vector{_FourierResidualCell}(undef, Int(cells))
+    edges = Vector{Float64}(undef, Int(cells) + 1)
+    prefix = Vector{Float64}(undef, Int(cells) + 1)
+    envelope = _FourierResidualEnvelope(0.0, 0.0, coeffs, aux,
+        stored_cells, edges, prefix, 0.0)
+    return _ResidualEnvelopeWorkspace(coeffs, aux, stored_cells, edges,
+        prefix, Float64[], Float64[], Float64[],
+        _GaussianBoundaryWorkspace(m), envelope)
+end
 
 abstract type _ResidualEnvelopeCapability end
 struct _CertifiedResidualEnvelopeCapability <: _ResidualEnvelopeCapability end
 struct _AnalyticResidualCapability <: _ResidualEnvelopeCapability end
 struct _ExactResidualFallbackCapability <: _ResidualEnvelopeCapability end
+
+# Both flows below have the same physical harmonic path.  For the wrapped
+# flow, harmonic coefficients come from `dynamics`, while proposal-clock
+# constants must dispatch on the complete preconditioned flow.
+const _CertifiedHarmonicBoomerang = Union{
+    AnyBoomerang,
+    PreconditionedDynamics{<:DiagonalPreconditioner,<:AnyBoomerang},
+}
+
+@inline _harmonic_boomerang(flow::AnyBoomerang) = flow
+@inline _harmonic_boomerang(flow::PreconditionedDynamics{
+    <:DiagonalPreconditioner,<:AnyBoomerang}) = flow.dynamics
 
 """
     residual_envelope_capability(clock, flow, horizon)
@@ -130,11 +149,381 @@ function residual_envelope_capability(clock::FourierResidualAggregateClock,
                                       ::AnyBoomerang, horizon::Real)
     isfinite(horizon) || return _ExactResidualFallbackCapability()
     provider = clock.slab_provider
-    certified = provider isa GlobalLogscaleExchangeableGaussianSlab ||
+    certified = provider isa AbstractLogLinearIndependentGaussianSlab ||
+        provider isa GlobalLogscaleExchangeableGaussianSlab ||
         (provider isa AbstractGaussianSlabProvider &&
          slab_cache_style(provider) isa FixedCovarianceCache)
     return certified ? _CertifiedResidualEnvelopeCapability() : _ExactResidualFallbackCapability()
 end
+
+@inline function _loglinear_boomerang_logscale_coeffs(
+        provider::AbstractLogLinearIndependentGaussianSlab,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, j::Integer)
+    c0 = provider.log_base_scales[j]
+    cc = 0.0
+    cs = 0.0
+    if provider isa IndependentZeroMeanLogscaleGaussianSlab
+        p0, pc, ps = _boomerang_position_coeffs(
+            flow, state, provider.logscale_indices[j])
+        c0 += p0
+        cc += pc
+        cs += ps
+    else
+        @inbounds for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
+            p0, pc, ps = _boomerang_position_coeffs(
+                flow, state,
+                provider.logscale_indices[provider.colidx[ptr]])
+            weight = provider.nzval[ptr]
+            c0 += weight * p0
+            cc += weight * pc
+            cs += weight * ps
+        end
+    end
+    (isfinite(c0) && isfinite(cc) && isfinite(cs)) || throw(DomainError(
+        (c0, cc, cs),
+        "non-finite harmonic log-scale coefficients for factor $j"))
+    return c0, cc, cs
+end
+
+@inline function _checked_boomerang_boundary_constant(value::Real, i::Integer)
+    isfinite(value) || throw(DomainError(
+        value, "non-finite Boomerang boundary covariance constant for coordinate $i"))
+    value >= 0 || throw(DomainError(
+        value, "negative Boomerang boundary covariance constant for coordinate $i"))
+    return Float64(value)
+end
+
+function _loglinear_boundary_rate_upper(
+        provider::AbstractLogLinearIndependentGaussianSlab,
+        model_prior::AbstractModelPrior, flow::_CertifiedHarmonicBoomerang,
+        state::StickyPDMPState, can_stick::BitVector,
+        workspace::_GaussianBoundaryWorkspace, lo::Float64, hi::Float64)
+    indices = beta_indices(provider)
+    @inbounds for j in eachindex(indices)
+        workspace.active_beta[j] = state.free[indices[j]]
+        workspace.stickable_beta[j] = can_stick[indices[j]]
+    end
+    max_lograte = -Inf
+    scaled_total = 0.0
+    @inbounds for j in eachindex(indices)
+        (workspace.stickable_beta[j] && !workspace.active_beta[j]) || continue
+        logodds = log_model_add_odds(model_prior, workspace.active_beta, j)
+        isnan(logodds) && throw(DomainError(
+            logodds, "non-finite model log-odds for factor $j"))
+        logodds == -Inf && continue
+        logodds == Inf && return Inf
+        c0, cc, cs = _loglinear_boomerang_logscale_coeffs(
+            provider, flow, state, j)
+        logscale_lo, _ = _sinusoid_range_on_cell(c0, cc, cs, lo, hi)
+        C = _checked_boomerang_boundary_constant(
+            _boundary_proposal_clock_constant(flow, state, indices[j]), indices[j])
+        C == 0.0 && continue
+        C == Inf && return Inf
+        lograte = logodds - _LOG_SQRT_2PI + log(C) - logscale_lo
+        max_lograte = max(max_lograte, lograte)
+    end
+    max_lograte == -Inf && return 0.0
+    total = 0.0
+    @inbounds for j in eachindex(indices)
+        (workspace.stickable_beta[j] && !workspace.active_beta[j]) || continue
+        logodds = log_model_add_odds(model_prior, workspace.active_beta, j)
+        isnan(logodds) && throw(DomainError(
+            logodds, "non-finite model log-odds for factor $j"))
+        isfinite(logodds) || continue
+        c0, cc, cs = _loglinear_boomerang_logscale_coeffs(
+            provider, flow, state, j)
+        logscale_lo, _ = _sinusoid_range_on_cell(c0, cc, cs, lo, hi)
+        C = _checked_boomerang_boundary_constant(
+            _boundary_proposal_clock_constant(flow, state, indices[j]), indices[j])
+        isfinite(C) && C > 0.0 || continue
+        total += exp(logodds - _LOG_SQRT_2PI + log(C) -
+            logscale_lo - max_lograte)
+    end
+    upper = exp(max_lograte) * total
+    isnan(upper) && throw(DomainError(
+        upper, "non-finite harmonic boundary upper bound"))
+    return upper + _fp_pad(upper)
+end
+
+function _loglinear_boundary_rate(
+        clock::FourierResidualAggregateClock{<:AbstractLogLinearIndependentGaussianSlab},
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        can_stick::BitVector, t::Real)
+    provider = clock.slab_provider
+    diagnostics = clock.diagnostics
+    started = diagnostics.enabled ? time_ns() : UInt64(0)
+    diagnostics.enabled && (diagnostics.point_rate_evaluations += 1)
+    workspace = clock.workspace.boundary
+    indices = beta_indices(provider)
+    tf = Float64(t)
+    sτ, cτ = sincos(tf)
+    @inbounds for j in eachindex(indices)
+        workspace.active_beta[j] = state.free[indices[j]]
+        workspace.stickable_beta[j] = can_stick[indices[j]]
+    end
+    max_lograte = -Inf
+    @inbounds for j in eachindex(indices)
+        (workspace.stickable_beta[j] && !workspace.active_beta[j]) || continue
+        logodds = log_model_add_odds(clock.model_prior, workspace.active_beta, j)
+        isnan(logodds) && throw(DomainError(
+            logodds, "non-finite model log-odds for factor $j"))
+        logodds == -Inf && continue
+        logodds == Inf && return Inf
+        c0, cc, cs = _loglinear_boomerang_logscale_coeffs(
+            provider, flow, state, j)
+        C = _checked_boomerang_boundary_constant(
+            _boundary_proposal_clock_constant(flow, state, indices[j]), indices[j])
+        C == 0.0 && continue
+        C == Inf && return Inf
+        lograte = logodds - _LOG_SQRT_2PI -
+            (c0 + cc * cτ + cs * sτ) + log(C)
+        isnan(lograte) && throw(DomainError(
+            lograte, "non-finite harmonic boundary log-rate for factor $j"))
+        max_lograte = max(max_lograte, lograte)
+    end
+    max_lograte == -Inf && return 0.0
+    total = 0.0
+    @inbounds for j in eachindex(indices)
+        (workspace.stickable_beta[j] && !workspace.active_beta[j]) || continue
+        logodds = log_model_add_odds(clock.model_prior, workspace.active_beta, j)
+        isnan(logodds) && throw(DomainError(
+            logodds, "non-finite model log-odds for factor $j"))
+        isfinite(logodds) || continue
+        c0, cc, cs = _loglinear_boomerang_logscale_coeffs(
+            provider, flow, state, j)
+        C = _checked_boomerang_boundary_constant(
+            _boundary_proposal_clock_constant(flow, state, indices[j]), indices[j])
+        isfinite(C) && C > 0.0 || continue
+        lograte = logodds - _LOG_SQRT_2PI -
+            (c0 + cc * cτ + cs * sτ) + log(C)
+        total += exp(lograte - max_lograte)
+    end
+    result = exp(max_lograte) * total
+    isnan(result) && throw(DomainError(
+        result, "non-finite harmonic boundary rate"))
+    diagnostics.enabled && (diagnostics.boundary_weight_ns += time_ns() - started)
+    return result
+end
+
+@inline function _harmonic_loglinear_rate(
+        clock::HarmonicLogLinearAggregateClock,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        can_stick::BitVector, t::Real)
+    clock.diagnostics.enabled && (clock.diagnostics.point_rate_evaluations += 1)
+    provider = clock.slab_provider
+    workspace = clock.workspace
+    indices = beta_indices(provider)
+    active_beta = workspace.active_beta
+    stickable_beta = workspace.stickable_beta
+    _prepare_harmonic_boundary_constants!(clock, flow, state)
+    @inbounds for j in eachindex(indices)
+        active_beta[j] = state.free[indices[j]]
+        stickable_beta[j] = can_stick[indices[j]]
+    end
+    active_count = count(active_beta)
+    s, c = sincos(Float64(t))
+    max_lograte = -Inf
+    scaled_total = 0.0
+    @inbounds for j in eachindex(indices)
+        (stickable_beta[j] && !active_beta[j]) || continue
+        logodds = _log_model_add_odds_with_count(
+            clock.model_prior, active_beta, j, active_count)
+        logodds == -Inf && continue
+        logodds == Inf && return Inf
+        c0, cc, cs = _loglinear_boomerang_logscale_coeffs(
+            provider, flow, state, j)
+        C = workspace.boundary_constants[j]
+        iszero(C) && continue
+        lograte = logodds + workspace.log_boundary_constants[j] -
+            (c0 + cc * c + cs * s)
+        if lograte <= max_lograte
+            scaled_total += exp(lograte - max_lograte)
+        else
+            scaled_total = isfinite(max_lograte) ?
+                scaled_total * exp(max_lograte - lograte) + 1.0 : 1.0
+            max_lograte = lograte
+        end
+    end
+    max_lograte == -Inf && return 0.0
+    return exp(max_lograte) * scaled_total
+end
+
+@inline function _prepare_harmonic_boundary_constants!(
+        clock::HarmonicLogLinearAggregateClock,
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:AnyBoomerang},
+        state::StickyPDMPState)
+    workspace = clock.workspace
+    generation = flow.metric.generation
+    if workspace.flow_source !== flow ||
+       workspace.metric_generation != generation
+        indices = beta_indices(clock.slab_provider)
+        @inbounds for j in eachindex(indices)
+            workspace.boundary_constants[j] =
+                _checked_boomerang_boundary_constant(
+                    _boundary_proposal_clock_constant(
+                        flow, state, indices[j]), indices[j])
+            workspace.log_boundary_constants[j] =
+                iszero(workspace.boundary_constants[j]) ? -Inf :
+                log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
+        end
+        workspace.flow_source = flow
+        workspace.metric_generation = generation
+    end
+    return workspace.boundary_constants
+end
+
+@inline function _prepare_harmonic_boundary_constants!(
+        clock::HarmonicLogLinearAggregateClock, flow::AnyBoomerang,
+        state::StickyPDMPState)
+    workspace = clock.workspace
+    if workspace.flow_source !== flow
+        indices = beta_indices(clock.slab_provider)
+        @inbounds for j in eachindex(indices)
+            workspace.boundary_constants[j] =
+                _checked_boomerang_boundary_constant(
+                    _boundary_proposal_clock_constant(
+                        flow, state, indices[j]), indices[j])
+            workspace.log_boundary_constants[j] =
+                iszero(workspace.boundary_constants[j]) ? -Inf :
+                log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
+        end
+        workspace.flow_source = flow
+        workspace.metric_generation = zero(UInt)
+    end
+    return workspace.boundary_constants
+end
+
+function _harmonic_loglinear_cell_upper!(
+        clock::HarmonicLogLinearAggregateClock,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        can_stick::BitVector, lo::Float64, hi::Float64)
+    provider = clock.slab_provider
+    workspace = clock.workspace
+    indices = beta_indices(provider)
+    active_beta = workspace.active_beta
+    stickable_beta = workspace.stickable_beta
+    _prepare_harmonic_boundary_constants!(clock, flow, state)
+    @inbounds for j in eachindex(indices)
+        active_beta[j] = state.free[indices[j]]
+        stickable_beta[j] = can_stick[indices[j]]
+    end
+    active_count = count(active_beta)
+    max_lograte = -Inf
+    scaled_total = 0.0
+    @inbounds for j in eachindex(indices)
+        (stickable_beta[j] && !active_beta[j]) || continue
+        logodds = _log_model_add_odds_with_count(
+            clock.model_prior, active_beta, j, active_count)
+        logodds == -Inf && continue
+        logodds == Inf && return Inf
+        c0, cc, cs = _loglinear_boomerang_logscale_coeffs(
+            provider, flow, state, j)
+        eta_min, _ = _sinusoid_range_on_cell(c0, cc, cs, lo, hi)
+        C = workspace.boundary_constants[j]
+        iszero(C) && continue
+        lograte = logodds + workspace.log_boundary_constants[j] - eta_min
+        if lograte <= max_lograte
+            scaled_total += exp(lograte - max_lograte)
+        else
+            scaled_total = isfinite(max_lograte) ?
+                scaled_total * exp(max_lograte - lograte) + 1.0 : 1.0
+            max_lograte = lograte
+        end
+    end
+    max_lograte == -Inf && return 0.0
+    upper = exp(max_lograte) * scaled_total
+    return upper + _fp_pad(upper)
+end
+
+function _prepare_harmonic_loglinear_cells!(
+        clock::HarmonicLogLinearAggregateClock,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        horizon::Float64, can_stick::BitVector)
+    workspace = clock.workspace
+    cells = min(clock.max_cells,
+        max(1, ceil(Int, horizon / clock.max_cell_width)))
+    workspace.cells_used = cells
+    workspace.prefix[1] = 0.0
+    @inbounds for cell in 1:cells
+        lo = horizon * (cell - 1) / cells
+        hi = horizon * cell / cells
+        roof = _harmonic_loglinear_cell_upper!(
+            clock, flow, state, can_stick, lo, hi)
+        workspace.roofs[cell] = roof
+        workspace.prefix[cell + 1] = workspace.prefix[cell] +
+            roof * (hi - lo)
+    end
+    return workspace.prefix[cells + 1]
+end
+
+function rate(clock::HarmonicLogLinearAggregateClock,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        t::Real, can_stick::BitVector)
+    t < 0 && throw(ArgumentError("t must be non-negative"))
+    return _harmonic_loglinear_rate(clock, flow, state, can_stick, t)
+end
+
+cumulative_hazard(clock::HarmonicLogLinearAggregateClock,
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+    t0::Real, t1::Real, can_stick::BitVector) =
+    cumulative_hazard(clock.fallback, flow, state, t0, t1, can_stick)
+
+function sample_time(rng::Random.AbstractRNG,
+        clock::HarmonicLogLinearAggregateClock,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        horizon::Real, can_stick::BitVector)
+    clock.diagnostics.enabled && (clock.diagnostics.aggregate_calls += 1)
+    _has_inactive_stickable_beta(clock.fallback, state, can_stick) || return Inf
+    isfinite(horizon) || return sample_time(
+        rng, clock.fallback, flow, state, horizon, can_stick)
+    H = Float64(horizon)
+    H <= 0 && return Inf
+    total_hazard = _prepare_harmonic_loglinear_cells!(
+        clock, flow, state, H, can_stick)
+    iszero(total_hazard) && return Inf
+    workspace = clock.workspace
+    envelope_hazard = 0.0
+    while true
+        envelope_hazard += rand(rng, Exponential())
+        envelope_hazard > total_hazard && return Inf
+        cell = 1
+        @inbounds while workspace.prefix[cell + 1] < envelope_hazard
+            cell += 1
+        end
+        roof = workspace.roofs[cell]
+        lo = H * (cell - 1) / workspace.cells_used
+        proposal = lo +
+            (envelope_hazard - workspace.prefix[cell]) / roof
+        exact = _harmonic_loglinear_rate(
+            clock, flow, state, can_stick, proposal)
+        ratio = exact / roof
+        diagnostics = clock.diagnostics
+        diagnostics.proposals += 1
+        diagnostics.max_envelope_ratio = max(
+            diagnostics.max_envelope_ratio, ratio)
+        ratio <= 1 + 1e-10 || throw(ArgumentError(
+            "certified harmonic clock violation: exact/roof ratio $ratio exceeds 1"))
+        if rand(rng) <= min(1.0, ratio)
+            diagnostics.accepted += 1
+            return proposal
+        end
+        diagnostics.rejected += 1
+    end
+end
+
+sample_label(rng::Random.AbstractRNG,
+    clock::HarmonicLogLinearAggregateClock,
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+    can_stick::BitVector) =
+    sample_label(rng, clock.fallback, flow, state, can_stick)
+
+stickable_coordinates(clock::HarmonicLogLinearAggregateClock) =
+    beta_indices(clock.slab_provider)
+
+reset_thinning_diagnostics!(clock::HarmonicLogLinearAggregateClock) =
+    reset_thinning_diagnostics!(clock.diagnostics)
+thinning_diagnostics(clock::HarmonicLogLinearAggregateClock) =
+    clock.diagnostics
 
 _fp_pad(x::Real; rel::Float64=1024eps(Float64), abs_pad::Float64=1024eps(Float64)) =
     Float64(rel * max(1.0, abs(Float64(x))) + abs_pad)
@@ -919,6 +1308,32 @@ function _fourier_fit_coeffs!(a::Vector{Float64}, b::Vector{Float64}, f, T::Real
     return a0, n
 end
 
+function _fourier_fit_coeffs!(a::Vector{Float64}, b::Vector{Float64},
+        clock::FourierResidualAggregateClock,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        can_stick::BitVector, T::Real)
+    K = length(a)
+    n = max(8K + 1, 129)
+    fill!(a, 0.0)
+    fill!(b, 0.0)
+    a0 = 0.0
+    @inbounds for j in 0:n-1
+        y = Float64(_residual_target_rate(clock, flow, state, can_stick,
+            Float64(T) * j / n))
+        a0 += y
+        for k in 1:K
+            angle = 2π * k * j / n
+            s, c = sincos(angle)
+            a[k] += y * c
+            b[k] += y * s
+        end
+    end
+    a0 /= n
+    rmul!(a, 2 / n)
+    rmul!(b, 2 / n)
+    return a0, n
+end
+
 function _fourier_eval(a0::Real, a::AbstractVector{Float64}, b::AbstractVector{Float64}, t::Real, T::Real)
     total = Float64(a0)
     tf = Float64(t)
@@ -975,19 +1390,21 @@ end
 
 _square_lower_from_range(lo::Float64, hi::Float64) = lo <= 0 <= hi ? 0.0 : min(abs2(lo), abs2(hi))
 
-function _boomerang_position_coeffs(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
+function _boomerang_position_coeffs(flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, i::Integer)
+    boomerang = _harmonic_boomerang(flow)
     state.free[i] || return Float64(state.ξ.x[i]), 0.0, 0.0
-    Δ = Float64(state.ξ.x[i] - flow.μ[i])
-    return Float64(flow.μ[i]), Δ, Float64(state.ξ.θ[i])
+    Δ = Float64(state.ξ.x[i] - boomerang.μ[i])
+    return Float64(boomerang.μ[i]), Δ, Float64(state.ξ.θ[i])
 end
 
-function _boomerang_velocity_coeffs(flow::AnyBoomerang, state::StickyPDMPState, i::Integer)
+function _boomerang_velocity_coeffs(flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, i::Integer)
+    boomerang = _harmonic_boomerang(flow)
     state.free[i] || return Float64(state.ξ.θ[i]), 0.0, 0.0
-    Δ = Float64(state.ξ.x[i] - flow.μ[i])
+    Δ = Float64(state.ξ.x[i] - boomerang.μ[i])
     return 0.0, Float64(state.ξ.θ[i]), -Δ
 end
 
-function _boomerang_boundary_velocity_upper(flow::AnyBoomerang, state::StickyPDMPState, i::Integer, lo::Float64, hi::Float64)
+function _boomerang_boundary_velocity_upper(flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, i::Integer, lo::Float64, hi::Float64)
     upper = _boundary_proposal_clock_constant(flow, state, i)
     return upper + _fp_pad(upper)
 end
@@ -1078,7 +1495,7 @@ end
 function _fixed_gaussian_boundary_rate_upper(
     provider::AbstractGaussianSlabProvider,
     model_prior::AbstractModelPrior,
-    flow::AnyBoomerang,
+    flow::_CertifiedHarmonicBoomerang,
     state::StickyPDMPState,
     can_stick::BitVector,
     workspace::_GaussianBoundaryWorkspace,
@@ -1127,7 +1544,7 @@ end
 function _global_logscale_boundary_rate_upper(
     provider::GlobalLogscaleExchangeableGaussianSlab,
     model_prior::AbstractModelPrior,
-    flow::AnyBoomerang,
+    flow::_CertifiedHarmonicBoomerang,
     state::StickyPDMPState,
     can_stick::BitVector,
     workspace::_GaussianBoundaryWorkspace,
@@ -1189,7 +1606,7 @@ function _global_logscale_boundary_rate_upper(
 end
 
 function _fixed_gaussian_boundary_rate(clock::FourierResidualAggregateClock,
-    flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real)
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real)
     provider = clock.slab_provider
     workspace = clock.workspace.boundary
     _prepare_fixed_gaussian_boundary_workspace!(provider, state, can_stick,
@@ -1220,7 +1637,7 @@ function _fixed_gaussian_boundary_rate(clock::FourierResidualAggregateClock,
 end
 
 function _global_logscale_boundary_rate(clock::FourierResidualAggregateClock,
-    flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real)
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real)
     provider = clock.slab_provider
     workspace = clock.workspace.boundary
     indices = beta_indices(provider)
@@ -1281,7 +1698,7 @@ overlapping roots instead use the stable transformed cell integral.
 """
 function _boomerang_narrow_peak_segment(
         clock::FourierResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab},
-        flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector)
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector)
     provider = clock.slab_provider
     workspace = clock.workspace.boundary
     indices = beta_indices(provider)
@@ -1959,8 +2376,12 @@ function _sample_boomerang_narrow_peak(rng::Random.AbstractRNG,
 end
 
 _residual_target_rate(clock::FourierResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab},
-    flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real) =
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real) =
     _global_logscale_boundary_rate(clock, flow, state, can_stick, t)
+
+_residual_target_rate(clock::FourierResidualAggregateClock{<:AbstractLogLinearIndependentGaussianSlab},
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real) =
+    _loglinear_boundary_rate(clock, flow, state, can_stick, t)
 
 _residual_horizon(env::_BoomerangNarrowPeakEnvelope) = env.horizon
 _envelope_hazard(env::_BoomerangNarrowPeakEnvelope, t::Real) =
@@ -1976,12 +2397,14 @@ function _envelope_rate(env::_BoomerangNarrowPeakEnvelope, t::Real)
 end
 
 _residual_target_rate(clock::FourierResidualAggregateClock{<:AbstractGaussianSlabProvider},
-    flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real) =
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, t::Real) =
     _fixed_gaussian_boundary_rate(clock, flow, state, can_stick, t)
 
-_boomerang_boundary_rate_upper(clock::FourierResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab}, flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Float64, hi::Float64) =
+_boomerang_boundary_rate_upper(clock::FourierResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab}, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Float64, hi::Float64) =
     _global_logscale_boundary_rate_upper(clock.slab_provider, clock.model_prior, flow, state, can_stick, clock.workspace.boundary, lo, hi)
-_boomerang_boundary_rate_upper(clock::FourierResidualAggregateClock{<:AbstractGaussianSlabProvider}, flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Float64, hi::Float64) =
+_boomerang_boundary_rate_upper(clock::FourierResidualAggregateClock{<:AbstractLogLinearIndependentGaussianSlab}, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Float64, hi::Float64) =
+    _loglinear_boundary_rate_upper(clock.slab_provider, clock.model_prior, flow, state, can_stick, clock.workspace.boundary, lo, hi)
+_boomerang_boundary_rate_upper(clock::FourierResidualAggregateClock{<:AbstractGaussianSlabProvider}, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Float64, hi::Float64) =
     _fixed_gaussian_boundary_rate_upper(clock.slab_provider, clock.model_prior, flow, state, can_stick, clock.workspace.boundary, lo, hi)
 
 """
@@ -1993,12 +2416,17 @@ custom clocks opting into certified construction must provide an equally
 conservative method for their provider and dynamics.
 """
 boundary_rate_upper(clock::FourierResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab},
-    flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Real, hi::Real) =
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Real, hi::Real) =
     _global_logscale_boundary_rate_upper(clock.slab_provider, clock.model_prior,
         flow, state, can_stick, clock.workspace.boundary, Float64(lo), Float64(hi))
 
+boundary_rate_upper(clock::FourierResidualAggregateClock{<:AbstractLogLinearIndependentGaussianSlab},
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Real, hi::Real) =
+    _loglinear_boundary_rate_upper(clock.slab_provider, clock.model_prior,
+        flow, state, can_stick, clock.workspace.boundary, Float64(lo), Float64(hi))
+
 boundary_rate_upper(clock::FourierResidualAggregateClock{<:AbstractGaussianSlabProvider},
-    flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Real, hi::Real) =
+    flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, lo::Real, hi::Real) =
     _fixed_gaussian_boundary_rate_upper(clock.slab_provider, clock.model_prior,
         flow, state, can_stick, clock.workspace.boundary, Float64(lo), Float64(hi))
 
@@ -2034,11 +2462,13 @@ function _fourier_envelope_rate(env::_FourierResidualEnvelope, t::Real)
     return _fourier_eval(env.a0, env.a, env.b, t, env.horizon) + env.cells[idx].R
 end
 
-function _certify_fourier_cell(clock::FourierResidualAggregateClock, flow::AnyBoomerang, state::StickyPDMPState, can_stick::BitVector, a0::Float64, a::Vector{Float64}, b::Vector{Float64}, lo::Float64, hi::Float64, T::Float64)
+function _certify_fourier_cell(clock::FourierResidualAggregateClock, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, can_stick::BitVector, a0::Float64, a::Vector{Float64}, b::Vector{Float64}, lo::Float64, hi::Float64, T::Float64)
+    started = clock.diagnostics.enabled ? time_ns() : UInt64(0)
     λ_hi = boundary_rate_upper(clock, flow, state, can_stick, lo, hi)
     q_lo = _fourier_lower_on_cell(a0, a, b, lo, hi, T)
     R = max(0.0, λ_hi - q_lo, -q_lo)
     R += _fp_pad(max(λ_hi, abs(q_lo), R))
+    clock.diagnostics.enabled && (clock.diagnostics.boundary_weight_ns += time_ns() - started)
     return _FourierResidualCell(lo, hi, R, R * (hi - lo))
 end
 
@@ -2051,7 +2481,7 @@ envelope must have nondecreasing cumulative hazard, dominate the true rate on
 the full horizon, and provide a finite terminal hazard whenever its rate is
 integrable.
 """
-build_residual_envelope(clock::FourierResidualAggregateClock, flow::AnyBoomerang,
+build_residual_envelope(clock::FourierResidualAggregateClock, flow::_CertifiedHarmonicBoomerang,
     state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
     _build_fourier_residual_envelope(clock, flow, state, horizon, can_stick)
 
@@ -2093,11 +2523,18 @@ function _sample_certified_envelope(rng::Random.AbstractRNG, clock, env, true_ra
     horizon = _residual_horizon(env)
     t = 0.0
     while t < horizon
+        d.enabled && (d.cumulative_hazard_evaluations += 1)
         target = _envelope_hazard(env, t) + rand(rng, Exponential())
         target > env.Hbar_horizon && return Inf
-        objective = τ -> _envelope_hazard(env, τ) - target
+        objective = τ -> begin
+            d.enabled && (d.cumulative_hazard_evaluations += 1)
+            d.enabled && (d.root_iterations += 1)
+            _envelope_hazard(env, τ) - target
+        end
+        root_started = d.enabled ? time_ns() : UInt64(0)
         proposal = Roots.find_zero(objective, (t, horizon), Roots.Bisection();
             atol=clock.fallback.atol, rtol=clock.fallback.rtol)
+        d.enabled && (d.root_inversion_ns += time_ns() - root_started)
         d.proposals += 1
         λ = true_rate(proposal)
         λbar = _envelope_rate(env, proposal)
@@ -2117,7 +2554,73 @@ function _sample_certified_envelope(rng::Random.AbstractRNG, clock, env, true_ra
     return Inf
 end
 
-function _build_fourier_residual_envelope(clock::FourierResidualAggregateClock, flow::AnyBoomerang, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+@inline function _invert_fourier_envelope_hazard(env, target::Float64,
+        lo::Float64, hi::Float64, atol::Float64, rtol::Float64,
+        diagnostics::AggregateClockDiagnostics)
+    # Allocation-free equivalent of the former closure-based Roots.Bisection
+    # call. The certified envelope hazard is monotone on the complete cell
+    # horizon, so a bracketed scalar bisection is sufficient.
+    while true
+        mid = 0.5 * (lo + hi)
+        diagnostics.enabled &&
+            (diagnostics.cumulative_hazard_evaluations += 1;
+             diagnostics.root_iterations += 1)
+        value = _envelope_hazard(env, mid)
+        value < target ? (lo = mid) : (hi = mid)
+        width = hi - lo
+        width <= max(atol, rtol * max(abs(lo), abs(hi))) &&
+            return 0.5 * (lo + hi)
+    end
+end
+
+function _sample_certified_fourier_envelope(rng::Random.AbstractRNG,
+        clock::FourierResidualAggregateClock, env,
+        flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState,
+        can_stick::BitVector, rate_evaluations::Integer)
+    d = clock.diagnostics
+    d.last_cells = length(env.cells)
+    d.residual_area += env.residual_prefix[end]
+    d.envelope_hazard += env.Hbar_horizon
+    max_residual = 0.0
+    min_envelope = Inf
+    @inbounds for cell in env.cells
+        max_residual = max(max_residual, cell.R)
+        min_envelope = min(min_envelope,
+            _envelope_rate(env, 0.5 * (cell.lo + cell.hi)))
+    end
+    d.max_residual = max(d.max_residual, max_residual)
+    d.min_envelope = min(d.min_envelope, min_envelope)
+    d.rate_evaluations += rate_evaluations
+    horizon = Float64(_residual_horizon(env))
+    t = 0.0
+    while t < horizon
+        d.enabled && (d.cumulative_hazard_evaluations += 1)
+        target = _envelope_hazard(env, t) + rand(rng, Exponential())
+        target > env.Hbar_horizon && return Inf
+        root_started = d.enabled ? time_ns() : UInt64(0)
+        proposal = _invert_fourier_envelope_hazard(env, target, t, horizon,
+            Float64(clock.fallback.atol), Float64(clock.fallback.rtol), d)
+        d.enabled && (d.root_inversion_ns += time_ns() - root_started)
+        d.proposals += 1
+        λ = _residual_target_rate(clock, flow, state, can_stick, proposal)
+        λbar = _envelope_rate(env, proposal)
+        λbar > 0 || throw(ArgumentError(
+            "certified residual envelope produced a non-positive proposal rate"))
+        ratio = λ / λbar
+        d.max_envelope_ratio = max(d.max_envelope_ratio, ratio)
+        ratio <= 1 + 1e-10 || throw(ArgumentError(
+            "certified residual envelope violation: true/proposal rate ratio $ratio exceeds 1"))
+        if rand(rng) <= min(1.0, ratio)
+            d.accepted += 1
+            return proposal
+        end
+        d.rejected += 1
+        t = proposal
+    end
+    return Inf
+end
+
+function _build_fourier_residual_envelope(clock::FourierResidualAggregateClock, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
     T = Float64(horizon)
     if clock.slab_provider isa GlobalLogscaleExchangeableGaussianSlab
         peak = _boomerang_narrow_peak_segment(clock, flow, state, can_stick)
@@ -2126,11 +2629,11 @@ function _build_fourier_residual_envelope(clock::FourierResidualAggregateClock, 
             return _BoomerangNarrowPeakEnvelope(peak, T, H), 0
         end
     end
-    f = t -> _residual_target_rate(clock, flow, state, can_stick, t)
     workspace = clock.workspace
     a = workspace.coeffs
     b = workspace.aux_coeffs
-    a0, fit_evaluations = _fourier_fit_coeffs!(a, b, f, T)
+    a0, fit_evaluations = _fourier_fit_coeffs!(a, b, clock, flow, state,
+        can_stick, T)
     cells = workspace.cells
     edges = workspace.edges
     rate_evaluations = fit_evaluations
@@ -2147,7 +2650,11 @@ function _build_fourier_residual_envelope(clock::FourierResidualAggregateClock, 
         prefix[i + 1] = prefix[i] + cells[i].residual_area
     end
     Hbar_T = _fourier_primitive(a0, a, b, T, T) + prefix[end]
-    return _FourierResidualEnvelope(T, a0, a, b, cells, edges, prefix, max(0.0, Hbar_T)), rate_evaluations
+    env = workspace.envelope
+    env.horizon = T
+    env.a0 = a0
+    env.Hbar_horizon = max(0.0, Hbar_T)
+    return env, rate_evaluations
 end
 
 function rate(clock::ChebyshevResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector)
@@ -2190,7 +2697,7 @@ function sample_time(rng::Random.AbstractRNG, clock::ChebyshevResidualAggregateC
         rate_evaluations=rate_evaluations)
 end
 
-function sample_time(rng::Random.AbstractRNG, clock::FourierResidualAggregateClock, flow::AnyBoomerang, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+function _sample_time_fourier_boomerang(rng::Random.AbstractRNG, clock::FourierResidualAggregateClock, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
     _has_inactive_stickable_beta(clock.fallback, state, can_stick) || return Inf
     horizon <= 0 && return Inf
     if clock.slab_provider isa GlobalLogscaleExchangeableGaussianSlab
@@ -2205,9 +2712,22 @@ function sample_time(rng::Random.AbstractRNG, clock::FourierResidualAggregateClo
     _residual_target_rate(clock, flow, state, can_stick, 0.0) == Inf &&
         return 0.0
     env, rate_evaluations = build_residual_envelope(clock, flow, state, horizon, can_stick)
-    return _sample_certified_envelope(rng, clock, env,
-        t -> _residual_target_rate(clock, flow, state, can_stick, t);
-        rate_evaluations=rate_evaluations)
+    return _sample_certified_fourier_envelope(rng, clock, env, flow, state,
+        can_stick, rate_evaluations)
+end
+
+function sample_time(rng::Random.AbstractRNG, clock::FourierResidualAggregateClock, flow::_CertifiedHarmonicBoomerang, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+    d = clock.diagnostics
+    if d.enabled
+        d.aggregate_calls += 1
+        d.frozen_coordinates += count(!, state.free)
+        d.stickable_coordinates += count(can_stick)
+        allocated = @allocated result = _sample_time_fourier_boomerang(
+            rng, clock, flow, state, horizon, can_stick)
+        d.allocations += allocated
+        return result
+    end
+    return _sample_time_fourier_boomerang(rng, clock, flow, state, horizon, can_stick)
 end
 
 function sample_label(rng::Random.AbstractRNG, clock::AbstractAggregateUnstickClock, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector)

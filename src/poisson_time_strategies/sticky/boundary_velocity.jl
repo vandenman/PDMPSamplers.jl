@@ -8,7 +8,24 @@ function _boomerang_covariance_entry(flow::AnyBoomerang, i::Integer, j::Integer)
     return dot(view(ΣL, i, :), view(ΣL, j, :))
 end
 
-function _boomerang_covariance_entry(flow::LowRankMutableBoomerang, i::Integer, j::Integer)
+# Adaptive Boomerang uses a diagonal reference covariance in production.  Its
+# Cholesky factor is a `Diagonal`, so taking a row-wise dot product here is an
+# avoidable O(d) scan (and can allocate for some matrix wrappers).  Keep the
+# generic method above for dense metrics and specialize the diagonal cases.
+@inline function _boomerang_covariance_entry(
+        flow::Boomerang{U,T,S,LT}, i::Integer, j::Integer) where
+        {U,T,S,LT<:Diagonal}
+    return i == j ? abs2(flow.ΣL.diag[i]) : zero(eltype(flow.ΣL.diag))
+end
+
+@inline function _boomerang_covariance_entry(
+        flow::MutableBoomerang{U,T,S,LT,ET}, i::Integer, j::Integer) where
+        {U,T,S,LT<:Diagonal,ET}
+    return i == j ? abs2(flow.ΣL.diag[i]) : zero(eltype(flow.ΣL.diag))
+end
+
+@inline function _lowrank_boomerang_covariance_entry(
+        flow::LowRankMutableBoomerang, i::Integer, j::Integer)
     lrp = flow.Γ
     # Σ[i,j] = D[i]1{i=j} + sum_k V[i,k]Λ[k]V[j,k], evaluated in O(r).
     value = i == j ? lrp.D[i] : zero(eltype(lrp.D))
@@ -16,6 +33,20 @@ function _boomerang_covariance_entry(flow::LowRankMutableBoomerang, i::Integer, 
         value += lrp.V[i, k] * lrp.Λ[k] * lrp.V[j, k]
     end
     return value
+end
+
+_boomerang_covariance_entry(
+    flow::LowRankMutableBoomerang, i::Integer, j::Integer) =
+    _lowrank_boomerang_covariance_entry(flow, i, j)
+
+# `LowRankMutableBoomerang` is an alias for a `MutableBoomerang` whose first
+# type parameter is `LowRankPrecision`. If its stored factor is diagonal, the
+# two representation-specific methods above otherwise intersect ambiguously.
+# The precision representation is authoritative for this subtype.
+@inline function _boomerang_covariance_entry(
+        flow::MutableBoomerang{U,T,S,LT,ET}, i::Integer, j::Integer) where
+        {U<:LowRankPrecision,T,S,LT<:Diagonal,ET}
+    return _lowrank_boomerang_covariance_entry(flow, i, j)
 end
 
 function _invalidate_active_stratum_cache!(state::AbstractPDMPState)

@@ -339,6 +339,18 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     state_cache = copy(state)
     state_cache2 = copy(state)
     grad_provider = GradientProvider(state_cache.ξ.θ, flow, model.grad, cache)
+    fd_buf = similar(state.ξ.x)
+    fd_grad_buf = similar(state.ξ.x)
+    fd_w_buf = similar(state.ξ.x)
+    exact_provider = if model.joint !== nothing && _joint_compatible(flow)
+        model.joint
+    elseif model.vhv !== nothing
+        VHVProvider(grad_provider, model.vhv, fd_w_buf)
+    elseif model.hvp !== nothing
+        GradHVPProvider(grad_provider, model.hvp)
+    else
+        nothing
+    end
     GridAdaptiveState(
         PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
         PiecewiseAffineBound(2N_base),
@@ -356,9 +368,9 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         state_cache2,
         similar(state.ξ.x, 0),
         strat.curvature_backend,
-        similar(state.ξ.x),
-        similar(state.ξ.x),
-        similar(state.ξ.x),
+        fd_buf,
+        fd_grad_buf,
+        fd_w_buf,
         Float64[],
         Float64[],
         Ref(NaN),
@@ -372,6 +384,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         Ref(NaN),
         Ref(false),
         grad_provider,
+        exact_provider,
         strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
@@ -386,7 +399,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
     subsampling_bound::PiecewiseAffineBound{Float64}
@@ -419,6 +432,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P} <: PoissonTim
     cached_rate_derivative::Base.RefValue{Float64}
     has_cached_rate_derivative::Base.RefValue{Bool}
     grad_provider::P
+    exact_provider::Q
     bound::Symbol
     curvature_bound
     bound_violation::Symbol

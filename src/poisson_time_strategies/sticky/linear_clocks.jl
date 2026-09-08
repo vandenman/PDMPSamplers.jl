@@ -334,28 +334,77 @@ function _exchangeable_log_total_weight(clock::LinearGaussianAggregateClock{<:Ab
     return log(unstick_rate_constant(flow, 1)) + log_sum
 end
 
-function rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector)
+_exchangeable_log_total_weight(
+    clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+    flow::Union{ZigZag,BouncyParticle}, active::BitVector,
+    stickable::BitVector, k::Integer, ::StickyPDMPState) =
+    _exchangeable_log_total_weight(clock, flow, active, stickable, k)
+
+function _exchangeable_log_total_weight(
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+        active::BitVector, stickable::BitVector, k::Integer,
+        state::StickyPDMPState)
+    indices = beta_indices(clock.slab_provider)
+    max_logw = -Inf
+    @inbounds for j in eachindex(indices, active, stickable)
+        if stickable[j] && !active[j]
+            logw = _log_model_add_odds_with_count(
+                clock.model_prior, active, j, k) +
+                log(_boundary_proposal_clock_constant(flow, state, indices[j]))
+            max_logw = max(max_logw, logw)
+        end
+    end
+    max_logw in (-Inf, Inf) && return max_logw
+    total = 0.0
+    @inbounds for j in eachindex(indices, active, stickable)
+        if stickable[j] && !active[j]
+            logw = _log_model_add_odds_with_count(
+                clock.model_prior, active, j, k) +
+                log(_boundary_proposal_clock_constant(flow, state, indices[j]))
+            total += isfinite(logw) ? exp(logw - max_logw) : 0.0
+        end
+    end
+    return max_logw + log(total)
+end
+
+const _ExchangeablePreconditionedBPS =
+    PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle}
+
+function _exchangeable_rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     @assert τ >= 0
     active, stickable, k, nU, a, b, s = _exchangeable_linear_params(clock, state, can_stick)
     iszero(nU) && return 0.0
-    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k)
+    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k, state)
     logW == -Inf && return 0.0
     logW == Inf && return Inf
     z = (a + b * τ) / s
     return exp(logW) * exp(-0.5 * abs2(z)) / sqrt(2π) / s
 end
 
-function cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector)
+rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
+    _exchangeable_rate(clock, flow, state, τ, can_stick)
+
+rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
+    _exchangeable_rate(clock, flow, state, τ, can_stick)
+
+function _exchangeable_cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector)
     @assert 0 <= t0 <= t1
     t0 == t1 && return 0.0
     active, stickable, k, nU, a, b, s = _exchangeable_linear_params(clock, state, can_stick)
     iszero(nU) && return 0.0
-    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k)
+    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k, state)
     logW == -Inf && return 0.0
     logW == Inf && return Inf
     return max(0.0, _linear_gaussian_component_hazard(a, b, s, logW, Float64(t1)) -
                     _linear_gaussian_component_hazard(a, b, s, logW, Float64(t0)))
 end
+
+cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
+    _exchangeable_cumulative_hazard(clock, flow, state, t0, t1, can_stick)
+
+cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
+    _exchangeable_cumulative_hazard(clock, flow, state, t0, t1, can_stick)
 
 function _exchangeable_gaussian_line_total_hazard(a::Real, b::Real, s::Real, logW::Real)
     return _linear_gaussian_component_total_hazard(a, b, s, logW)
@@ -379,10 +428,10 @@ function _exchangeable_invert_gaussian_line(a::Real, b::Real, s::Real, W::Real, 
     return τ >= 0 ? τ : 0.0
 end
 
-function sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+function _exchangeable_sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
     active, stickable, k, nU, a, b, s = _exchangeable_linear_params(clock, state, can_stick)
     iszero(nU) && return Inf
-    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k)
+    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k, state)
     logW == -Inf && return Inf
     logW == Inf && return 0.0
     W = exp(logW)
@@ -396,6 +445,12 @@ function sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateCloc
     total_available < threshold && return Inf
     return _exchangeable_invert_gaussian_line(a, b, s, W, threshold)
 end
+
+sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
+    _exchangeable_sample_time(rng, clock, flow, state, horizon, can_stick)
+
+sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
+    _exchangeable_sample_time(rng, clock, flow, state, horizon, can_stick)
 
 function _sample_uniform_inactive_stickable(rng::Random.AbstractRNG, indices::AbstractVector{Int}, active::BitVector, stickable::BitVector, nU::Integer)
     nU > 0 || throw(ArgumentError("cannot sample an unstick label because there are no inactive stickable coordinates"))
@@ -464,6 +519,23 @@ end
 
 function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     return sample_label(rng, clock, flow, state, can_stick)
+end
+
+# Diagonal BPS preconditioning gives inactive coordinates different boundary
+# velocity constants.  Waiting times use their weighted sum above.  Label
+# selection reuses the exact O(p) fallback to retain those individual weights.
+function sample_label(rng::Random.AbstractRNG,
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+        state::StickyPDMPState, can_stick::BitVector)
+    return sample_label(rng, clock.fallback, flow, state, can_stick)
+end
+
+function sample_label(rng::Random.AbstractRNG,
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+        state::StickyPDMPState, τ::Real, can_stick::BitVector)
+    return sample_label(rng, clock.fallback, flow, state, τ, can_stick)
 end
 
 function scalar_logscale_gaussian_line_segment(
@@ -578,12 +650,19 @@ function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClo
     return sample_label(rng, clock, flow, state, can_stick)
 end
 
-function _prepare_exponential_sum_cache!(clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, can_stick::BitVector)
+const _ExponentialSumLinearFlow = Union{
+    ZigZag,
+    BouncyParticle,
+    # The preconditioner type is intentionally unconstrained, but the wrapped
+    # dynamics type is restricted to the two linear flows.  In particular,
+    # preconditioned Boomerang must continue through the generic clock path.
+    PreconditionedDynamics{P,D} where {P,D<:Union{ZigZag,BouncyParticle}},
+}
+
+function _prepare_exponential_sum_cache!(clock::ExponentialSumAggregateClock, flow::_ExponentialSumLinearFlow, state::StickyPDMPState, can_stick::BitVector)
     provider = clock.slab_provider
     indices = beta_indices(provider)
     cache = clock.cache
-    Cv = unstick_rate_constant(flow, 1)
-    logCv_phi0 = log(Cv) - 0.5 * log(2π)
     @inbounds for j in eachindex(indices)
         i = indices[j]
         cache.active_beta[j] = state.free[i]
@@ -596,30 +675,82 @@ function _prepare_exponential_sum_cache!(clock::ExponentialSumAggregateClock, fl
         if cache.stickable_beta[j] && !cache.active_beta[j]
             logρ = log_model_add_odds(clock.model_prior, cache.active_beta, j)
             log_s0 = _independent_log_scale(provider, state.ξ.x, j)
-            cache.logc[j] = logCv_phi0 + logρ - log_s0
+            C = _boundary_proposal_clock_constant(flow, state, i)
+            if C == 0.0 || logρ == -Inf
+                cache.logc[j] = -Inf
+            elseif C == Inf || logρ == Inf
+                cache.logc[j] = Inf
+            else
+                cache.logc[j] = log(C) - 0.5 * log(2π) + logρ - log_s0
+            end
         end
     end
     return cache
 end
 
-function _exponential_component_hazard_from_logc(logc::Real, r::Real, T::Real)
-    T <= 0 && return 0.0
-    logc == -Inf && return 0.0
-    logc == Inf && return Inf
-    c = exp(logc)
-    iszero(r) && return c * T
-    return -c * expm1(-r * T) / r
+@inline function _safe_exp_logvalue(logvalue::Float64; logc::Real=logvalue,
+        slope::Real=NaN, t0::Real=NaN, t1::Real=NaN)
+    logvalue == -Inf && return 0.0
+    logvalue == Inf && return Inf
+    isnan(logvalue) && throw(DomainError(
+        (logvalue, logc, slope, t0, t1),
+        "NaN in exponential clock value (logc=$logc, slope=$slope, interval=[$t0,$t1])"))
+    logvalue >= log(floatmax(Float64)) && return Inf
+    logvalue <= log(floatmin(Float64)) && return 0.0
+    return exp(logvalue)
 end
 
-function _exponential_sum_hazard_from_cache(cache::ExponentialSumAggregateCache, T::Real)
+@inline function _log_expm1_positive(q::Float64)
+    q <= 0.0 && return -Inf
+    q == Inf && return Inf
+    q < log(2.0) && return log(expm1(q))
+    return q + log1p(-exp(-q))
+end
+
+"""Stable integral of `exp(logc - r*t)` over `[t0,t1]`."""
+function _exponential_component_interval_hazard(logc::Real, r::Real, t0::Real, t1::Real)
+    t0 == t1 && return 0.0
+    t1 < t0 && throw(ArgumentError("exponential hazard interval must be ordered"))
+    logc == -Inf && return 0.0
+    logc == Inf && return Inf
+    (isnan(logc) || isnan(r) || isnan(t0) || isnan(t1)) &&
+        throw(ArgumentError("exponential hazard inputs must not be NaN"))
+    Δ = Float64(t1 - t0)
+    r64 = Float64(r)
+    if iszero(r64)
+        return _safe_exp_logvalue(Float64(logc) + log(Δ);
+            logc=logc, slope=r64, t0=t0, t1=t1)
+    elseif r64 > 0.0
+        decay = r64 * Float64(t0)
+        isinf(decay) && return 0.0
+        q = r64 * Δ
+        logshape = isinf(q) ? 0.0 : log(-expm1(-q))
+        return _safe_exp_logvalue(Float64(logc) - decay + logshape - log(r64);
+            logc=logc, slope=r64, t0=t0, t1=t1)
+    else
+        growth = (-r64) * Float64(t0)
+        isinf(growth) && return Inf
+        q = (-r64) * Δ
+        logshape = _log_expm1_positive(q)
+        return _safe_exp_logvalue(Float64(logc) + growth + logshape - log(-r64);
+            logc=logc, slope=r64, t0=t0, t1=t1)
+    end
+end
+
+function _exponential_sum_hazard_from_cache(cache::ExponentialSumAggregateCache, t0::Real, t1::Real)
+    t0 == t1 && return 0.0
     total = 0.0
     @inbounds for j in eachindex(cache.logc)
-        total += _exponential_component_hazard_from_logc(cache.logc[j], cache.slopes[j], T)
+        component = _exponential_component_interval_hazard(
+            cache.logc[j], cache.slopes[j], t0, t1)
+        isinf(component) && return Inf
+        total += component
+        isinf(total) && return Inf
     end
     return max(0.0, total)
 end
 
-function rate(clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector)
+function rate(clock::ExponentialSumAggregateClock, flow::_ExponentialSumLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     @assert τ >= 0
     cache = _prepare_exponential_sum_cache!(clock, flow, state, can_stick)
     max_logλ = -Inf
@@ -637,13 +768,11 @@ function rate(clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyPart
     return exp(max_logλ) * total
 end
 
-function cumulative_hazard(clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector)
+function cumulative_hazard(clock::ExponentialSumAggregateClock, flow::_ExponentialSumLinearFlow, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector)
     @assert 0 <= t0 <= t1
     t0 == t1 && return 0.0
     cache = _prepare_exponential_sum_cache!(clock, flow, state, can_stick)
-    any(==(Inf), cache.logc) && return Inf
-    return max(0.0, _exponential_sum_hazard_from_cache(cache, Float64(t1)) -
-                    _exponential_sum_hazard_from_cache(cache, Float64(t0)))
+    return _exponential_sum_hazard_from_cache(cache, Float64(t0), Float64(t1))
 end
 
 function _exponential_sum_available_hazard(cache::ExponentialSumAggregateCache)
@@ -655,22 +784,26 @@ function _exponential_sum_available_hazard(cache::ExponentialSumAggregateCache)
             if r <= 0
                 return Inf
             else
-                total += c / r
+                term = _safe_exp_logvalue(cache.logc[j] - log(r);
+                    logc=cache.logc[j], slope=r, t0=0.0, t1=Inf)
+                isinf(term) && return Inf
+                total += term
+                isinf(total) && return Inf
             end
         end
     end
     return total
 end
 
-function sample_time(rng::Random.AbstractRNG, clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+function sample_time(rng::Random.AbstractRNG, clock::ExponentialSumAggregateClock, flow::_ExponentialSumLinearFlow, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
     cache = _prepare_exponential_sum_cache!(clock, flow, state, can_stick)
     any(_positive_logweight, cache.logc) || return Inf
     any(==(Inf), cache.logc) && return 0.0
     threshold = rand(rng, Exponential())
     if isfinite(horizon)
-        H = _exponential_sum_hazard_from_cache(cache, Float64(horizon))
+        H = _exponential_sum_hazard_from_cache(cache, 0.0, Float64(horizon))
         H < threshold && return Inf
-        f = τ -> _exponential_sum_hazard_from_cache(cache, τ) - threshold
+        f = τ -> _exponential_sum_hazard_from_cache(cache, 0.0, τ) - threshold
         return Roots.find_zero(f, (0.0, Float64(horizon)), Roots.Bisection(); atol=clock.atol, rtol=clock.rtol)
     end
 
@@ -678,24 +811,24 @@ function sample_time(rng::Random.AbstractRNG, clock::ExponentialSumAggregateCloc
     available < threshold && return Inf
     lo = 0.0
     hi = 1.0
-    H_hi = _exponential_sum_hazard_from_cache(cache, hi)
+    H_hi = _exponential_sum_hazard_from_cache(cache, 0.0, hi)
     iterations = 0
     while H_hi < threshold && iterations < 80
         lo = hi
         hi *= 2.0
-        H_hi = _exponential_sum_hazard_from_cache(cache, hi)
+        H_hi = _exponential_sum_hazard_from_cache(cache, 0.0, hi)
         iterations += 1
     end
     H_hi < threshold && return Inf
-    f = τ -> _exponential_sum_hazard_from_cache(cache, τ) - threshold
+    f = τ -> _exponential_sum_hazard_from_cache(cache, 0.0, τ) - threshold
     return Roots.find_zero(f, (lo, hi), Roots.Bisection(); atol=clock.atol, rtol=clock.rtol)
 end
 
-function sample_label(rng::Random.AbstractRNG, clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, can_stick::BitVector)
+function sample_label(rng::Random.AbstractRNG, clock::ExponentialSumAggregateClock, flow::_ExponentialSumLinearFlow, state::StickyPDMPState, can_stick::BitVector)
     return sample_label(rng, clock, flow, state, 0.0, can_stick)
 end
 
-function sample_label(rng::Random.AbstractRNG, clock::ExponentialSumAggregateClock, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector)
+function sample_label(rng::Random.AbstractRNG, clock::ExponentialSumAggregateClock, flow::_ExponentialSumLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     cache = _prepare_exponential_sum_cache!(clock, flow, state, can_stick)
     indices = beta_indices(clock.slab_provider)
     max_logw = -Inf

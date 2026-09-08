@@ -31,10 +31,12 @@ end
 @testset verbose = true "PDMPSamplers" begin
     for t in tests_to_run
         skip_test(basename(t)) && continue
+        println("[unix ", time(), "] START ", basename(t))
         @testset "Test $(basename(t))" begin
             Random.seed!(345679)
             include(t)
         end
+        println("[unix ", time(), "] END   ", basename(t))
     end
 end
 

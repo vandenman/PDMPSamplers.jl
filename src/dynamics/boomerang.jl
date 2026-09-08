@@ -37,6 +37,15 @@ default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab
                                 ::AnyBoomerang) =
     FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=true)
 
+# Log-linear independent Gaussian slabs have harmonic log scales along every
+# Boomerang flight.  Route both independent and node-shared scale designs
+# through the certified Fourier clock; the generic three-argument fallback
+# would otherwise select ExponentialSumAggregateClock and then SummedRateClock.
+default_aggregate_unstick_clock(provider::AbstractLogLinearIndependentGaussianSlab,
+                                model_prior::AbstractModelPrior,
+                                ::AnyBoomerang) =
+    HarmonicLogLinearAggregateClock(provider, model_prior)
+
 
 """
     LowRankPrecision{T<:Real}
@@ -315,7 +324,11 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, 
 end
 
 reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(state, ∇ϕ, flow, cache)
-function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
+
+# Reference implementation retained both for non-diagonal Boomerang factors and
+# for regression/benchmark comparisons with the diagonal specialization below.
+function _reflect_sticky_boomerang_generic!(state::StickyPDMPState,
+        ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
     free = state.free
     θ_free = view(state.ξ.θ, free)
     ∇ϕ_free = view(∇ϕ, free)
@@ -335,6 +348,48 @@ function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomer
     reflection_coeff = 2 * dot(θ_free, ∇ϕ_free) / denominator
     θ_free .-= reflection_coeff .* z_free
     return nothing
+end
+
+reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+    flow::AnyBoomerang, cache) =
+    _reflect_sticky_boomerang_generic!(state, ∇ϕ, flow, cache)
+
+@inline function _reflect_sticky_diagonal_boomerang!(
+        state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::AnyBoomerang, cache)
+    θ = state.ξ.θ
+    free = state.free
+    diagonal = flow.ΣL.diag
+    z = cache.z
+    numerator = zero(promote_type(eltype(θ), eltype(∇ϕ), eltype(diagonal)))
+    denominator = zero(typeof(numerator))
+    @inbounds for i in eachindex(θ, ∇ϕ, free, diagonal, z)
+        if free[i]
+            zi = abs2(diagonal[i]) * ∇ϕ[i]
+            z[i] = zi
+            numerator += θ[i] * ∇ϕ[i]
+            denominator += ∇ϕ[i] * zi
+        end
+    end
+    iszero(denominator) && return nothing
+    reflection_coeff = 2 * numerator / denominator
+    @inbounds for i in eachindex(θ, free, z)
+        free[i] && (θ[i] -= reflection_coeff * z[i])
+    end
+    return nothing
+end
+
+# Diagonal adaptive Boomerang stores the covariance factor directly as a
+# Diagonal.  On a sticky stratum, Σ[free,free]g therefore needs only one pass;
+# Boolean matrix views and the two generic matrix products are unnecessary.
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::Boomerang{U,T,S,LT}, cache) where {U,T,S,LT<:Diagonal}
+    return _reflect_sticky_diagonal_boomerang!(state, ∇ϕ, flow, cache)
+end
+
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::MutableBoomerang{U,T,S,LT,ET}, cache) where {U,T,S,LT<:Diagonal,ET}
+    return _reflect_sticky_diagonal_boomerang!(state, ∇ϕ, flow, cache)
 end
 
 
@@ -441,10 +496,17 @@ function sticking_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
         sqrtu = sqrt(u)
         t1 = mod(2atan(sqrtu - θ, denom), 2π)
         t2 = mod(-2atan(sqrtu + θ, denom), 2π)
+        # At the boundary one of the roots is the current time.  Select the
+        # other root as the next crossing; replacing the zero root with a full
+        # period before taking `max` incorrectly skipped the next boundary
+        # crossing for every nonzero boundary velocity.
+        if iszero(x)
+            next_crossing = max(t1, t2)
+            return iszero(next_crossing) ? oftype(next_crossing, 2π) : next_crossing
+        end
         # t = 0 means "now", not a future crossing; replace with 2π (full period)
         iszero(t1) && (t1 = oftype(t1, 2π))
         iszero(t2) && (t2 = oftype(t2, 2π))
-        iszero(x) && return max(t1, t2)
         return min(t1, t2)
     end
 end

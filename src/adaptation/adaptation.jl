@@ -76,18 +76,33 @@ end
 # A. Preconditioning
 mutable struct PreconditionerAdapter <: AbstractAdapter
     const dt::Float64
+    const initial_dt::Float64
+    const max_scale_expansion::Float64
     last_update::Float64
     no_updates_done::Int
     scheme::Symbol
     did_update::Bool
+    const can_stick::BitVector
 end
+
+# Keep the historical positional constructor usable for callers that do not
+# have a sticky mask.  The dimension is learned from the mask-aware factory
+# below; an empty mask means that every coordinate is continuously supported.
+PreconditionerAdapter(dt::Float64, initial_dt::Float64,
+    max_scale_expansion::Float64, last_update::Float64,
+    no_updates_done::Int, scheme::Symbol, did_update::Bool) =
+    PreconditionerAdapter(dt, initial_dt, max_scale_expansion, last_update,
+        no_updates_done, scheme, did_update, BitVector())
 
 function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     ad.did_update = false
-    if phase === :warmup && (state.t[] - ad.last_update >= ad.dt)
+    update_dt = iszero(ad.no_updates_done) ? ad.initial_dt : ad.dt
+    if phase === :warmup && (state.t[] - ad.last_update >= update_dt)
         trace = get_warmup_trace(trace_mgr)
         _has_integrable_segment(trace) || return
-        update_preconditioner!(rng, flow, trace, state, iszero(ad.no_updates_done))
+        mask = any(ad.can_stick) ? ad.can_stick : nothing
+        update_preconditioner!(rng, flow, trace, state,
+            iszero(ad.no_updates_done), ad.max_scale_expansion, mask)
         ad.last_update = state.t[]
         ad.no_updates_done += 1
         ad.did_update = true
@@ -125,8 +140,18 @@ SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
         update_dt, last_update, false)
 
 function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, flow,
-        grad::SubsampledControlVariate, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    ad.did_update = ad.select_fn!(grad, state, flow, phase) === true
+        grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
+    # The statistics argument is optional for backwards compatibility with
+    # external anchor selectors.  The OMRF provider uses it for opt-in
+    # trajectory-window diagnostics, while older selectors keep the original
+    # four-argument callback contract.
+    stats = get(kwargs, :stats, nothing)
+    ad.did_update = if stats !== nothing && applicable(
+            ad.select_fn!, grad, state, flow, phase, stats)
+        ad.select_fn!(grad, state, flow, phase, stats) === true
+    else
+        ad.select_fn!(grad, state, flow, phase) === true
+    end
     if phase === :warmup && state.t[] - ad.last_update >= ad.update_dt
         trace = get_warmup_trace(trace_mgr)
         if _has_integrable_segment(trace)
@@ -140,7 +165,7 @@ end
 did_gradient_adapt(ad::SubsamplingAnchorBankAdapter) = ad.did_update
 
 function finish_warmup!(ad::SubsamplingAnchorBankAdapter, state, flow,
-        grad::SubsampledControlVariate, trace_mgr, stats)
+        grad, trace_mgr, stats)
     return Bool(ad.finish_warmup_fn!(grad, state, flow, trace_mgr, stats))
 end
 
@@ -152,9 +177,35 @@ end
 default_dynamics_adapter(::ContinuousDynamics, args...; kwargs...) = NoAdaptation()
 
 # Specific:
-function default_dynamics_adapter(::PreconditionedDynamics, precond_dt, t0,
-        t_warmup=0.0; kwargs...)
-    return PreconditionerAdapter(precond_dt, t0, 0, :default, false)
+function default_dynamics_adapter(flow::PreconditionedDynamics, precond_dt, t0,
+        t_warmup=0.0; initial_precond_dt=precond_dt,
+        max_scale_expansion=2.0, can_stick=nothing, kwargs...)
+    # A long warmup must not postpone the first preconditioner update until a
+    # fixed fraction of the complete horizon.  On a stiff target an identity-
+    # metric BPS can otherwise enter a reflection storm before it ever reaches
+    # that first update.  Bootstrap at the historical default adaptation scale,
+    # then return to the requested interval.  Every update still uses the full
+    # cumulative warmup trace, so this changes when the first usable metric is
+    # installed, not the data used by later metric estimates.
+    initial_dt = float(initial_precond_dt)
+    expansion = float(max_scale_expansion)
+    expansion >= 1 && isfinite(expansion) || throw(ArgumentError(
+        "max_scale_expansion must be finite and at least one"))
+    d = if flow.metric isa DiagonalPreconditioner
+        length(flow.metric.scale)
+    elseif flow.metric isa DensePreconditioner
+        size(flow.metric.L, 1)
+    elseif flow.metric isa IdentityPreconditioner
+        length(flow.dynamics.μ)
+    else
+        throw(ArgumentError("diagonal adaptation requires a concrete preconditioner dimension"))
+    end
+    stickable = isnothing(can_stick) ? falses(d) : BitVector(can_stick)
+    length(stickable) == d || throw(DimensionMismatch(
+        "can_stick length $(length(stickable)) does not match dimension $d"))
+    return PreconditionerAdapter(
+        Float64(precond_dt), initial_dt, expansion, Float64(t0), 0,
+        :default, false, stickable)
 end
 
 
@@ -166,10 +217,15 @@ default_gradient_adapter(::Any, args...) = NoAdaptation()
 
 function default_adapter(flow::ContinuousDynamics, grad::GradientStrategy,
         precond_dt=10.0, t_warmup=100.0, t0=0.0;
-        can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
+        can_stick::Union{Nothing,AbstractVector{Bool}}=nothing,
+        initial_precond_dt::Real=precond_dt)
     # Explicitly pass positional args to the sub-factories
-    adpt_flow = default_dynamics_adapter(
-        flow, precond_dt, t0, t_warmup; can_stick)
+    adpt_flow = if flow isa PreconditionedDynamics
+        default_dynamics_adapter(
+            flow, precond_dt, t0, t_warmup; can_stick, initial_precond_dt)
+    else
+        default_dynamics_adapter(flow, precond_dt, t0, t_warmup; can_stick)
+    end
     adpt_grad = default_gradient_adapter(grad, t_warmup, t0)
 
     # Clean return logic
@@ -185,11 +241,14 @@ function default_warmup_adapter(flow::ContinuousDynamics,
         grad::GradientStrategy, t_warmup::Real, t0::Real=0.0;
         warmup_adaptation_interval::Union{Nothing,Real}=nothing,
         can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
-    interval = isnothing(warmup_adaptation_interval) ?
+    automatic_schedule = isnothing(warmup_adaptation_interval)
+    interval = automatic_schedule ?
         float(t_warmup) / 10 : float(warmup_adaptation_interval)
     isfinite(interval) && interval >= 0 || throw(ArgumentError(
         "warmup_adaptation_interval must be finite and nonnegative"))
-    return default_adapter(flow, grad, interval, t_warmup, t0; can_stick)
+    initial_interval = automatic_schedule ? min(interval, 10.0) : interval
+    return default_adapter(flow, grad, interval, t_warmup, t0;
+        can_stick, initial_precond_dt=initial_interval)
 end
 
 # --- 5. Boomerang Adaptation ---
@@ -615,6 +674,42 @@ did_dynamics_adapt(ad::BoomerangAdapter) = ad.did_update
 did_dynamics_adapt(seq::SequenceAdapter) = any(did_dynamics_adapt, seq.adapters)
 did_gradient_adapt(::AbstractAdapter) = false
 did_gradient_adapt(seq::SequenceAdapter) = any(did_gradient_adapt, seq.adapters)
+
+# Warmup diagnostics exposed through the sampler summary. These remain
+# allocation-free for the normal sampling loop and make the terminal
+# diagonal adaptation state auditable from summary-only R results.
+_adaptation_update_count(::AbstractAdapter) = 0
+_adaptation_update_count(ad::PreconditionerAdapter) = ad.no_updates_done
+_adaptation_update_count(ad::BoomerangAdapter) = ad.no_updates_done
+_adaptation_update_count(seq::SequenceAdapter) =
+    sum(_adaptation_update_count, seq.adapters)
+
+# Keep the two dynamics-adaptation mechanisms separately auditable.  The
+# aggregate update count remains useful for backwards compatibility, but it
+# must not make a diagonal preconditioner look like a non-adaptive flow (or
+# conflate it with Boomerang geometry updates).
+_preconditioner_update_count(::AbstractAdapter) = 0
+_preconditioner_update_count(ad::PreconditionerAdapter) = ad.no_updates_done
+_preconditioner_update_count(seq::SequenceAdapter) =
+    sum(_preconditioner_update_count, seq.adapters)
+_boomerang_update_count(::AbstractAdapter) = 0
+_boomerang_update_count(ad::BoomerangAdapter) = ad.no_updates_done
+_boomerang_update_count(seq::SequenceAdapter) =
+    sum(_boomerang_update_count, seq.adapters)
+
+_adaptation_free_time_extrema(::AbstractAdapter) = (NaN, NaN)
+function _adaptation_free_time_extrema(ad::BoomerangAdapter)
+    free_time = ad.stats.free_time
+    isempty(free_time) || return (minimum(free_time), maximum(free_time))
+    return (NaN, NaN)
+end
+function _adaptation_free_time_extrema(seq::SequenceAdapter)
+    for adapter in seq.adapters
+        extrema = _adaptation_free_time_extrema(adapter)
+        all(isfinite, extrema) && return extrema
+    end
+    return (NaN, NaN)
+end
 
 
 # --- 6. update_boomerang! implementations ---

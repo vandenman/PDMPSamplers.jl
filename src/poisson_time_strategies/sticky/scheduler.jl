@@ -32,9 +32,23 @@ function rebuild_sticky_schedule!(rng::Random.AbstractRNG, alg::StickyLoopState,
     end
 end
 
+const _progress_aggregate_clock_calls = Ref(0)
+const _progress_aggregate_clock_zero_delays = Ref(0)
+const _progress_aggregate_clock_near_zero_delays = Ref(0)
+const _progress_aggregate_clock_min_delay = Ref(Inf)
+
 function update_aggregate_unstick_time!(rng::Random.AbstractRNG, alg::AggregateStickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics, horizon::Real=Inf)
     t = state.t[]
     τ = sample_time(rng, alg.clock, flow, state, horizon, alg.can_stick)
+    # Opt-in observability for guarded diagnostics. These counters do not
+    # affect scheduling or event selection.
+    if !isempty(get(ENV, "PDMPSAMPLERS_PROGRESS_PATH", ""))
+        _progress_aggregate_clock_calls[] += 1
+        τ <= 0 && (_progress_aggregate_clock_zero_delays[] += 1)
+        τ <= 1e-12 && (_progress_aggregate_clock_near_zero_delays[] += 1)
+        _progress_aggregate_clock_min_delay[] = min(
+            _progress_aggregate_clock_min_delay[], Float64(τ))
+    end
     alg.aggregate_unstick_time = t + τ
     return alg.aggregate_unstick_time
 end

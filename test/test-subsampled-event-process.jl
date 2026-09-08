@@ -371,6 +371,9 @@ end
         cv = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0), oracle, envelope, [0.0], 4;
             subset_design=design)
+        # Each of the two strata contributes two of its three observations.
+        # The stratum count cancels: the HT factor is N/m = 6/4.
+        @test PDMPSamplers._subsampling_scale(cv) == 1.5
         state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
         B = PDMPSamplers.total_residual_bound(envelope, state, 0.0)
         D = 0.8
@@ -399,6 +402,81 @@ end
             exact = uniform_probability * subset_bound / (D + B)
             @test counts[S] / draws ≈ exact atol=0.01
         end
+    end
+
+    @testset "balanced Horvitz--Thompson expectation is elementary" begin
+        # This test is independent of OMRF gradients and the envelope code.
+        # Each tuple is (number of equal strata, stratum size,
+        # observations sampled per stratum).
+        cases = ((2, 2, 1), (3, 3, 1), (3, 4, 2), (4, 3, 3), (2, 5, 5))
+        for (n_strata, stratum_size, per_stratum) in cases
+            N = n_strata * stratum_size
+            m = n_strata * per_stratum
+            vectors = [
+                [0.3 * i - 0.2 * j + sin(i + 2j) for j in 1:3]
+                for i in 1:N]
+            choices = _enumerated_subsets(stratum_size, per_stratum)
+            subsets = Tuple{Vararg{Int}}[]
+            function visit!(stratum, current)
+                if stratum > n_strata
+                    push!(subsets, Tuple(current))
+                    return
+                end
+                offset = (stratum - 1) * stratum_size
+                for choice in choices
+                    visit!(stratum + 1,
+                        vcat(current, offset .+ collect(choice)))
+                end
+            end
+            visit!(1, Int[])
+            population = vec(sum(vectors))
+            average = zeros(3)
+            scale = N / m
+            for subset in subsets
+                average .+= scale .* vec(sum(vectors[collect(subset)]))
+            end
+            average ./= length(subsets)
+            @test average ≈ population atol=1e-12 rtol=1e-12
+            if per_stratum == stratum_size
+                @test length(subsets) == 1
+                @test scale == 1.0
+                @test average == population
+            end
+        end
+    end
+
+    @testset "runtime HT scale is shared by balanced bound and rate" begin
+        weights = reshape([0.5, 1.5, 2.0, 0.25, 0.75, 1.25], 1, :)
+        envelope = SeparableResidualEnvelope(weights,
+            (out, state, flow, t) -> fill!(out, 1.0);
+            certified_affine=true)
+        design = PDMPSamplers.balanced_stratified_subsampling_design(6, 2, 4)
+        oracle = (out, x, subset, anchor) -> fill!(out, 0.0)
+        cv = SubsampledControlVariate(
+            (out, x) -> fill!(out, 0.0), oracle, envelope, [0.0], 4;
+            subset_design=design)
+        scale = PDMPSamplers._subsampling_scale(cv)
+        @test scale == 1.5
+        rng = Random.Xoshiro(0x51ca1e)
+        D = 0.8
+        B = PDMPSamplers.total_residual_bound(envelope,
+            PDMPState(0.0, SkeletonPoint([0.0], [1.0])), 0.0)
+        subset_bound = PDMPSamplers.draw_subset!(rng, cv, D, B)
+        expected_bound = D + scale * sum(
+            envelope.scales[1] * envelope.weights[1, i] for i in cv.subset)
+        @test subset_bound ≈ expected_bound atol=1e-12 rtol=1e-12
+
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        gradient = [0.0]
+        residual = [2.0]
+        rate = PDMPSamplers.subsampling_candidate_rate!(
+            oracle, state, gradient, residual, scale,
+            BouncyParticle(1, 0.0), 0.0, cv.subset)
+        @test gradient == [2 * scale]
+        @test rate == 2 * scale
+        # The same runtime value is the only multiplier supplied to the
+        # stochastic-gradient update and accepted-rate calculation.
+        @test PDMPSamplers._subsampling_scale(cv) == scale
     end
 
     @testset "candidate lifecycle and stored reflection gradient" begin
@@ -969,7 +1047,7 @@ end
 
             @test stats.sticky_events >= 4
             @test residual_calls_while_frozen[] > 0
-            @test (trace isa PDMPSamplers.FactorizedTrace) == isfactorized(flow)
+            @test (trace isa PDMPSamplers.FactorizedTrace) == PDMPSamplers.isfactorized(flow)
             if hasproperty(trace, :free_masks)
                 frozen = findall(.!trace.free_masks[1, :])
                 @test !isempty(frozen)

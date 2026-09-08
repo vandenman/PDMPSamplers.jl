@@ -226,6 +226,16 @@ function _metric_scale_extrema(flow::DensePreconditionedZigZag)
     return minimum(diag_entries), maximum(diag_entries)
 end
 
+# Adaptive Boomerang stores the adapted Gaussian metric through the Cholesky
+# factor L of Γ.  Expose its diagonal range in the same summary field used by
+# the preconditioned linear flows.  This is queried only after warmup, so the
+# reduction is outside the sampling loop.
+function _metric_scale_extrema(flow::Union{Boomerang, MutableBoomerang})
+    flow.L === nothing && return (NaN, NaN)
+    diag_entries = diag(flow.L)
+    return minimum(diag_entries), maximum(diag_entries)
+end
+
 _safe_tightness(l_actual::Real, Λ_cell::Real) = ispositive(Λ_cell) ? l_actual / pos(Λ_cell) : NaN
 
 function _record_lazy_search_stats!(stats::AbstractStatisticCounter, proposal_attempts::Int, proposal_rejections::Int)
@@ -437,7 +447,9 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             # that determine transport and rates.
             state2_.t[] = state.t[]
             copyto!(state2_.ξ, state.ξ)
-            copyto!(state2_.free, state.free)
+            if state isa StickyPDMPState
+                copyto!(state2_.free, state.free)
+            end
             state2_.boundary_scratch.active_factor_valid = false
             move_forward_time!(state2_, τ_proposal, flow)
             _inc_counter_grid_acceptance_gradient_calls(stats)

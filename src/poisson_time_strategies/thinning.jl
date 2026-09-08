@@ -255,10 +255,11 @@ function next_event_time(rng::Random.AbstractRNG,
         _inc_counter_subsampling_aggregate_accepts(stats)
 
         result = _evaluate_subsampling_candidate!(
-            rng, cv, flow, state, alg.candidate, cache, stats, alg, τ, D, B)
+            rng, cv, flow, state, alg.candidate, cache, stats, alg, τ, D, B,
+            roof)
         if result.accepted
             _inc_counter_subsampling_final_reflections(stats)
-            return τ, :reflect, GradientMeta(result.G)
+            return τ, :reflect, GradientMeta(cache.∇ϕx)
         end
     end
 end

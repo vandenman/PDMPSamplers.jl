@@ -110,6 +110,49 @@
         @test PDMPSamplers.refresh_rate(bps3) == 0.5
     end
 
+    @testset "preconditioned BPS uses covariance-weighted reflections" begin
+        d = 3
+        gradient = [0.7, -1.1, 0.4]
+
+        diagonal = PreconditionedBPS(
+            d; refresh_rate=0.0, scale=[0.03, 1.7, 0.4])
+        diagonal_point = SkeletonPoint(
+            [0.2, -0.3, 0.1], [0.02, -1.2, 0.3])
+        diagonal_before = copy(diagonal_point.θ)
+        diagonal_energy = sum(abs2, diagonal_before ./ diagonal.metric.scale)
+        PDMPSamplers.reflect!(
+            Xoshiro(91), diagonal_point, gradient, diagonal, (; z=zeros(d)))
+        @test dot(diagonal_point.θ, gradient) ≈ -dot(diagonal_before, gradient)
+        @test sum(abs2, diagonal_point.θ ./ diagonal.metric.scale) ≈
+            diagonal_energy
+
+        L = [1.2 0.0 0.0; 0.3 0.6 0.0; -0.2 0.1 1.5]
+        dense = DensePreconditionedBPS(d; refresh_rate=0.0)
+        set_dense_preconditioner!(dense.metric, L)
+        dense_point = SkeletonPoint(
+            [0.2, -0.3, 0.1], L * [0.4, -0.8, 0.2])
+        dense_before = copy(dense_point.θ)
+        dense_canonical_before = L \ dense_before
+        PDMPSamplers.reflect!(Xoshiro(92), dense_point, gradient, dense,
+            (; z=zeros(d), tmp=zeros(d)))
+        @test dot(dense_point.θ, gradient) ≈ -dot(dense_before, gradient)
+        @test sum(abs2, L \ dense_point.θ) ≈
+            sum(abs2, dense_canonical_before)
+
+        sticky = StickyPDMPState(
+            Ref(0.0), SkeletonPoint([0.2, 0.0, 0.1], [0.02, 0.0, 0.3]),
+            BitVector([true, false, true]))
+        sticky_before = copy(sticky.ξ.θ)
+        free = sticky.free
+        PDMPSamplers.reflect!(
+            Xoshiro(93), sticky, gradient, diagonal, (; z=zeros(d)))
+        @test dot(sticky.ξ.θ[free], gradient[free]) ≈
+            -dot(sticky_before[free], gradient[free])
+        @test sticky.ξ.θ[.!free] == sticky_before[.!free]
+        @test sum(abs2, sticky.ξ.θ[free] ./ diagonal.metric.scale[free]) ≈
+            sum(abs2, sticky_before[free] ./ diagonal.metric.scale[free])
+    end
+
     @testset "PreconditionedZigZag/BPS Γ,μ constructors" begin
         d = 3
         Γ = Matrix{Float64}(2I, d, d)
@@ -235,6 +278,27 @@
         @test length(v) == d
         # Velocities should be ±scale_i (not ±1)
         @test all(abs.(v) .∈ Ref([2.0, 3.0, 4.0]))
+
+        # Physical BPS velocities must have covariance M*M'. This guards the
+        # saved-state performance audits against manually supplying canonical
+        # N(0,I) velocities to a diagonally preconditioned flow.
+        scales = [0.35, 1.4, 2.2]
+        bps = PreconditionedBPS(d; scale=scales, refresh_rate=0.0)
+        rng = Xoshiro(90210)
+        draws = 40_000
+        first_moment = zeros(d)
+        second_moment = zeros(d, d)
+        for _ in 1:draws
+            physical_velocity = PDMPSamplers.initialize_velocity(rng, bps, d)
+            first_moment .+= physical_velocity
+            mul!(second_moment, physical_velocity,
+                transpose(physical_velocity), 1.0, 1.0)
+        end
+        first_moment ./= draws
+        covariance = second_moment ./ draws .-
+            first_moment * transpose(first_moment)
+        @test diag(covariance) ≈ scales .^ 2 rtol=0.035
+        @test maximum(abs, covariance - Diagonal(diag(covariance))) < 0.035
     end
 
     @testset "refresh_velocity! applies preconditioner" begin
@@ -287,6 +351,16 @@
         pzz2 = PreconditionedZigZag(d)
         PDMPSamplers.update_preconditioner!(pzz2, trace, state, true)
         @test pzz2.metric.scale != ones(d)
+
+        # Later noisy estimates may shrink freely, but a single update must not
+        # expand a diagonal scale by more than the configured factor.
+        wide_events = [
+            PDMPEvent(Float64(i), fill(100.0 * i, d), ones(d)) for i in 0:10
+        ]
+        wide_trace = PDMPSamplers.PDMPTrace(wide_events, pzz)
+        fill!(pzz.metric.scale, 1.0)
+        PDMPSamplers.update_preconditioner!(pzz, wide_trace, state, false, 2.0)
+        @test pzz.metric.scale == fill(2.0, d)
     end
 
     @testset "update_preconditioner! DiagonalPreconditioner zero sigma" begin
@@ -302,6 +376,54 @@
         # Should not error; zero sigma should use old_scale / 2
         @test all(isfinite, pzz.metric.scale)
         @test all(pzz.metric.scale .> 0)
+    end
+
+    @testset "sticky coordinates are excluded from diagonal adaptation" begin
+        d = 3
+        events = [
+            PDMPEvent(Float64(i), [0.0, 2.0 * i, 3.0 * i], randn(d))
+            for i in 0:10
+        ]
+        trace = PDMPSamplers.PDMPTrace(events, PreconditionedZigZag(d))
+        state = PDMPState(5.0, SkeletonPoint(randn(d), randn(d)))
+        flow = PreconditionedZigZag(d; scale=[0.75, 1.25, 1.0])
+        initial = copy(flow.metric.scale)
+        mask = BitVector([true, false, false])
+
+        PDMPSamplers.update_preconditioner!(flow, trace, state, false, 2.0, mask)
+        @test flow.metric.scale[1] == initial[1]
+        @test flow.metric.scale[2] != initial[2]
+        @test flow.metric.scale[3] != initial[3]
+        @test all(isfinite, flow.metric.scale)
+        @test all(>(0), flow.metric.scale)
+
+        # A second update while the sticky coordinate remains frozen must not
+        # halve it; zero variance is not a reason to collapse its metric.
+        PDMPSamplers.update_preconditioner!(flow, trace, state, false, 2.0, mask)
+        @test flow.metric.scale[1] == initial[1]
+    end
+
+    @testset "non-finite empirical scales are explicit errors" begin
+        d = 2
+        events = [
+            PDMPEvent(0.0, [NaN, 0.0], [1.0, 1.0]),
+            PDMPEvent(1.0, [NaN, 1.0], [1.0, 1.0]),
+        ]
+        trace = PDMPSamplers.PDMPTrace(events, PreconditionedZigZag(d))
+        flow = PreconditionedZigZag(d)
+        state = PDMPState(1.0, SkeletonPoint([0.0, 0.0], [1.0, 1.0]))
+        @test_throws DomainError PDMPSamplers.update_preconditioner!(
+            flow, trace, state)
+    end
+
+    @testset "preconditioner adapter preserves the sticky mask" begin
+        flow = PreconditionedZigZag(3)
+        mask = BitVector([true, false, true])
+        adapter = PDMPSamplers.default_dynamics_adapter(
+            flow, 10.0, 0.0, 50.0; can_stick=mask)
+        @test adapter.can_stick == mask
+        @test PDMPSamplers.default_dynamics_adapter(
+            flow, 10.0, 0.0, 50.0; can_stick=falses(3)).can_stick == falses(3)
     end
 
     @testset "update_preconditioner! DiagonalPreconditioner with StickyPDMPState" begin

@@ -8,9 +8,10 @@ synchronizes its active beta set through `set_active_set!`. The full posterior
 must contain the complete coherent slab represented by `slab_provider`.
 Likelihood and nuisance-prior terms are therefore preserved exactly.
 """
-mutable struct DependentSlabTarget{PG,S<:AbstractSlabPrior,O<:AbstractModelPrior} <: Function
+mutable struct DependentSlabTarget{PG,PH,S<:AbstractSlabPrior,O<:AbstractModelPrior} <: Function
     d::Int
     posterior_grad!::PG
+    posterior_hvp::PH
     slab_provider::S
     model_prior::O
     free::BitVector
@@ -42,6 +43,7 @@ function DependentSlabTarget(
     slab_provider::AbstractSlabPrior,
     model_prior::AbstractModelPrior;
     initial_free::BitVector=trues(Int(d)),
+    posterior_hvp=nothing,
 )
     d_int = Int(d)
     ispositive(d_int) || throw(ArgumentError("d must be positive"))
@@ -53,6 +55,7 @@ function DependentSlabTarget(
     return DependentSlabTarget(
         d_int,
         posterior_grad!,
+        posterior_hvp,
         slab_provider,
         model_prior,
         copy(initial_free),
@@ -71,6 +74,8 @@ function Base.copy(target::DependentSlabTarget)
         _copy_callable(target.slab_provider),
         _copy_callable(target.model_prior);
         initial_free=copy(target.free),
+        posterior_hvp=isnothing(target.posterior_hvp) ? nothing :
+            _copy_callable(target.posterior_hvp),
     )
     return copied
 end
@@ -90,6 +95,7 @@ function set_active_set!(target::DependentSlabTarget, free::BitVector)
     length(free) == target.d || throw(DimensionMismatch("active set length $(length(free)) does not match target dimension $(target.d)"))
     copyto!(target.free, free)
     set_active_set!(target.posterior_grad!, free)
+    isnothing(target.posterior_hvp) || set_active_set!(target.posterior_hvp, free)
     set_active_set!(target.slab_provider, free)
     return nothing
 end
@@ -147,10 +153,68 @@ function _dependent_slab_hvp(target::DependentSlabTarget; step::Real=sqrt(eps(Fl
     return _DependentSlabFiniteDiffHVP(copy(target), zeros(d), zeros(d), zeros(d), zeros(d), Float64(step))
 end
 
+struct _DependentSlabAnalyticHVP{T<:DependentSlabTarget} <: Function
+    target::T
+    posterior_buf::Vector{Float64}
+    all_active_slab_buf::Vector{Float64}
+    slab_buf::Vector{Float64}
+end
+
+struct _DependentSlabAnalyticVHV{H<:_DependentSlabAnalyticHVP} <: Function
+    hvp!::H
+    hv_buf::Vector{Float64}
+end
+
+Base.copy(h::_DependentSlabAnalyticHVP) = _DependentSlabAnalyticHVP(
+    copy(h.target), similar(h.posterior_buf), similar(h.all_active_slab_buf),
+    similar(h.slab_buf))
+Base.copy(v::_DependentSlabAnalyticVHV) =
+    _DependentSlabAnalyticVHV(copy(v.hvp!), similar(v.hv_buf))
+_copy_callable(h::_DependentSlabAnalyticHVP) = copy(h)
+_copy_callable(v::_DependentSlabAnalyticVHV) = copy(v)
+set_active_set!(h::_DependentSlabAnalyticHVP, free::BitVector) =
+    set_active_set!(h.target, free)
+set_active_set!(v::_DependentSlabAnalyticVHV, free::BitVector) =
+    set_active_set!(v.hvp!, free)
+
+function (h::_DependentSlabAnalyticHVP)(out::AbstractVector,
+        x::AbstractVector, direction::AbstractVector)
+    target = h.target
+    indices = beta_indices(target.slab_provider)
+    @inbounds for k in eachindex(indices)
+        target.active_beta[k] = target.free[indices[k]]
+    end
+    copyto!(h.posterior_buf, target.posterior_hvp(x, direction))
+    active_prior_hvp!(target.slab_provider, h.all_active_slab_buf, x,
+        direction, target.all_active_beta)
+    active_prior_hvp!(target.slab_provider, h.slab_buf, x, direction,
+        target.active_beta)
+    @. out = h.posterior_buf - h.all_active_slab_buf + h.slab_buf
+    return out
+end
+
+function (v::_DependentSlabAnalyticVHV)(x::AbstractVector,
+        direction::AbstractVector, weight::AbstractVector)
+    v.hvp!(v.hv_buf, x, direction)
+    return dot(weight, v.hv_buf)
+end
+
+_has_analytic_active_prior_hvp(::AbstractSlabPrior) = false
+_has_analytic_active_prior_hvp(::LogLinearGaussianScaleSlab) = true
+
+function _dependent_slab_analytic_hvp(target::DependentSlabTarget)
+    d = target.d
+    return _DependentSlabAnalyticHVP(copy(target), zeros(d), zeros(d), zeros(d))
+end
+
 function PDMPModel(target::DependentSlabTarget; hvp::Bool=false)
     if hvp
-        hvp! = _dependent_slab_hvp(target)
-        vhv = _DependentSlabFiniteDiffVHV(copy(hvp!), zeros(target.d))
+        analytic = !isnothing(target.posterior_hvp) &&
+            _has_analytic_active_prior_hvp(target.slab_provider)
+        hvp! = analytic ? _dependent_slab_analytic_hvp(target) :
+            _dependent_slab_hvp(target)
+        vhv = analytic ? _DependentSlabAnalyticVHV(copy(hvp!), zeros(target.d)) :
+            _DependentSlabFiniteDiffVHV(copy(hvp!), zeros(target.d))
         return PDMPModel(target.d, FullGradient(target), hvp!, vhv, true, true)
     end
     return PDMPModel(target.d, FullGradient(target), nothing)

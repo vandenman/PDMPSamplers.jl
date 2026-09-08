@@ -1,8 +1,12 @@
 struct IdentityPreconditioner <: AbstractPreconditioner end
 
-struct DiagonalPreconditioner{T<:AbstractVector{<:Real}} <: AbstractPreconditioner
+mutable struct DiagonalPreconditioner{T<:AbstractVector{<:Real}} <: AbstractPreconditioner
     scale::T
+    generation::UInt
 end
+
+DiagonalPreconditioner(scale::T) where {T<:AbstractVector{<:Real}} =
+    DiagonalPreconditioner{T}(scale, zero(UInt))
 
 mutable struct DensePreconditioner <: AbstractPreconditioner
     L::Matrix{Float64}
@@ -51,7 +55,8 @@ function DensePreconditioner(d::Integer)
 end
 
 subpreconditioner(pd::IdentityPreconditioner, ::BitVector) = pd
-subpreconditioner(pd::DiagonalPreconditioner, free::BitVector) = DiagonalPreconditioner(view(pd.scale, free))
+subpreconditioner(pd::DiagonalPreconditioner, free::BitVector) =
+    DiagonalPreconditioner(view(pd.scale, free))
 function subpreconditioner(pd::DensePreconditioner, free::BitVector)
     ΣF = (pd.L * transpose(pd.L))[free, free]
     DensePreconditioner(cholesky(Symmetric(ΣF)).L)
@@ -77,27 +82,57 @@ struct PreconditionedDynamics{P <: AbstractPreconditioner, D <: ContinuousDynami
 end
 
 update_preconditioner!(::Random.AbstractRNG, flow::ContinuousDynamics, ::AbstractPDMPTrace, state::AbstractPDMPState) = flow
+update_preconditioner!(::Random.AbstractRNG, flow::ContinuousDynamics,
+        ::AbstractPDMPTrace, ::AbstractPDMPState, args...) = flow
 update_preconditioner!(flow::ContinuousDynamics, trace::AbstractPDMPTrace, state::AbstractPDMPState, args...) = update_preconditioner!(Random.default_rng(), flow, trace, state, args...)
 
-function update_preconditioner!(rng::Random.AbstractRNG, flow::PreconditionedDynamics{<:DiagonalPreconditioner}, trace::AbstractPDMPTrace, state::AbstractPDMPState, first_update::Bool = false)
+function update_preconditioner!(rng::Random.AbstractRNG,
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner},
+        trace::AbstractPDMPTrace, state::AbstractPDMPState,
+        first_update::Bool=false, max_scale_expansion::Real=Inf,
+        can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
     sigmas = Statistics.std(trace)
+    if can_stick !== nothing
+        length(can_stick) == length(sigmas) || throw(DimensionMismatch(
+            "can_stick length $(length(can_stick)) does not match trace dimension $(length(sigmas))"))
+    end
     for i in eachindex(sigmas)
 
         old_scale = flow.metric.scale[i]
-        if iszero(sigmas[i])
-            new_scale = old_scale / 2.0
+        isfinite(old_scale) && old_scale > 0 || throw(DomainError(old_scale,
+            "diagonal preconditioner scales must be finite and positive"))
+
+        # A coordinate governed by a sticky spike is exactly constant while it
+        # is excluded.  Its zero empirical variance is therefore not evidence
+        # for a smaller dynamical scale.  Keep sticky coordinates fixed during
+        # diagonal warmup; nuisance coordinates retain the historical update.
+        if can_stick !== nothing && can_stick[i]
+            new_scale = old_scale
+        elseif iszero(sigmas[i])
+            new_scale = max(old_scale / 2.0, eps(Float64))
+        elseif isfinite(sigmas[i]) && sigmas[i] > 0
+            new_scale = first_update ? sigmas[i] :
+                min(sigmas[i], max_scale_expansion * old_scale)
         else
-            new_scale = sigmas[i]
+            throw(DomainError(sigmas[i],
+                "diagonal preconditioner update received a non-finite empirical scale"))
         end
 
         flow.metric.scale[i] = new_scale
     end
+    all(isfinite, flow.metric.scale) && all(>(0), flow.metric.scale) ||
+        throw(DomainError(flow.metric.scale,
+            "diagonal preconditioner update produced an invalid scale"))
+    flow.metric.generation += one(UInt)
     _invalidate_boundary_velocity_cache!(state)
     draw_stratum_velocity!(rng, state, flow)
     flow
 end
 
-function update_preconditioner!(rng::Random.AbstractRNG, flow::PreconditionedDynamics{DensePreconditioner}, trace::AbstractPDMPTrace, state::AbstractPDMPState, first_update::Bool = false)
+function update_preconditioner!(rng::Random.AbstractRNG,
+        flow::PreconditionedDynamics{DensePreconditioner},
+        trace::AbstractPDMPTrace, state::AbstractPDMPState,
+        first_update::Bool=false, max_scale_expansion::Real=Inf)
     M = flow.metric
     Σ_est = Statistics.cov(trace)
     d = size(Σ_est, 1)
@@ -119,6 +154,24 @@ function update_preconditioner!(rng::Random.AbstractRNG, flow::PreconditionedDyn
     _invalidate_boundary_velocity_cache!(state)
     draw_stratum_velocity!(rng, state, flow)
     flow
+end
+
+# A dense covariance update cannot treat a sticky coordinate as an ordinary
+# continuously varying Gaussian coordinate: cross-covariances couple the
+# coordinates. Do not silently apply the historical dense update when a
+# sticky mask is supplied.
+function update_preconditioner!(rng::Random.AbstractRNG,
+        flow::PreconditionedDynamics{DensePreconditioner},
+        trace::AbstractPDMPTrace, state::AbstractPDMPState,
+        first_update::Bool, max_scale_expansion::Real,
+        can_stick::Union{Nothing,AbstractVector{Bool}})
+    if can_stick !== nothing && any(can_stick)
+        throw(ArgumentError(
+            "sticky-aware adaptation is unsupported for DensePreconditioner; " *
+            "use diagonal preconditioning or provide an explicit dense sticky policy"))
+    end
+    update_preconditioner!(rng, flow, trace, state, first_update,
+        max_scale_expansion)
 end
 
 _draw_canonical_velocity!(rng, velocity, ::ZigZag) =
@@ -167,9 +220,107 @@ function rate_and_derivative(
     return rate_and_derivative(state, flow.dynamics, provider, cached_gradient)
 end
 
-# 3. Reflection Logic (Mirroring is invariant)
-reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, ξ, ∇ϕ, pd.dynamics, cache)
-reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVector, pd::PreconditionedDynamics, cache) = reflect!(rng, state, ∇ϕ, pd.dynamics, cache)
+# 3. Reflection logic
+# A BPS velocity refreshed through a preconditioner M has covariance Σ=M*M'.
+# Its bounce must therefore use the Σ-weighted reflection
+# v <- v - 2(v'g)/(g'Σg) Σg.  Forwarding to the Euclidean BPS reflection is
+# only valid for the identity preconditioner.  In particular, an Euclidean
+# reflection can transfer an O(1) velocity into a coordinate whose adapted
+# scale is tiny, producing pathological event rates and the wrong invariant
+# velocity distribution.
+reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector,
+    pd::PreconditionedDynamics, cache) =
+    reflect!(rng, ξ, ∇ϕ, pd.dynamics, cache)
+reflect!(rng::Random.AbstractRNG, state::AbstractPDMPState, ∇ϕ::AbstractVector,
+    pd::PreconditionedDynamics, cache) =
+    reflect!(rng, state, ∇ϕ, pd.dynamics, cache)
+
+function reflect!(::Random.AbstractRNG, ξ::SkeletonPoint,
+        ∇ϕ::AbstractVector,
+        pd::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+        cache)
+    Σg = cache.z
+    denominator = zero(eltype(ξ.θ))
+    @inbounds for i in eachindex(ξ.θ, ∇ϕ, pd.metric.scale)
+        Σg[i] = abs2(pd.metric.scale[i]) * ∇ϕ[i]
+        denominator += ∇ϕ[i] * Σg[i]
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * dot(ξ.θ, ∇ϕ) / denominator
+    @inbounds for i in eachindex(ξ.θ, Σg)
+        ξ.θ[i] -= coefficient * Σg[i]
+    end
+    return nothing
+end
+
+function reflect!(::Random.AbstractRNG, state::StickyPDMPState,
+        ∇ϕ::AbstractVector,
+        pd::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+        cache)
+    Σg = cache.z
+    numerator = zero(eltype(state.ξ.θ))
+    denominator = zero(eltype(state.ξ.θ))
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ,
+                                  pd.metric.scale)
+        if state.free[i]
+            numerator += state.ξ.θ[i] * ∇ϕ[i]
+            Σg[i] = abs2(pd.metric.scale[i]) * ∇ϕ[i]
+            denominator += ∇ϕ[i] * Σg[i]
+        end
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * numerator / denominator
+    @inbounds for i in eachindex(state.free, state.ξ.θ, Σg)
+        state.free[i] && (state.ξ.θ[i] -= coefficient * Σg[i])
+    end
+    return nothing
+end
+
+function reflect!(::Random.AbstractRNG, ξ::SkeletonPoint,
+        ∇ϕ::AbstractVector,
+        pd::PreconditionedDynamics{DensePreconditioner,<:BouncyParticle},
+        cache)
+    transformed_gradient = cache.z
+    Σg = cache.tmp
+    mul!(transformed_gradient, transpose(pd.metric.L), ∇ϕ)
+    mul!(Σg, pd.metric.L, transformed_gradient)
+    denominator = dot(∇ϕ, Σg)
+    iszero(denominator) && return nothing
+    coefficient = 2 * dot(ξ.θ, ∇ϕ) / denominator
+    LinearAlgebra.axpy!(-coefficient, Σg, ξ.θ)
+    return nothing
+end
+
+function reflect!(::Random.AbstractRNG, state::StickyPDMPState,
+        ∇ϕ::AbstractVector,
+        pd::PreconditionedDynamics{DensePreconditioner,<:BouncyParticle},
+        cache)
+    # Zeroing the frozen entries before multiplication selects the marginal
+    # covariance block Σ_FF required by the active stratum.
+    masked_gradient = cache.z
+    Σg = cache.tmp
+    @inbounds for i in eachindex(state.free, ∇ϕ, masked_gradient)
+        masked_gradient[i] = ifelse(state.free[i], ∇ϕ[i], zero(eltype(∇ϕ)))
+    end
+    mul!(Σg, transpose(pd.metric.L), masked_gradient)
+    mul!(masked_gradient, pd.metric.L, Σg)
+    numerator = zero(eltype(state.ξ.θ))
+    denominator = zero(eltype(state.ξ.θ))
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ,
+                                  masked_gradient)
+        if state.free[i]
+            numerator += state.ξ.θ[i] * ∇ϕ[i]
+            denominator += ∇ϕ[i] * masked_gradient[i]
+        end
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * numerator / denominator
+    @inbounds for i in eachindex(state.free, state.ξ.θ, masked_gradient)
+        state.free[i] &&
+            (state.ξ.θ[i] -= coefficient * masked_gradient[i])
+    end
+    return nothing
+end
 
 
 # 4. Hitting Times (Geometry is invariant)
@@ -464,3 +615,14 @@ function default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGau
                                          flow::PreconditionedDynamics)
     return SummedRateClock(provider, model_prior)
 end
+
+# A diagonal preconditioner changes the invariant physical velocity law, but
+# movement is still delegated to the underlying Boomerang and hence remains
+# harmonic.  The certified Fourier clock uses the underlying Boomerang only
+# for those harmonic coefficients and the complete wrapper for boundary-clock
+# constants, so the metric is neither omitted nor applied twice.
+default_aggregate_unstick_clock(
+    provider::AbstractLogLinearIndependentGaussianSlab,
+    model_prior::AbstractModelPrior,
+    ::PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang},
+) = HarmonicLogLinearAggregateClock(provider, model_prior)

@@ -337,6 +337,24 @@ function record_event!(mgr::TraceManager, state, flow, args, phase::Symbol)
     return nothing
 end
 
+# Dynamics adaptation may replace every velocity at an event time.  Store that
+# zero-duration discontinuity explicitly; otherwise the next occupation-moment
+# calculation integrates the following segment with the pre-adaptation
+# velocity.  A factorized trace represents a full velocity replacement as one
+# same-time event per coordinate.
+function record_dynamics_adaptation!(mgr::TraceManager, state, flow,
+        phase::Symbol)
+    trace = phase === :warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
+    if trace isa FactorizedTrace
+        for i in eachindex(state.ξ.x)
+            push_trace!(trace, state, flow, i)
+        end
+    else
+        push_trace!(trace, state, flow, nothing)
+    end
+    return nothing
+end
+
 # Helper to handle the "Factorized" vs "Standard" check cleanly
 # function push_trace!(trace, state, flow, args)
 #     # @show args, isnothing(args)

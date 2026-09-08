@@ -905,6 +905,80 @@ function active_prior_grad!(provider::LogLinearGaussianScaleSlab,
     return out
 end
 
+"""
+    active_prior_hvp!(provider, out, x, direction, active_beta)
+
+Write the exact directional derivative of `active_prior_grad!` for the compact
+log-linear Gaussian scale slab.  This is allocation-free and follows the same
+full-state coordinate layout as the gradient routine.
+"""
+function active_prior_hvp!(provider::LogLinearGaussianScaleSlab,
+        out::AbstractVector, x::AbstractVector, direction::AbstractVector,
+        active_beta::BitVector)
+    indices = beta_indices(provider)
+    length(out) == length(x) == length(direction) || throw(DimensionMismatch(
+        "HVP output, state, and direction lengths must agree"))
+    length(active_beta) == length(indices) || throw(DimensionMismatch(
+        "active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    fill!(out, zero(eltype(out)))
+    @inbounds for j in eachindex(indices)
+        active_beta[j] || continue
+        beta_index = indices[j]
+        beta = x[beta_index]
+        inv_s2 = exp(-2 * _loglinear_log_scale(provider, x, j))
+        deta = zero(eltype(out))
+        for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
+            deta += provider.nzval[ptr] *
+                direction[provider.logscale_indices[provider.colidx[ptr]]]
+        end
+        beta_direction = direction[beta_index]
+        out[beta_index] += inv_s2 * beta_direction -
+            2 * beta * inv_s2 * deta
+        scale_direction = -2 * beta * inv_s2 * beta_direction +
+            2 * beta^2 * inv_s2 * deta
+        for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
+            out[provider.logscale_indices[provider.colidx[ptr]]] +=
+                provider.nzval[ptr] * scale_direction
+        end
+    end
+    return out
+end
+
+_fixed_exchangeable_mean(provider::ExchangeableGaussianSlab) = provider.mean
+_fixed_exchangeable_mean(::ZeroMeanExchangeableGaussianSlab) = 0.0
+
+function active_prior_grad!(provider::Union{
+        ExchangeableGaussianSlab,ZeroMeanExchangeableGaussianSlab},
+        out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+    indices = beta_indices(provider)
+    length(out) == length(x) ||
+        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
+    length(active_beta) == length(indices) ||
+        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
+    fill!(out, 0.0)
+    maximum(indices) <= length(out) ||
+        throw(DimensionMismatch("beta indices exceed full-state output length $(length(out))"))
+
+    k = _active_count(active_beta)
+    iszero(k) && return out
+    μ = _fixed_exchangeable_mean(provider)
+    centered_sum = zero(eltype(out))
+    @inbounds for j in eachindex(indices, active_beta)
+        active_beta[j] && (centered_sum += x[indices[j]] - μ)
+    end
+
+    # (uI + v11')^-1 z = z/u - v*sum(z)/(u*(u + k*v)) 1.
+    common = provider.v * centered_sum /
+        (provider.u * (provider.u + k * provider.v))
+    inv_u = inv(provider.u)
+    @inbounds for j in eachindex(indices, active_beta)
+        if active_beta[j]
+            out[indices[j]] = (x[indices[j]] - μ) * inv_u - common
+        end
+    end
+    return out
+end
+
 function active_prior_grad!(provider::GlobalLogscaleExchangeableGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     length(out) == length(x) ||

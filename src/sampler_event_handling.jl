@@ -77,7 +77,10 @@ function _handle_global_event_impl!(
 )
     gradient_strategy = model_or_gradient isa PDMPModel ? model_or_gradient.grad : model_or_gradient
     move_forward_time!(state, τ, flow)
+    _validation_t0 = time_ns()
     validate_state(state, flow, "after moving forward in time")
+    event_type === :reflect && _inc_counter_reflection_state_validation_seconds(
+        stats, (time_ns() - _validation_t0) * 1.0e-9)
 
     needs_saving = false
     saving_args = nothing
@@ -85,6 +88,7 @@ function _handle_global_event_impl!(
 
     if event_type == :reflect
         _inc_counter_reflections_events(stats)
+        _reflection_t0 = time_ns()
 
         if alg isa ExactStrategy
             _inc_counter_reflections_accepted(stats)
@@ -94,23 +98,47 @@ function _handle_global_event_impl!(
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
                 saving_args = i
             else
+                _gradient_t0 = time_ns()
                 ∇ϕx = _compute_exact_reflection_gradient!(state, gradient_strategy, flow, cache, alg, τ, wrap_boundary)
+                _inc_counter_reflection_gradient_seconds(stats,
+                    (time_ns() - _gradient_t0) * 1.0e-9)
+                _covariance_t0 = time_ns()
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
+                _inc_counter_reflection_covariance_seconds(stats,
+                    (time_ns() - _covariance_t0) * 1.0e-9)
             end
             needs_saving = true
-            (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
+            if _is_sticky_loop_state(alg) && state isa StickyPDMPState
+                _schedule_t0 = time_ns()
+                _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
+                _inc_counter_reflection_sticky_schedule_seconds(stats,
+                    (time_ns() - _schedule_t0) * 1.0e-9)
+            end
         else
+            _gradient_t0 = time_ns()
             ∇ϕx = _compute_reflection_gradient!(state, gradient_strategy, flow, cache, meta, alg, τ, wrap_boundary)
+            _inc_counter_reflection_gradient_seconds(stats,
+                (time_ns() - _gradient_t0) * 1.0e-9)
 
             if accept_reflection_event(rng, alg, state, ∇ϕx, flow, τ, cache, meta)
                 _inc_counter_reflections_accepted(stats)
+                _covariance_t0 = time_ns()
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
+                _inc_counter_reflection_covariance_seconds(stats,
+                    (time_ns() - _covariance_t0) * 1.0e-9)
                 needs_saving = true
-                (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
+                if _is_sticky_loop_state(alg) && state isa StickyPDMPState
+                    _schedule_t0 = time_ns()
+                    _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
+                    _inc_counter_reflection_sticky_schedule_seconds(stats,
+                        (time_ns() - _schedule_t0) * 1.0e-9)
+                end
             else
                 _set_counter_last_rejected(stats, true)
             end
         end
+        _inc_counter_reflection_update_seconds(stats,
+            (time_ns() - _reflection_t0) * 1.0e-9)
 
     elseif event_type == :refresh
         refresh_velocity!(rng, state, flow)
@@ -119,7 +147,9 @@ function _handle_global_event_impl!(
         (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
+        _sticky_t0 = time_ns()
         _inc_counter_sticky_events(stats)
+        _inc_counter_sticky_boundary_events(stats)
         i = meta.i
         was_free = state.free[i]
         transition_accepted = stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
@@ -144,6 +174,8 @@ function _handle_global_event_impl!(
         if isfactorized(flow)
             saving_args = i
         end
+        _inc_counter_sticky_update_seconds(stats,
+            (time_ns() - _sticky_t0) * 1.0e-9)
 
     elseif event_type == :horizon_hit
         (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
