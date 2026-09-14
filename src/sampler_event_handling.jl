@@ -171,11 +171,21 @@ function _handle_global_event_impl!(
         validate_state(state, flow, "after stick_or_unstick!")
         needs_saving = transition_accepted
         transition_accepted || _set_counter_last_rejected(stats, true)
-        if isfactorized(flow)
-            saving_args = i
-        end
+        # Preserve the changed coordinate for typed streaming output. Dense
+        # global traces still expand this into a full state in record_event!.
+        saving_args = i
         _inc_counter_sticky_update_seconds(stats,
             (time_ns() - _sticky_t0) * 1.0e-9)
+
+    elseif event_type == :anchor_selection_boundary
+        # A position-bank boundary is computational only.  The state has
+        # already been transported to the exact boundary above; the adapter
+        # changes the live control variate after this handler returns.  It is
+        # neither a rejected proposal nor a graph/refresh event.
+        (_is_sticky_loop_state(alg) && state isa StickyPDMPState) &&
+            _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
+        needs_saving = true
+        isfactorized(flow) && (saving_args = first(eachindex(state.ξ.x)))
 
     elseif event_type == :horizon_hit
         (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
@@ -185,10 +195,8 @@ function _handle_global_event_impl!(
     end
 
     _check_sticky_times!(alg, state)
-    # Dense sticky traces need a complete state snapshot.  A factorized flow
-    # instead needs the changed coordinate so its sparse trace can replay the
-    # event exactly (including stick/un-stick transitions).
-    (_is_sticky_loop_state(alg) && !isfactorized(flow)) && (saving_args = nothing)
+    # Preserve the sticky coordinate for typed output. The legacy dense trace
+    # normalizes it to a full snapshot in `record_event!`.
     return needs_saving, saving_args
 end
 

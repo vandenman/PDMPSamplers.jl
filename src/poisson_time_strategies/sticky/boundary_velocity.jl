@@ -2,6 +2,23 @@ function unstick_rate_constant end
 function draw_stratum_velocity! end
 function propose_boundary_velocity! end
 
+# Velocity-preserving sticky kernel used by the diagonal production flows.
+# Dense/correlated representations keep the historical boundary proposal until
+# a corresponding conditional construction is derived.
+_velocity_preserving_sticky(::ContinuousDynamics) = false
+_velocity_preserving_sticky(::ZigZag) = true
+_velocity_preserving_sticky(::BouncyParticle) = true
+_velocity_preserving_sticky(::PreconditionedDynamics{
+    <:Union{IdentityPreconditioner,DiagonalPreconditioner},<:ZigZag}) = true
+_velocity_preserving_sticky(::PreconditionedDynamics{
+    <:Union{IdentityPreconditioner,DiagonalPreconditioner},<:BouncyParticle}) = true
+_velocity_preserving_sticky(::Boomerang{U,T,S,LT}) where {U,T,S,LT<:Diagonal} = true
+_velocity_preserving_sticky(::MutableBoomerang{U,T,S,LT,ET}) where
+    {U,T,S,LT<:Diagonal,ET} = true
+_velocity_preserving_sticky(flow::PreconditionedDynamics{
+    <:Union{IdentityPreconditioner,DiagonalPreconditioner},<:AnyBoomerang}) =
+    _velocity_preserving_sticky(flow.dynamics)
+
 function _boomerang_covariance_entry(flow::AnyBoomerang, i::Integer, j::Integer)
     ΣL = flow.ΣL
     # Σ = ΣL * ΣL', hence Σ[i,j] is the dot product of rows i and j.
@@ -323,10 +340,98 @@ _gaussian_covariance_entry(flow::PreconditionedDynamics{<:AbstractPreconditioner
     <:Union{BouncyParticle,AnyBoomerang}}, i::Integer, j::Integer) =
     _preconditioned_gaussian_covariance_entry(flow, i, j)
 
+@inline _physical_velocity_sd(::ZigZag, ::Integer) = 1.0
+@inline _physical_velocity_sd(::BouncyParticle, ::Integer) = 1.0
+@inline _physical_velocity_sd(flow::AnyBoomerang, i::Integer) =
+    sqrt(_boomerang_covariance_entry(flow, i, i))
+@inline _physical_velocity_sd(flow::PreconditionedDynamics{
+        IdentityPreconditioner,<:ZigZag}, ::Integer) = 1.0
+@inline _physical_velocity_sd(flow::PreconditionedDynamics{
+        <:DiagonalPreconditioner,<:ZigZag}, i::Integer) =
+    abs(Float64(flow.metric.scale[i]))
+@inline _physical_velocity_sd(flow::PreconditionedDynamics{
+        <:Union{IdentityPreconditioner,DiagonalPreconditioner},
+        <:Union{BouncyParticle,AnyBoomerang}}, i::Integer) =
+    sqrt(_preconditioned_gaussian_covariance_entry(flow, i, i))
+
+function _initialize_preserved_sticky_velocity!(rng::Random.AbstractRNG,
+        state::StickyPDMPState, flow::ContinuousDynamics)
+    _velocity_preserving_sticky(flow) || return draw_stratum_velocity!(rng, state, flow)
+    @inbounds for i in eachindex(state.free, state.ξ.θ, state.stored_velocity)
+        if state.free[i]
+            state.stored_velocity[i] = 0.0
+        elseif iszero(state.stored_velocity[i])
+            σ = _physical_velocity_sd(flow, i)
+            if flow isa ZigZag || (flow isa PreconditionedDynamics && flow.dynamics isa ZigZag)
+                state.stored_velocity[i] = rand(rng, Bool) ? σ : -σ
+            else
+                state.stored_velocity[i] = σ * randn(rng)
+            end
+        end
+    end
+    return state
+end
+
+@inline function _freeze_preserved_velocity!(state::StickyPDMPState, i::Integer)
+    state.stored_velocity[i] = Float64(state.ξ.θ[i])
+    state.ξ.x[i] = 0.0
+    state.ξ.θ[i] = 0.0
+    state.free[i] = false
+    _invalidate_active_stratum_cache!(state)
+    return true
+end
+
+@inline function _release_preserved_velocity!(state::StickyPDMPState, i::Integer)
+    state.ξ.x[i] = 0.0
+    state.ξ.θ[i] = state.stored_velocity[i]
+    state.stored_velocity[i] = 0.0
+    state.free[i] = true
+    _invalidate_active_stratum_cache!(state)
+    return true
+end
+
+function _refresh_preserved_sticky_velocity!(rng::Random.AbstractRNG,
+        state::StickyPDMPState, flow::ContinuousDynamics)
+    if flow isa ZigZag || (flow isa PreconditionedDynamics && flow.dynamics isa ZigZag)
+        return state                         # production Zig–Zag has no refreshment
+    end
+    @inbounds for i in eachindex(state.free, state.ξ.θ, state.stored_velocity)
+        fresh = _physical_velocity_sd(flow, i) * randn(rng)
+        if state.free[i]
+            state.ξ.θ[i] = fresh
+            state.stored_velocity[i] = 0.0
+        else
+            old = state.stored_velocity[i]
+            sgn = iszero(old) ? (rand(rng, Bool) ? 1.0 : -1.0) : copysign(1.0, old)
+            state.stored_velocity[i] = sgn * abs(fresh)
+            state.ξ.θ[i] = 0.0
+        end
+    end
+    return state
+end
+
+function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+        flow::PreconditionedDynamics{
+            <:Union{IdentityPreconditioner,DiagonalPreconditioner},
+            <:Union{ZigZag,BouncyParticle,AnyBoomerang}})
+    return _refresh_preserved_sticky_velocity!(rng, state, flow)
+end
+
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::Union{ZigZag,BouncyParticle}) =
+    _refresh_preserved_sticky_velocity!(rng, state, flow)
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::Boomerang{U,T,S,LT}) where {U,T,S,LT<:Diagonal} =
+    _refresh_preserved_sticky_velocity!(rng, state, flow)
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::MutableBoomerang{U,T,S,LT,ET}) where {U,T,S,LT<:Diagonal,ET} =
+    _refresh_preserved_sticky_velocity!(rng, state, flow)
+
 _boundary_proposal_clock_constant(flow::Union{ZigZag,BouncyParticle,AnyBoomerang,
         PreconditionedDynamics{<:Union{IdentityPreconditioner,DiagonalPreconditioner},<:ZigZag},
         PreconditionedDynamics{<:AbstractPreconditioner,<:Union{BouncyParticle,AnyBoomerang}}},
-    ::StickyPDMPState, i::Integer) = unstick_rate_constant(flow, i)
+    state::StickyPDMPState, i::Integer) = _velocity_preserving_sticky(flow) ?
+        abs(state.stored_velocity[i]) : unstick_rate_constant(flow, i)
 
 function _dense_boundary_row_bound(flow::DensePreconditionedZigZag,
         state::StickyPDMPState, i::Integer)

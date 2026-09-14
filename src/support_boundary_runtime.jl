@@ -123,9 +123,13 @@ function _bounded_inner_event_time(
                            max_horizon, false, :sticky_horizon_hit)
 end
 
-function _cap_event_time_for_step(τ::Real, event_type::Symbol, meta, max_horizon::Real)
+function _cap_event_time_for_step(τ::Real, event_type::Symbol, meta,
+        max_horizon::Real, max_horizon_event::Symbol=:horizon_hit)
     if isfinite(max_horizon) && τ > max_horizon
-        return Float64(max_horizon), :horizon_hit, EmptyMeta()
+        return Float64(max_horizon), max_horizon_event, EmptyMeta()
+    elseif isfinite(max_horizon) && τ == max_horizon &&
+            event_type === :horizon_hit
+        return Float64(max_horizon), max_horizon_event, EmptyMeta()
     end
     return τ, event_type, meta
 end
@@ -144,13 +148,17 @@ function _step!(
     ::NoBoundaryHandling,
     phase::Symbol,
     max_horizon::Real=Inf,
+    max_horizon_event::Symbol=:horizon_hit,
 ) where {FL<:ContinuousDynamics}
     τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling(), max_horizon)
-    τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
-    @assert ispositive(τ) || (iszero(τ) && event_type === :sticky) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+    τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta,
+        max_horizon, max_horizon_event)
+    @assert ispositive(τ) || (iszero(τ) && event_type in
+        (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
     needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
-    needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+    needs_saving && record_event!(trace_manager, state, flow, saving_args,
+        phase, event_type)
 
     return event_type
 end
@@ -167,16 +175,20 @@ function _step!(
     boundary_policy::BoundaryHandling,
     phase::Symbol,
     max_horizon::Real=Inf,
+    max_horizon_event::Symbol=:horizon_hit,
 ) where {FL<:ContinuousDynamics}
     support_boundary_options = boundary_policy.opts
     try
         τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy, max_horizon)
-        τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta, max_horizon)
+        τ, event_type, meta = _cap_event_time_for_step(τ, event_type,
+            meta, max_horizon, max_horizon_event)
 
-        @assert ispositive(τ) || (iszero(τ) && event_type === :sticky) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+        @assert ispositive(τ) || (iszero(τ) && event_type in
+            (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
         needs_saving, saving_args = handle_event!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
-        needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+        needs_saving && record_event!(trace_manager, state, flow, saving_args,
+            phase, event_type)
 
         return event_type
     catch err
@@ -272,7 +284,7 @@ function _line_search_truncated_refresh_from_current_state!(
             if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
                 _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
             end
-            record_event!(trace_manager, state, flow, nothing, phase)
+            record_event!(trace_manager, state, flow, nothing, phase, :refresh)
             return :refresh
         end
 
@@ -656,7 +668,8 @@ function _handle_capped_boundary_event!(
             rethrow()
         end
     end
-    needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+    needs_saving && record_event!(trace_manager, state, flow, saving_args,
+        phase, event_type)
     return event_type
 end
 
@@ -692,7 +705,7 @@ function _boundary_refresh_from_localization!(
             if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
                 _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
             end
-            record_event!(trace_manager, state, flow, nothing, phase)
+            record_event!(trace_manager, state, flow, nothing, phase, :refresh)
             return :refresh
         end
 

@@ -31,7 +31,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         # cover it. Rejections append budget and extend/rebuild only as needed.
         cumulative_exp = Random.randexp(rng)
 
-        modes = _grid_bound_modes(alg, state, flow, grad_and_hvp)
+        modes = _grid_bound_modes(alg, state, flow, grad_and_hvp, stats)
         had_cached_gradient = alg.has_cached_gradient[]
         alg.has_cached_rate_derivative[] = false
         if modes.use_single_pass_signed
@@ -148,7 +148,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 start_cell = n_cells_bounded + 1
                 effective_horizon, horizon_event =
                     _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
-                modes = _grid_bound_modes(alg, state, flow, grad_and_hvp)
+                modes = _grid_bound_modes(alg, state, flow, grad_and_hvp, stats)
                 if modes.use_constant_batched_signed
                     alg.has_cached_gradient[] = false
                     alg.has_cached_rate_derivative[] = false

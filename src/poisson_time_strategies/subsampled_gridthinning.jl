@@ -573,7 +573,7 @@ function _record_subsampling_bound_violation!(kind, actual, bound, tau,
     return nothing
 end
 
-function _extend_subsampling_bound_to_budget!(cv::SubsampledControlVariate,
+@inline function _extend_subsampling_bound_to_budget!(cv::SubsampledControlVariate,
     alg::GridAdaptiveState, state::AbstractPDMPState, flow::ContinuousDynamics,
     provider, modes, stats::AbstractStatisticCounter,
     effective_horizon::Float64, target_area::Float64,
@@ -593,7 +593,7 @@ function _extend_subsampling_bound_to_budget!(cv::SubsampledControlVariate,
         _append_subsampling_prefix!(combined, cv, alg, state, flow, effective_horizon,
             modes, first_cell, n_cells_bounded, first_segment)
     end
-    return n_cells_bounded, deterministic_area
+    return (n_cells_bounded, deterministic_area)::Tuple{Int,Float64}
 end
 
 function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
@@ -624,14 +624,30 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
         prepare_residual_horizon!(
             cv.envelope, state, flow, effective_horizon)
         cumulative_exp = Random.randexp(rng)
-        modes = _grid_bound_modes(alg, state, flow, provider)
+        modes = _grid_bound_modes(alg, state, flow, provider, stats)
         n_cells_bounded = 0
         deterministic_area = 0.0
         _schedule_t0 = time_ns()
         _inc_counter_grid_schedule_builds(stats)
-        n_cells_bounded, deterministic_area = _extend_subsampling_bound_to_budget!(
-            cv, alg, state, flow, provider, modes, stats, effective_horizon,
-            cumulative_exp, n_cells_bounded, deterministic_area)
+        combined = alg.subsampling_bound
+        n_horizon = _grid_cell_count(alg.pcb.t_grid,
+            length(alg.pcb.Λ_vals), effective_horizon)
+        while total_area(combined) <= cumulative_exp &&
+                n_cells_bounded < n_horizon
+            first_cell = n_cells_bounded + 1
+            cell_horizon = min(alg.pcb.t_grid[first_cell + 1],
+                effective_horizon)
+            first_segment = alg.affine_bound.n_segments + 1
+            n_cells_bounded, deterministic_area = _build_grid_bound_prefix!(
+                alg.pcb, state, flow, provider, alg, stats,
+                alg.state_cache, cell_horizon, Inf, NoGridBoundaryProbe(),
+                modes; start_cell=first_cell,
+                initial_integral=deterministic_area,
+                append=first_cell > 1)
+            _append_subsampling_prefix!(combined, cv, alg, state, flow,
+                effective_horizon, modes, first_cell, n_cells_bounded,
+                first_segment)
+        end
         _inc_counter_grid_schedule_build_seconds(stats,
             (time_ns() - _schedule_t0) * 1.0e-9)
 
@@ -717,9 +733,32 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
 
             # Every valid rejection consumes one further exponential budget.
             cumulative_exp += Random.randexp(rng)
-            n_cells_bounded, deterministic_area = _extend_subsampling_bound_to_budget!(
-                cv, alg, state, flow, provider, modes, stats, effective_horizon,
-                cumulative_exp, n_cells_bounded, deterministic_area)
+            # Keep this rejection-hot extension in the concrete caller.  The
+            # generic function barrier above is useful during initial schedule
+            # construction, but Julia 1.12 boxes its complete wrapped argument
+            # set when it is re-entered from this deeply parameterized loop
+            # (about 1.4 KiB per rejection for the OMRF statistics wrapper).
+            # This is exactly the same loop and summation order.
+            combined = alg.subsampling_bound
+            n_horizon = _grid_cell_count(alg.pcb.t_grid,
+                length(alg.pcb.Λ_vals), effective_horizon)
+            while total_area(combined) <= cumulative_exp &&
+                    n_cells_bounded < n_horizon
+                first_cell = n_cells_bounded + 1
+                cell_horizon = min(alg.pcb.t_grid[first_cell + 1],
+                    effective_horizon)
+                first_segment = alg.affine_bound.n_segments + 1
+                n_cells_bounded, deterministic_area =
+                    _build_grid_bound_prefix!(alg.pcb, state, flow, provider,
+                        alg, stats, alg.state_cache, cell_horizon, Inf,
+                        NoGridBoundaryProbe(), modes;
+                        start_cell=first_cell,
+                        initial_integral=deterministic_area,
+                        append=first_cell > 1)
+                _append_subsampling_prefix!(combined, cv, alg, state, flow,
+                    effective_horizon, modes, first_cell, n_cells_bounded,
+                    first_segment)
+            end
             _inc_counter_candidate_loop_iterations(stats)
             _inc_counter_candidate_loop_overhead_seconds(stats,
                 (time_ns() - _loop_t0) * 1.0e-9)

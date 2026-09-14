@@ -112,14 +112,21 @@ struct StickyPDMPState{T<:SkeletonPoint, U<:Real} <: AbstractPDMPState
     t::Base.RefValue{U}
     ξ::T
     free::BitVector
+    # Physical velocities live in `ξ.θ` and are exactly zero on a frozen
+    # coordinate.  The incoming boundary velocity is retained here while the
+    # coordinate is frozen and is restored at release.
+    stored_velocity::Vector{Float64}
     boundary_scratch::BoundaryVelocityScratch
 end
 StickyPDMPState(t::Real, args...) = StickyPDMPState(Ref(float(t)), args...)
 StickyPDMPState(t::Base.RefValue{<:Real}, ξ::SkeletonPoint) =
     StickyPDMPState(t, ξ, .!(iszero.(ξ.x) .&& iszero.(ξ.θ)),
-        BoundaryVelocityScratch())
+        zeros(length(ξ)), BoundaryVelocityScratch())
 StickyPDMPState(t::Base.RefValue{<:Real}, ξ::SkeletonPoint, free::BitVector) =
-    StickyPDMPState(t, ξ, free, BoundaryVelocityScratch())
+    StickyPDMPState(t, ξ, free, zeros(length(ξ)), BoundaryVelocityScratch())
+StickyPDMPState(t::Base.RefValue{<:Real}, ξ::SkeletonPoint, free::BitVector,
+        stored_velocity::AbstractVector{<:Real}) =
+    StickyPDMPState(t, ξ, free, Float64.(stored_velocity), BoundaryVelocityScratch())
 
 # default method
 subflow(flow::ContinuousDynamics, ::BitVector) = flow
@@ -128,10 +135,12 @@ Base.copy(state::PDMPState) =
     PDMPState(Ref(state.t[]), copy(state.ξ), copy(state.boundary_scratch))
 Base.copy(state::StickyPDMPState) =
     StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free),
+                    copy(state.stored_velocity),
                     copy(state.boundary_scratch))
 
 _shallow_copy_sticky_state(state::StickyPDMPState) =
     StickyPDMPState(Ref(state.t[]), copy(state.ξ), copy(state.free),
+                    copy(state.stored_velocity),
                     state.boundary_scratch)
 
 function Base.copyto!(dest::PDMPState, src::PDMPState)
@@ -145,6 +154,7 @@ function Base.copyto!(dest::StickyPDMPState, src::StickyPDMPState)
     dest.t[] = src.t[]
     copyto!(dest.ξ, src.ξ)
     copyto!(dest.free, src.free)
+    copyto!(dest.stored_velocity, src.stored_velocity)
     _copy_compatible_boundary_cache!(dest.boundary_scratch, src.boundary_scratch)
     return dest
 end
@@ -178,12 +188,17 @@ function validate_state(state::StickyPDMPState, flow::Union{Nothing, ContinuousD
     ξ = state.ξ
     all(isfinite, ξ.x) || error("state.ξ.x contains non-finite values $(msg): $(ξ.x)")
     all(isfinite, ξ.θ) || error("state.ξ.θ contains non-finite values $(msg): $(ξ.θ)")
+    all(isfinite, state.stored_velocity) ||
+        error("state.stored_velocity contains non-finite values $(msg)")
 
     free = state.free
     for i in eachindex(free)
         if !free[i]
             iszero(ξ.x[i]) || error("state.ξ.x[$i] is frozen but not zero! $(msg): $(ξ.x)")
             iszero(ξ.θ[i]) || error("state.ξ.θ[$i] is frozen but not zero! $(msg): $(ξ.θ)")
+        else
+            iszero(state.stored_velocity[i]) || error(
+                "state.stored_velocity[$i] is nonzero for a free coordinate $(msg)")
         end
     end
 end

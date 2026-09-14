@@ -430,6 +430,10 @@ end
         adaptation_free_time_max,
         stop_reason,
     )
+
+    get_sum(
+        adaptation_updates,
+    )
 end
 
 @counter_struct mutable struct GradientCallCounter <: AbstractStatisticCounter
@@ -596,6 +600,7 @@ end
     )
 
     get_sum(
+        grid_horizon_hits,
         grid_acceptance_tests,
         grid_endpoint_evaluations,
         grid_endpoint_gradient_calls,

@@ -181,16 +181,22 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState,
         abs(ξ.x[i]) < tol || error(
             "sticking coordinate $i away from its boundary: x[$i] = $(ξ.x[i]), " *
             "θ[$i] = $(ξ.θ[i]), t = $(state.t[]), scheduled_t = $(alg.sticky_times[i])")
-        ξ.x[i] = 0.0
-        state.free[i] = false
-        _invalidate_active_stratum_cache!(state)
-        draw_stratum_velocity!(rng, state, flow)
+        if _velocity_preserving_sticky(flow)
+            _freeze_preserved_velocity!(state, i)
+        else
+            ξ.x[i] = 0.0
+            state.free[i] = false
+            _invalidate_active_stratum_cache!(state)
+            draw_stratum_velocity!(rng, state, flow)
+        end
         accepted = true
     else
         (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) ||
             error("unsticking coordinate $i that is not stuck")
-        accepted = propose_boundary_velocity!(rng, state, flow, i)
-        accepted && (state.free[i] = true)
+        accepted = _velocity_preserving_sticky(flow) ?
+            _release_preserved_velocity!(state, i) :
+            propose_boundary_velocity!(rng, state, flow, i)
+        accepted && !_velocity_preserving_sticky(flow) && (state.free[i] = true)
     end
     if accepted
         rebuild_sticky_schedule!(rng, alg, state, flow)
@@ -209,18 +215,24 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
 
     if state.free[i]
         abs(ξ.x[i]) < tol || error("sticking coordinate $i away from its boundary: x[$i] = $(ξ.x[i]) !≈ 0 at $(t) with tol = $(tol)")
-        ξ.x[i] = 0.0
-        state.free[i] = false
-        _invalidate_active_stratum_cache!(state)
-        draw_stratum_velocity!(rng, state, flow)
+        if _velocity_preserving_sticky(flow)
+            _freeze_preserved_velocity!(state, i)
+        else
+            ξ.x[i] = 0.0
+            state.free[i] = false
+            _invalidate_active_stratum_cache!(state)
+            draw_stratum_velocity!(rng, state, flow)
+        end
         alg.sticky_times[i] = Inf
         haskey(alg.sticky_pq, i) && delete!(alg.sticky_pq, i)
         rebuild_sticky_schedule!(rng, alg, state, flow)
     else
         (abs(ξ.x[i]) < tol && iszero(ξ.θ[i])) ||
             error("unsticking coordinate $i that is not stuck: x[$i] = $(ξ.x[i]) ≉ 0 or θ[$i] = $(ξ.θ[i]) ≉ 0 at $(t) with tol = $(tol)")
-        accepted = propose_boundary_velocity!(rng, state, flow, i)
-        accepted && (state.free[i] = true)
+        accepted = _velocity_preserving_sticky(flow) ?
+            _release_preserved_velocity!(state, i) :
+            propose_boundary_velocity!(rng, state, flow, i)
+        accepted && !_velocity_preserving_sticky(flow) && (state.free[i] = true)
         if accepted
             rebuild_sticky_schedule!(rng, alg, state, flow)
         else

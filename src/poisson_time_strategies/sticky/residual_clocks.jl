@@ -353,22 +353,24 @@ end
         flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:AnyBoomerang},
         state::StickyPDMPState)
     workspace = clock.workspace
-    generation = flow.metric.generation
-    if workspace.flow_source !== flow ||
-       workspace.metric_generation != generation
-        indices = beta_indices(clock.slab_provider)
-        @inbounds for j in eachindex(indices)
-            workspace.boundary_constants[j] =
-                _checked_boomerang_boundary_constant(
-                    _boundary_proposal_clock_constant(
-                        flow, state, indices[j]), indices[j])
-            workspace.log_boundary_constants[j] =
-                iszero(workspace.boundary_constants[j]) ? -Inf :
-                log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
-        end
-        workspace.flow_source = flow
-        workspace.metric_generation = generation
+    # Under the velocity-preserving sticky kernel the release constant is the
+    # *individual stored speed*.  It changes at freeze and when a frozen
+    # coordinate is refreshed, neither of which changes the flow object or
+    # metric generation.  Rebuild these O(number-of-selectable-coordinates)
+    # constants whenever the aggregate schedule is evaluated; caching them by
+    # flow identity would leave stale release hazards.
+    indices = beta_indices(clock.slab_provider)
+    @inbounds for j in eachindex(indices)
+        workspace.boundary_constants[j] =
+            _checked_boomerang_boundary_constant(
+                _boundary_proposal_clock_constant(
+                    flow, state, indices[j]), indices[j])
+        workspace.log_boundary_constants[j] =
+            iszero(workspace.boundary_constants[j]) ? -Inf :
+            log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
     end
+    workspace.flow_source = flow
+    workspace.metric_generation = flow.metric.generation
     return workspace.boundary_constants
 end
 
@@ -376,20 +378,18 @@ end
         clock::HarmonicLogLinearAggregateClock, flow::AnyBoomerang,
         state::StickyPDMPState)
     workspace = clock.workspace
-    if workspace.flow_source !== flow
-        indices = beta_indices(clock.slab_provider)
-        @inbounds for j in eachindex(indices)
-            workspace.boundary_constants[j] =
-                _checked_boomerang_boundary_constant(
-                    _boundary_proposal_clock_constant(
-                        flow, state, indices[j]), indices[j])
-            workspace.log_boundary_constants[j] =
-                iszero(workspace.boundary_constants[j]) ? -Inf :
-                log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
-        end
-        workspace.flow_source = flow
-        workspace.metric_generation = zero(UInt)
+    indices = beta_indices(clock.slab_provider)
+    @inbounds for j in eachindex(indices)
+        workspace.boundary_constants[j] =
+            _checked_boomerang_boundary_constant(
+                _boundary_proposal_clock_constant(
+                    flow, state, indices[j]), indices[j])
+        workspace.log_boundary_constants[j] =
+            iszero(workspace.boundary_constants[j]) ? -Inf :
+            log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
     end
+    workspace.flow_source = flow
+    workspace.metric_generation = zero(UInt)
     return workspace.boundary_constants
 end
 

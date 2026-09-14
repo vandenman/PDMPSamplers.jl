@@ -49,7 +49,8 @@ function _boundary_logweights_with_velocity!(weights::AbstractVector{Float64}, c
     return weights
 end
 
-_uses_coordinate_velocity_constants(::ContinuousDynamics) = false
+_uses_coordinate_velocity_constants(flow::ContinuousDynamics) =
+    _velocity_preserving_sticky(flow)
 _uses_coordinate_velocity_constants(::AnyBoomerang) = true
 _uses_coordinate_velocity_constants(::PreconditionedDynamics) = true
 

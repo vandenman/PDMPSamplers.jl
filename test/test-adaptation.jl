@@ -193,6 +193,78 @@ end
         @test flow.Γ[3, 3] == 4.0 # too little free time: retain scale
     end
 
+    @testset "research nuisance-centre ablation preserves sticky centres and covariance" begin
+        d = 3
+        legacy = AdaptiveBoomerang(d; scheme=:diagonal)
+        learned = AdaptiveBoomerang(d; scheme=:diagonal)
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        ws.total_time = 20.0
+        ws.sum_x_dt .= [40.0, -30.0, 10.0]
+        ws.sum_x2_dt .= [100.0, 65.0, 30.0]
+        ws.free_time .= 20.0
+        can_stick = BitVector([true, false, false])
+
+        PDMPSamplers.update_boomerang!(legacy, ws, Val(:diagonal), nothing,
+            PDMPSamplers.BoomerangAdaptationOptions(), can_stick)
+        PDMPSamplers.update_boomerang!(learned, ws, Val(:diagonal), nothing,
+            PDMPSamplers.BoomerangAdaptationOptions(
+                learn_nonstickable_means=true), can_stick)
+
+        @test learned.μ == [0.0, -1.5, 0.5]
+        @test legacy.μ == zeros(d)
+        @test diag(learned.Γ) == diag(legacy.Γ)
+        @test diag(learned.L) == diag(legacy.L)
+        @test diag(learned.ΣL) == diag(legacy.ΣL)
+    end
+
+    @testset "opt-in initial-variance floor survives repeated diagonal updates" begin
+        d = 4
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        initial_var = [4.0, 3.0, 2.0, 1.0]
+        for i in 1:d
+            flow.Γ[i, i] = 1 / initial_var[i]
+            flow.L[i, i] = sqrt(flow.Γ[i, i])
+            flow.ΣL[i, i] = sqrt(initial_var[i])
+        end
+        options = PDMPSamplers.BoomerangAdaptationOptions(
+            initial_variance_floor_fraction=0.1)
+        floor_mask = BitVector([false, true, false, true])
+        ad = PDMPSamplers.default_dynamics_adapter(flow, 1.0, 0.0;
+            options, can_stick=BitVector([true, false, true, false]),
+            variance_floor_mask=floor_mask)
+
+        @test ad.initial_variance ≈ initial_var
+        @test ad.variance_floor ≈ [0.0, 0.3, 0.0, 0.1]
+
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        ws.total_time = 10.0
+        ws.sum_x_dt .= 0.0
+        ws.sum_x2_dt .= [2.0, 0.01, 4.0, 0.02]
+        ws.free_time .= 10.0
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
+            options, ad.can_stick, ad.variance_floor)
+        installed_once = 1.0 ./ diag(flow.Γ)
+        @test installed_once ≈ [0.2, 0.3, 0.4, 0.1]
+
+        # A later, still smaller empirical candidate cannot move a selected
+        # coordinate below the covariance captured before the first update.
+        ws.sum_x2_dt .= [1.0, 1e-5, 3.0, 1e-6]
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
+            options, ad.can_stick, ad.variance_floor)
+        installed_twice = 1.0 ./ diag(flow.Γ)
+        @test installed_twice ≈ [0.1, 0.3, 0.3, 0.1]
+        @test installed_twice[1] != 0.1 * initial_var[1]
+        @test installed_twice[3] != 0.1 * initial_var[3]
+        @test all(flow.μ .== 0.0)
+    end
+
+    @testset "Boomerang log-scale floor name resolution is exact" begin
+        names = ["thresholds_0.1", "global_scale", "node_scale.1",
+            "node_scale_extra", "interactions_0.1"]
+        @test PDMPSamplers.boomerang_logscale_variance_floor_mask(names) ==
+            BitVector([false, true, true, false, false])
+    end
+
     @testset "update_boomerang! fullrank with WelfordBoomerangStats" begin
         d = 4
         flow = AdaptiveBoomerang(d; scheme=:fullrank)

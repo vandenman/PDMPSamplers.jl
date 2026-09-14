@@ -115,6 +115,26 @@ function cdf(trace::FactorizedTrace, q::Real; coordinate::Integer)
     return total_below / total_time
 end
 
+function cdf(trace::StreamingPDMPTrace, q::Real; coordinate::Integer)
+    total_below = Ref(0.0)
+    base = _underlying_flow(trace.flow)
+    _foreach_streaming_segment(trace) do time0, time1, x0, x1,
+            velocity0, velocity1, free
+        elapsed = time1 - time0
+        j = coordinate
+        total_below[] += if !free[j]
+            x0[j] <= q ? elapsed : 0.0
+        elseif base isa AnyBoomerang
+            _time_below_segment(trace.flow, x0[j], velocity0[j], elapsed,
+                q, base.μ[j])
+        else
+            _time_below_segment(trace.flow, x0[j], velocity0[j], elapsed, q)
+        end
+    end
+    return total_below[] /
+        (last_event_time(trace) - first_event_time(trace))
+end
+
 function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
     lo, hi = Inf, -Inf
     base = _underlying_flow(trace.flow)
@@ -168,6 +188,24 @@ function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
     bounds = (lo, hi)
     trace.bounds_cache[j] = bounds
     return bounds
+end
+
+function _trace_coordinate_bounds(trace::StreamingPDMPTrace, j::Integer)
+    bounds = Ref((Inf, -Inf))
+    base = _underlying_flow(trace.flow)
+    _foreach_streaming_segment(trace) do time0, time1, x0, x1,
+            velocity0, velocity1, free
+        lo, hi = bounds[]
+        lo = min(lo, x0[j], x1[j])
+        hi = max(hi, x0[j], x1[j])
+        if base isa AnyBoomerang && free[j]
+            radius = hypot(x0[j] - base.μ[j], velocity0[j])
+            lo = min(lo, base.μ[j] - radius)
+            hi = max(hi, base.μ[j] + radius)
+        end
+        bounds[] = (lo, hi)
+    end
+    return bounds[]
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -418,6 +456,20 @@ function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer
     end
     total_time, dc, pm = _collect_sweep_events(trace, coordinate)
     return _quantile_linear_sweep(total_time, dc, pm, [p * total_time])[1]
+end
+
+function _quantile_scalar(trace::StreamingPDMPTrace, p::Real,
+        coordinate::Integer)
+    lo, hi = _trace_coordinate_bounds(trace, coordinate)
+    return _invert_monotone_cdf(
+        q -> cdf(trace, q; coordinate), lo, hi, p)
+end
+
+function Statistics.quantile(trace::StreamingPDMPTrace,
+        probabilities::AbstractVector{<:Real}; coordinate::Integer)
+    all(p -> 0 < p < 1, probabilities) || throw(DomainError(
+        probabilities, "All quantile probabilities must be in (0, 1)"))
+    return [_quantile_scalar(trace, p, coordinate) for p in probabilities]
 end
 
 """
@@ -682,6 +734,49 @@ function ess(
     return result
 end
 
+function ess(trace::StreamingPDMPTrace, means::AbstractVector,
+        variances::AbstractVector;
+        n_batches::Integer=max(50, isqrt(length(trace))))
+    n_batches >= 3 || throw(ArgumentError("ESS requires at least three batches"))
+    start_time = first_event_time(trace)
+    end_time = last_event_time(trace)
+    duration = end_time - start_time
+    duration > 0 || error("Cannot compute ESS without elapsed time")
+    d = length(means)
+    batch_duration = duration / n_batches
+    batch_integrals = zeros(n_batches, d)
+    _foreach_streaming_segment(trace) do time0, time1, x0, x1,
+            velocity0, velocity1, free
+        left = time0
+        segment_x = copy(x0)
+        segment_velocity = copy(velocity0)
+        while left < time1
+            batch = min(n_batches,
+                floor(Int, (left - start_time) / batch_duration) + 1)
+            right = min(time1, start_time + batch * batch_duration)
+            right <= left && (right = time1)
+            end_x = copy(segment_x)
+            end_velocity = copy(segment_velocity)
+            _stream_move!(end_x, end_velocity, free, right - left,
+                trace.flow)
+            _integrate_segment!(view(batch_integrals, batch, :),
+                Statistics.mean, trace.flow, segment_x, end_x,
+                segment_velocity, end_velocity, left, right, free)
+            copyto!(segment_x, end_x)
+            copyto!(segment_velocity, end_velocity)
+            left = right
+        end
+    end
+    batch_means = batch_integrals ./ batch_duration
+    batch_var = vec(Statistics.var(batch_means; dims=1))
+    result = Vector{Float64}(undef, d)
+    @inbounds for i in eachindex(result)
+        result[i] = batch_var[i] > 0 && variances[i] > 0 ?
+            n_batches * variances[i] / batch_var[i] : NaN
+    end
+    return result
+end
+
 function _move_ess_point!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free)
     if free !== nothing && _underlying_flow(flow) isa AnyBoomerang
         move_forward_time!(ξ, τ, _underlying_flow(flow), free)
@@ -847,19 +942,24 @@ function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flo
     return buf
 end
 
-# For the MutableBoomerang (adaptive), use the trapezoidal rule (x₀ + x₁)/2 · dt.
-# The sinusoidal formula converges to μ_ref (not μ_true) when μ_ref ≠ μ_true,
-# because the trajectory oscillates around μ_ref and the ∫sin(dt)/dt correction
-# vanishes. The trapezoidal rule is μ-independent, unbiased, and has O(dt³)
-# per-segment error (vs O(dt²) for piecewise-constant).
+# MutableBoomerang has the same harmonic path as Boomerang between events.
+# Its reference mean may be adapted during warmup, but a retained trace stores
+# the resolved flow that generated its segments.  Consequently the exact
+# sinusoidal integral is required here as well; trapezoidal integration is a
+# discretisation error and can disagree with a materialised trace even when the
+# trace records every event and its terminal endpoint.
 function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
-    return @. (x0 + x1) / 2 * dt
+    s, c = sincos(dt)
+    μ = flow.μ
+    return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
 end
 
 function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
-    @. buf += (x0 + x1) / 2 * dt
+    s, c = sincos(dt)
+    μ = flow.μ
+    @. buf += (x0 - μ) * s + θ0 * (1 - c) + μ * dt
     return buf
 end
 
@@ -1036,11 +1136,14 @@ function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang,
     return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
 end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), ::MutableBoomerang,
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::MutableBoomerang,
                              x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
     dt = t1 - t0
+    s, c = sincos(dt)
     @inbounds for i in eachindex(x0, free)
-        buf[i] += (free[i] ? (x0[i] + x1[i]) / 2 : x0[i]) * dt
+        buf[i] += free[i] ?
+            (x0[i] - flow.μ[i]) * s + θ0[i] * (1 - c) + flow.μ[i] * dt :
+            x0[i] * dt
     end
     return buf
 end

@@ -17,6 +17,9 @@ function _preconditioned_loglinear_clock_fixture(; active=BitVector([false, fals
              0.4, -0.2, 0.3]
     state = PDMPSamplers.StickyPDMPState(Ref(0.0),
         PDMPSamplers.SkeletonPoint(x, theta), free)
+    for i in 1:2
+        !free[i] && (state.stored_velocity[i] = (isodd(i) ? -1.0 : 1.0) * scales[i])
+    end
     return provider, prior, flow, state, trues(5)
 end
 

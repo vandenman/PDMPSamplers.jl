@@ -123,7 +123,9 @@ end
             end
             @test all_accepted
             @test all_scales
-            @test PDMPSamplers._boundary_proposal_clock_constant(flow, state, 1) == scales[1]
+            # This test exercises the legacy flux proposal directly. The
+            # velocity-preserving sampler path is covered separately.
+            @test PDMPSamplers.unstick_rate_constant(flow, 1) == scales[1]
             @test positive ./ n ≈ fill(0.5, 2) atol=0.025
         end
     end
@@ -140,6 +142,7 @@ end
             state.ξ.x[1] = 0.0
             state.ξ.θ[1] = 0.0
             state.free[1] = false
+            state.stored_velocity[1] = 1.0
             PDMPSamplers._invalidate_active_stratum_cache!(state)
             return rng, state, alg
         end
@@ -326,7 +329,7 @@ end
             second_i /= n
             cross /= n
             second_j /= n
-            @test PDMPSamplers._boundary_proposal_clock_constant(flow, state, 1) ≈
+            @test PDMPSamplers.unstick_rate_constant(flow, 1) ≈
                   sqrt(2 / π) * sqrt(covariance[1, 1])
             @test second_i ≈ 2covariance[1, 1] rtol=0.07
             @test cross ≈ 2covariance[1, 2] atol=0.10

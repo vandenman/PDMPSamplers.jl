@@ -107,7 +107,8 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     _validate_sticky_rates(strat.κ, strat.can_stick, d)
     state isa StickyPDMPState &&
         _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
-    state isa StickyPDMPState && draw_stratum_velocity!(rng, state, flow)
+    state isa StickyPDMPState &&
+        _initialize_preserved_sticky_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()
@@ -136,7 +137,7 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
         "AggregateSticky can_stick marks unsupported coordinates $(invalid) as stickable; " *
         "$(nameof(typeof(strat.clock))) supports full-state coordinates $(collect(supported))"))
     _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
-    draw_stratum_velocity!(rng, state, flow)
+    _initialize_preserved_sticky_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)
     sticky_pq = PriorityQueue{Int,Float64}()

@@ -11,9 +11,10 @@ proposal clock has rate `κ * Cᵢ`, where `Cᵢ` is the exact flux normalizer f
 Gaussian/product dynamics or the state-dependent dominating constant for dense
 ZigZag. Distribution-valued return values are unsupported.
 
-At every accepted freeze or unfreeze transition, the complete velocity on the
-new active coordinate stratum is redrawn from that stratum's invariant law.
-No saved pre-freeze velocity is restored.
+For the diagonal production flows, a coordinate's incoming physical velocity
+is stored at freezing and restored at release; other coordinates are unchanged.
+The proposal clock factor is therefore that coordinate's stored physical
+speed. Dense correlated flows retain their stratum-flux proposal kernel.
 """
 struct Sticky{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector}} <: PoissonTimeStrategy
     alg::T

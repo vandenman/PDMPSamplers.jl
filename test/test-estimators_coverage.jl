@@ -14,7 +14,28 @@ end
 
 @testset "Estimators coverage" begin
 
-    @testset "MutableBoomerang trapezoidal mean integration" begin
+    @testset "MutableBoomerang exact harmonic mean integration" begin
+        flow_exact = AdaptiveBoomerang(Matrix{Float64}(I, 3, 3), [1.0, -2.0, 0.5])
+        x0_exact = [0.2, 0.0, 1.2]
+        v0_exact = [0.7, 3.0, -0.4]
+        h_exact = 0.83
+        x1_exact = flow_exact.μ .+ (x0_exact .- flow_exact.μ) .* cos(h_exact) .+
+            v0_exact .* sin(h_exact)
+        v1_exact = .-(x0_exact .- flow_exact.μ) .* sin(h_exact) .+
+            v0_exact .* cos(h_exact)
+        expected = (x0_exact .- flow_exact.μ) .* sin(h_exact) .+
+            v0_exact .* (1 - cos(h_exact)) .+ flow_exact.μ .* h_exact
+        got = PDMPSamplers._integrate_segment(Statistics.mean, flow_exact,
+            x0_exact, x1_exact, v0_exact, v1_exact, 0.0, h_exact)
+        @test got ≈ expected rtol=2e-15 atol=2e-15
+
+        free = Bool[true, false, true]
+        expected_masked = copy(expected)
+        expected_masked[.!free] .= x0_exact[.!free] .* h_exact
+        got_masked = PDMPSamplers._integrate_segment(Statistics.mean, flow_exact,
+            x0_exact, x1_exact, v0_exact, v1_exact, 0.0, h_exact, free)
+        @test got_masked ≈ expected_masked rtol=2e-15 atol=2e-15
+
         d = 3
         Random.seed!(42)
         target = gen_data(Distributions.MvNormal, d, 2.0)
