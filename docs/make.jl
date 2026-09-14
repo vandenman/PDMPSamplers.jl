@@ -8,6 +8,7 @@ makedocs(;
     pages = [
         "Home" => "index.md",
         "Getting Started" => "getting-started.md",
+        "Dependent Slabs" => "dependent-slabs.md",
         "API" => "api.md",
         "R Package" => "r.md",
     ],

@@ -1,6 +1,8 @@
 """
     RootsPoissonTimeStrategy <: PoissonTimeStrategy
 
+EXPERIMENTAL and still in development.
+
 A Poisson time strategy that computes the next event time using root finding.
 Samples R ~ Exp(1) and solves ∫₀^τ λ(x(s), v) ds = R for τ using numerical integration and root finding.
 
@@ -25,9 +27,12 @@ mutable struct IntegralCache
     τR::Float64; IR::Float64   # right bracket
     τC::Float64; IC::Float64   # last evaluated
 end
+_roots_probe_state(state::AbstractPDMPState) = copy(state)
+_roots_probe_state(state::StickyPDMPState) = _shallow_copy_sticky_state(state)
+
 function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, atol=1e-9)
     ic = IntegralCache(0.0, 0.0, Inf, Inf, Inf, Inf)  # only left at (0,0) initially
-    state_s = copy(state)
+    state_s = _roots_probe_state(state)
 
     # Define rate function outside to avoid boxing
     ratefun = let state = state, state_s = state_s, grad = grad, flow = flow, cache = cache, λ = λ
@@ -43,7 +48,7 @@ function integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=1e-6, a
             # end
             # @assert !any(isnan, state_s.ξ.x)
             # @assert !any(isnan, state_s.ξ.θ)
-            result = λ(state_s.ξ, ∇ϕ, flow)
+            result = λ(state_s, ∇ϕ, flow)
             # @assert !isnan(result)
             return result
         end
@@ -101,13 +106,16 @@ root finding (Roots.jl).
 """
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
                         alg::RootsPoissonTimeStrategy, state::AbstractPDMPState,
-                        cache, stats::AbstractStatisticCounter)
+                        cache, stats::AbstractStatisticCounter,
+                        max_horizon::Float64=Inf, include_refresh::Bool=true,
+                        max_horizon_event::Symbol=:horizon_hit)
 
     grad = model.grad
     # Compare with refresh time --  TODO: we can always use this as an upper bound for the root finding?
-    τ_refresh = rand_refresh_time(rng, flow)
+    τ_refresh = include_refresh ? rand_refresh_time(rng, flow) : Inf
+    search_limit = min(τ_refresh, max_horizon)
 
-    mustwork = isinf(τ_refresh)
+    mustwork = isinf(search_limit)
     # if refresh time is Inf, this MUST work
 
     outer_iterations = 0
@@ -120,7 +128,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         integral_minus_R = integral_minus_R_factory2(R, state, grad, flow, cache, λ; rtol=alg.rtol, atol=alg.atol)
 
         τ_lower = zero(alg.τ_initial)
-        τ_upper = min(τ_refresh, alg.τ_initial)
+        τ_upper = min(search_limit, alg.τ_initial)
 
         # Start with function at lower & upper bounds
         f_lower = integral_minus_R(τ_lower)
@@ -135,7 +143,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         while f_upper < 0 && iterations < max_iterations
             τ_lower, f_lower = τ_upper, f_upper    # shift bracket
             τ_upper *= alg.bracket_multiplier
-            τ_upper = min(τ_upper, τ_refresh)      # do not exceed refresh time
+            τ_upper = min(τ_upper, search_limit)
             f_upper = integral_minus_R(τ_upper)
             iterations += 1
 
@@ -145,7 +153,7 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
                 is_constant = isapprox(f_lower, f_upper, atol = alg.atol, rtol = alg.rtol)
                 iterations_constant > max_iterations_constant && break
             end
-            if τ_upper == τ_refresh
+            if τ_upper == search_limit
                 # no use to continue?
                 break
             end
@@ -155,7 +163,11 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
         # Inf is not always good idea
         # for the ZigZag, refresh time is also Inf, and then things break!
         # so basically, for the ZigZag this MUST work!
-        if iterations_constant > max_iterations_constant
+        if f_upper < 0 && τ_upper == search_limit
+            return search_limit,
+                   τ_refresh <= max_horizon ? :refresh : max_horizon_event,
+                   EmptyMeta()
+        elseif iterations_constant > max_iterations_constant
 
             mustwork && continue
             τ_event = τ_refresh + 1
@@ -182,10 +194,12 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
             end
         end
 
-        if τ_event < τ_refresh
+        if τ_event < search_limit
             return τ_event, :reflect, EmptyMeta()
-        else
+        elseif τ_refresh <= max_horizon
             return τ_refresh, :refresh, EmptyMeta()
+        else
+            return max_horizon, max_horizon_event, EmptyMeta()
         end
     end
 

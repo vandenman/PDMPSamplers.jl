@@ -34,6 +34,10 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test_throws ArgumentError OnlineESSCriterion(1.0; check_every=0)
         @test_throws ArgumentError OnlineESSCriterion(1.0; min_samples=1)
         @test_throws ArgumentError OnlineESSCriterion(1.0; batch_size=0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=-1.0, max_time=10.0, stable_time=1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=10.0, max_time=10.0, stable_time=1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=1.0, max_time=10.0, stable_time=-1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=1.0, max_time=10.0, stable_time=1.0, check_every=0)
         @test_throws ArgumentError AnyCriterion()
         @test_throws ArgumentError AllCriteria()
 
@@ -45,6 +49,37 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test stop_after(; ess=50.0, ess_mode=:online, events=100) isa AnyCriterion
         @test_throws ArgumentError stop_after(; ess=50.0, ess_mode=:invalid)
         @test_throws ArgumentError stop_after()
+    end
+
+    @testset "AdaptiveWarmupCriterion unit behavior" begin
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        stats = PDMPSamplers.DevelStatisticCounter()
+        criterion = AdaptiveWarmupCriterion(;
+            min_time=2.0, max_time=10.0, stable_time=1.0,
+            min_events=2, check_every=1)
+
+        PDMPSamplers.initialize!(criterion, state, nothing, stats)
+        @test !PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+
+        state.t[] = 1.5
+        PDMPSamplers._inc_counter_reflections_events(stats)
+        PDMPSamplers._inc_counter_reflections_events(stats)
+        PDMPSamplers.update!(criterion, state, nothing, stats, :reflect)
+        @test !PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+
+        state.t[] = 2.25
+        PDMPSamplers.update!(criterion, state, nothing, stats, :reflect)
+        @test PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+        @test PDMPSamplers.stop_reason(criterion) == :warmup_stabilized
+
+        capped = AdaptiveWarmupCriterion(;
+            min_time=2.0, max_time=3.0, stable_time=10.0,
+            min_events=100, check_every=10)
+        state.t[] = 0.0
+        PDMPSamplers.initialize!(capped, state, nothing, stats)
+        state.t[] = 3.0
+        @test PDMPSamplers.is_satisfied(capped, state, nothing, stats)
+        @test PDMPSamplers.stop_reason(capped) == :reached_time
     end
 
     @testset "Backward compatible default" begin
@@ -74,6 +109,20 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test stats_a.sticky_events == stats_b.sticky_events
         @test stats_a.stop_reason == :reached_time
         @test stats_b.stop_reason == :reached_time
+        @test stats_a.initialization_elapsed_time >= 0
+        @test stats_a.warmup_phase_elapsed_time >= stats_a.warmup_elapsed_time
+        @test stats_a.main_phase_elapsed_time >= stats_a.main_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.warmup_adapter_finish_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.main_sampler_initialization_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.algorithm_warmup_finish_elapsed_time
+        @test stats_a.finalization_elapsed_time >= 0
+        accounted = stats_a.initialization_elapsed_time +
+            stats_a.warmup_phase_elapsed_time + stats_a.transition_elapsed_time +
+            stats_a.main_phase_elapsed_time + stats_a.finalization_elapsed_time
+        @test stats_a.elapsed_time >= accounted
     end
 
     @testset "Unit criteria in sampler" begin
@@ -220,6 +269,87 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test crit_online !== crit_online_copy
         @test crit_online.batch_sum !== crit_online_copy.batch_sum
         @test crit_online.target_ess == crit_online_copy.target_ess
+    end
+
+    @testset "Finite deadlines constrain searches and are recorded" begin
+        checked_gradient = FullGradient(function (out, x)
+            x[1] <= 0.1 + 16eps(0.1) ||
+                error("gradient probe crossed the requested time horizon")
+            fill!(out, 0.0)
+            return out
+        end)
+        checked_model = PDMPModel(1, checked_gradient, nothing)
+        checked_trace, _ = pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            BouncyParticle(1, 0.0),
+            checked_model,
+            GridThinningStrategy(),
+            0.0, 0.1;
+            progress=false,
+        )
+        @test checked_trace.times == [0.0, 0.1]
+
+        ξ0, flow, model, alg = _stopping_setup(d=1)
+        composite_trace, composite_stats = pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 10.0, 0.0;
+            warmup_stop=FixedTimeCriterion(0.0),
+            stop=AnyCriterion(FixedTimeCriterion(0.25), EventCountCriterion(10_000)),
+            progress=false,
+        )
+        @test last_event_time(composite_trace) == 0.25
+        @test composite_stats.stop_reason == :reached_time
+
+        zero_gradient = FullGradient((out, x) -> (fill!(out, 0.0); out))
+        factorized_trace, _ = pdmp_sample(
+            SkeletonPoint([1.0], [1.0]),
+            ZigZag(1),
+            PDMPModel(1, zero_gradient, nothing),
+            GridThinningStrategy(),
+            0.0, 0.25;
+            progress=false,
+        )
+        @test factorized_trace isa PDMPSamplers.FactorizedTrace
+        @test last_event_time(factorized_trace) == 0.25
+        @test length(factorized_trace) == 2
+
+        coordinate_model = PDMPModel(
+            1, CoordinateWiseGradient((x, i) -> 0.0), nothing)
+        coordinate_trace, coordinate_stats = pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            ZigZag(1),
+            coordinate_model,
+            ThinningStrategy(LocalBounds([0.0])),
+            0.0, 0.25;
+            progress=false,
+        )
+        @test length(coordinate_trace) == 2
+        @test last_event_time(coordinate_trace) == 0.25
+        @test coordinate_stats.stop_reason == :reached_time
+
+        adaptive_gradient = FullGradient(function (out, x)
+            x[1] <= 0.1 + 16eps(0.1) ||
+                error("adaptive warmup crossed max_time")
+            fill!(out, 0.0)
+            return out
+        end)
+        adaptive_criterion = AdaptiveWarmupCriterion(;
+            min_time=0.0, max_time=0.1, stable_time=1.0,
+            min_events=10_000, check_every=1)
+        adaptive_state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        PDMPSamplers.initialize!(
+            adaptive_criterion, adaptive_state, nothing,
+            PDMPSamplers.DevelStatisticCounter())
+        @test PDMPSamplers._step_horizon(
+            adaptive_criterion, adaptive_state) == 0.1
+        pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            BouncyParticle(1, 0.0),
+            PDMPModel(1, adaptive_gradient, nothing),
+            GridThinningStrategy(),
+            0.0, 0.1, 1.0;
+            warmup_stop=adaptive_criterion,
+            progress=false,
+        )
     end
 
     @testset "EventCountCriterion is phase-local" begin

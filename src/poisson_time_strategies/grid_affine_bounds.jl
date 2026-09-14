@@ -878,7 +878,7 @@ function construct_rate_bound_grid!(
     state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
     iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
 
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
     used_batched_derivatives = _supports_rate_derivatives(provider, flow) && n_time_cells > 0
@@ -1024,46 +1024,59 @@ function construct_rate_bound_grid!(
     N = length(Λ_vals)
     iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
 
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
 
-    start_point = start_cell
-    stop_point = n_time_cells + 1
-    n_points = stop_point - start_point + 1
     n_channels = _rate_channel_count(state, flow)
-    if rate_value_buf === nothing || rate_derivative_buf === nothing
-        G = Matrix{Float64}(undef, n_channels, n_points)
-        dG = similar(G)
-    else
-        G, dG = _rate_derivative_scratch!(
-            rate_value_buf, rate_derivative_buf, n_channels, n_points)
-    end
-    stats !== nothing && (_inc_counter_grid_endpoint_derivative_calls(stats))
-    stats !== nothing && (_inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points))
-    _fill_rate_derivatives!(
-        G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
-    stats !== nothing && (_inc_counter_componentwise_channels(stats, n_channels))
-    stats !== nothing && (_inc_counter_componentwise_channel_point_evaluations(
-        stats, n_channels * n_points))
-
-    for point in start_point:stop_point
-        offset = point - start_point + 1
-        y_vals[point] = sum(pos(G[j, offset]) for j in 1:n_channels)
-        d_vals[point] = sum(ispositive(G[j, offset]) ? dG[j, offset] : 0.0 for j in 1:n_channels)
-    end
+    chunk_size = max(2, _grid_rate_derivative_chunk_points())
+    loaded_start = 0
+    loaded_stop = -1
+    G = Matrix{Float64}(undef, n_channels, 0)
+    dG = similar(G)
 
     L = _channel_curvature_matrix(
         curvature_bound, state, flow, t_grid, n_channels, N, stats)
     cumulative_integral = initial_integral
-    N_evaluated = N
+    N_evaluated = start_cell - 1
     for cell in start_cell:n_time_cells
+        if !(loaded_start <= cell && cell + 1 <= loaded_stop)
+            start_point = cell
+            stop_point = min(n_time_cells + 1, max(cell + 1, cell + chunk_size - 1))
+            n_points = stop_point - start_point + 1
+            if rate_value_buf === nothing || rate_derivative_buf === nothing
+                G = Matrix{Float64}(undef, n_channels, n_points)
+                dG = similar(G)
+            else
+                G, dG = _rate_derivative_scratch!(
+                    rate_value_buf, rate_derivative_buf, n_channels, n_points)
+            end
+            stats !== nothing && (_inc_counter_grid_endpoint_derivative_calls(stats))
+            stats !== nothing && (_inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points))
+            if state_cache === nothing
+                _fill_rate_derivatives!(
+                    G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
+            else
+                _fill_rate_derivatives!(
+                    G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points, state_cache)
+            end
+            stats !== nothing && (_inc_counter_componentwise_channels(stats, n_channels))
+            stats !== nothing && (_inc_counter_componentwise_channel_point_evaluations(
+                stats, n_channels * n_points))
+            for point in start_point:stop_point
+                offset = point - start_point + 1
+                y_vals[point] = sum(pos(G[j, offset]) for j in 1:n_channels)
+                d_vals[point] = sum(ispositive(G[j, offset]) ? dG[j, offset] : 0.0 for j in 1:n_channels)
+            end
+            loaded_start = start_point
+            loaded_stop = stop_point
+        end
         a = t_grid[cell]
         b = t_grid[cell + 1]
         M = 0.0
+        left = cell - loaded_start + 1
+        right = left + 1
         for channel in 1:n_channels
-            left = cell - start_point + 1
-            right = left + 1
             M += _rate_flat_upper(
                 a, b, G[channel, left], G[channel, right],
                 dG[channel, left], dG[channel, right], L[channel, cell])
@@ -1072,7 +1085,6 @@ function construct_rate_bound_grid!(
         cell_area = M * (b - a)
         if build_affine
             start_segments = bound.n_segments
-            left = cell - start_point + 1
             _append_componentwise_signed_affine_cell!(
                 bound, stats, a, b, G, dG, L, left, cell, M;
                 linear_area_threshold,
@@ -1097,8 +1109,8 @@ function construct_rate_bound_grid!(
             end
         end
         cumulative_integral += cell_area
+        N_evaluated = cell
         if cumulative_integral >= early_stop_threshold && cell <= N
-            N_evaluated = cell
             for j in (cell + 1):N
                 Λ_vals[j] = 0.0
             end
@@ -1114,4 +1126,3 @@ function construct_rate_bound_grid!(
     end
     return N_evaluated
 end
-

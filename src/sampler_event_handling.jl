@@ -7,6 +7,12 @@ function _check_sticky_times!(alg::StickyLoopState, state::AbstractPDMPState)
     return nothing
 end
 
+function _check_sticky_times!(alg::AggregateStickyLoopState, state::AbstractPDMPState)
+    all(>=(state.t[]), alg.sticky_times) || error("some sticky_times are negative!")
+    alg.aggregate_unstick_time >= state.t[] || error("aggregate_unstick_time is in the past")
+    return nothing
+end
+
 function _compute_exact_reflection_gradient!(
     state::AbstractPDMPState,
     gradient_strategy::GlobalGradientStrategy,
@@ -58,7 +64,7 @@ end
 function _handle_global_event_impl!(
     rng::Random.AbstractRNG,
     τ::Real,
-    gradient_strategy::GlobalGradientStrategy,
+    model_or_gradient::Union{GlobalGradientStrategy,GlobalGradientModel},
     flow::ContinuousDynamics,
     alg::PoissonTimeStrategy,
     state::AbstractPDMPState,
@@ -67,9 +73,14 @@ function _handle_global_event_impl!(
     meta,
     stats::AbstractStatisticCounter,
     wrap_boundary::Bool,
+    phase::Symbol,
 )
+    gradient_strategy = model_or_gradient isa PDMPModel ? model_or_gradient.grad : model_or_gradient
     move_forward_time!(state, τ, flow)
+    _validation_t0 = time_ns()
     validate_state(state, flow, "after moving forward in time")
+    event_type === :reflect && _inc_counter_reflection_state_validation_seconds(
+        stats, (time_ns() - _validation_t0) * 1.0e-9)
 
     needs_saving = false
     saving_args = nothing
@@ -77,6 +88,7 @@ function _handle_global_event_impl!(
 
     if event_type == :reflect
         _inc_counter_reflections_events(stats)
+        _reflection_t0 = time_ns()
 
         if alg isa ExactStrategy
             _inc_counter_reflections_accepted(stats)
@@ -84,57 +96,127 @@ function _handle_global_event_impl!(
             if flow isa ZigZag
                 i = meta.i
                 reflect!(state.ξ, zero(eltype(cache.∇ϕx)), i, flow)
+                saving_args = i
             else
+                _gradient_t0 = time_ns()
                 ∇ϕx = _compute_exact_reflection_gradient!(state, gradient_strategy, flow, cache, alg, τ, wrap_boundary)
+                _inc_counter_reflection_gradient_seconds(stats,
+                    (time_ns() - _gradient_t0) * 1.0e-9)
+                _covariance_t0 = time_ns()
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
+                _inc_counter_reflection_covariance_seconds(stats,
+                    (time_ns() - _covariance_t0) * 1.0e-9)
             end
             needs_saving = true
-            (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
+            if _is_sticky_loop_state(alg) && state isa StickyPDMPState
+                _schedule_t0 = time_ns()
+                _update_sticky_schedule_after_reflect!(rng, alg, state, flow, meta)
+                _inc_counter_reflection_sticky_schedule_seconds(stats,
+                    (time_ns() - _schedule_t0) * 1.0e-9)
+            end
         else
+            _gradient_t0 = time_ns()
             ∇ϕx = _compute_reflection_gradient!(state, gradient_strategy, flow, cache, meta, alg, τ, wrap_boundary)
+            _inc_counter_reflection_gradient_seconds(stats,
+                (time_ns() - _gradient_t0) * 1.0e-9)
 
-            if accept_reflection_event(rng, alg, state.ξ, ∇ϕx, flow, τ, cache, meta)
+            if accept_reflection_event(rng, alg, state, ∇ϕx, flow, τ, cache, meta)
                 _inc_counter_reflections_accepted(stats)
+                _covariance_t0 = time_ns()
                 saving_args = reflect!(rng, state, ∇ϕx, flow, cache)
+                _inc_counter_reflection_covariance_seconds(stats,
+                    (time_ns() - _covariance_t0) * 1.0e-9)
                 needs_saving = true
-                (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
+                if _is_sticky_loop_state(alg) && state isa StickyPDMPState
+                    _schedule_t0 = time_ns()
+                    _update_sticky_schedule_after_reflect!(rng, alg, state, flow, saving_args)
+                    _inc_counter_reflection_sticky_schedule_seconds(stats,
+                        (time_ns() - _schedule_t0) * 1.0e-9)
+                end
             else
                 _set_counter_last_rejected(stats, true)
             end
         end
+        _inc_counter_reflection_update_seconds(stats,
+            (time_ns() - _reflection_t0) * 1.0e-9)
 
     elseif event_type == :refresh
         refresh_velocity!(rng, state, flow)
         needs_saving = true
         _inc_counter_refreshment_events(stats)
-        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+        (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
+        _sticky_t0 = time_ns()
         _inc_counter_sticky_events(stats)
+        _inc_counter_sticky_boundary_events(stats)
         i = meta.i
-        stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
-        validate_state(state, flow, "after stick_or_unstick!")
-        needs_saving = true
-        if isfactorized(flow)
-            saving_args = i
+        was_free = state.free[i]
+        transition_accepted = stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
+        if transition_accepted
+            if was_free
+                _inc_counter_sticky_freezes(stats)
+            else
+                _inc_counter_sticky_unfreezes(stats)
+            end
+        elseif !was_free
+            _inc_counter_sticky_unfreeze_rejections(stats)
         end
+        if transition_accepted &&
+            alg isa Union{StickyLoopState,AggregateStickyLoopState} &&
+            alg.inner_alg_state isa GridAdaptiveState
+            _invalidate_cached_gradient!(alg.inner_alg_state)
+        end
+        transition_accepted && set_active_set!(model_or_gradient, state.free)
+        validate_state(state, flow, "after stick_or_unstick!")
+        needs_saving = transition_accepted
+        transition_accepted || _set_counter_last_rejected(stats, true)
+        # Preserve the changed coordinate for typed streaming output. Dense
+        # global traces still expand this into a full state in record_event!.
+        saving_args = i
+        _inc_counter_sticky_update_seconds(stats,
+            (time_ns() - _sticky_t0) * 1.0e-9)
+
+    elseif event_type == :anchor_selection_boundary
+        # A position-bank boundary is computational only.  The state has
+        # already been transported to the exact boundary above; the adapter
+        # changes the live control variate after this handler returns.  It is
+        # neither a rejected proposal nor a graph/refresh event.
+        (_is_sticky_loop_state(alg) && state isa StickyPDMPState) &&
+            _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
+        needs_saving = true
+        isfactorized(flow) && (saving_args = first(eachindex(state.ξ.x)))
 
     elseif event_type == :horizon_hit
-        (alg isa StickyLoopState && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
+        (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
         _set_counter_last_rejected(stats, true)
+        needs_saving = true
+        isfactorized(flow) && (saving_args = first(eachindex(state.ξ.x)))
     end
 
     _check_sticky_times!(alg, state)
+    # Preserve the sticky coordinate for typed output. The legacy dense trace
+    # normalizes it to a full snapshot in `record_event!`.
     return needs_saving, saving_args
 end
 
-function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::AbstractStatisticCounter)
-    return _handle_global_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, event_type, meta, stats, false)
+function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, model_or_gradient::Union{GlobalGradientStrategy,GlobalGradientModel},
+    flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta,
+    stats::AbstractStatisticCounter, phase::Symbol=:unknown)
+    return _handle_global_event_impl!(rng, τ, model_or_gradient, flow, alg, state, cache, event_type, meta, stats, false, phase)
 end
 
-function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::GlobalGradientStrategy, flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta, stats::AbstractStatisticCounter)
-    return _handle_global_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, event_type, meta, stats, true)
+function handle_event!(rng::Random.AbstractRNG, τ::Real, model_or_gradient::Union{GlobalGradientStrategy,GlobalGradientModel},
+    flow::ContinuousDynamics, alg::PoissonTimeStrategy, state::AbstractPDMPState, cache, event_type::Symbol, meta,
+    stats::AbstractStatisticCounter, phase::Symbol=:unknown)
+    return _handle_global_event_impl!(rng, τ, model_or_gradient, flow, alg, state, cache, event_type, meta, stats, true, phase)
 end
+
+_handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, model::CoordinateWiseGradientModel,
+    args...) = _handle_event_no_boundary!(rng, τ, model.grad, args...)
+
+handle_event!(rng::Random.AbstractRNG, τ::Real, model::CoordinateWiseGradientModel,
+    args...) = handle_event!(rng, τ, model.grad, args...)
 
 function _coordinate_boundary_context(
     state::PDMPState,
@@ -147,7 +229,7 @@ function _coordinate_boundary_context(
     v = copy(state.ξ.θ)
     _rewind_linear_boundary_position!(x0, v, τ, flow)
     return BoundaryContext(
-        x0, v, Float64(state.t[] - τ), 0.0, max(Float64(τ), eps(Float64)),
+        x0, v, state.t[] - τ, 0.0, max(τ, eps()),
         original_error, typeof(flow), _public_algorithm_type(alg))
 end
 
@@ -162,12 +244,21 @@ function _handle_coordinatewise_event_impl!(
     meta,
     stats::AbstractStatisticCounter,
     wrap_boundary::Bool,
+    event_type::Symbol,
 )
     _set_counter_last_rejected(stats, false)
+    if event_type === :horizon_hit
+        move_forward_time!(state, τ, flow)
+        validate_state(state, flow, "after coordinate-wise horizon hit")
+        _set_counter_last_rejected(stats, true)
+        return true, first(eachindex(state.ξ.x))
+    end
+    event_type === :reflect || throw(ArgumentError("unsupported coordinate-wise event type: $event_type"))
     pq = cache.pq
     i₀ = meta.i
     ξ = state.ξ
     abc_i₀_old = ab_i(i₀, ξ, alg, flow, cache)
+    delete!(pq, i₀)
     move_forward_time!(state, τ, flow)
 
     ∇ϕ_i₀ = if !wrap_boundary
@@ -213,10 +304,10 @@ function _handle_coordinatewise_event_impl!(
     return needs_saving, saving_args
 end
 
-function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter)
-    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, false)
+function _handle_event_no_boundary!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter, phase::Symbol=:unknown)
+    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, false, event_type)
 end
 
-function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter)
-    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, true)
+function handle_event!(rng::Random.AbstractRNG, τ::Real, gradient_strategy::CoordinateWiseGradient, flow::ZigZag, alg::ThinningStrategy, state::PDMPState, cache, event_type, meta, stats::AbstractStatisticCounter, phase::Symbol=:unknown)
+    return _handle_coordinatewise_event_impl!(rng, τ, gradient_strategy, flow, alg, state, cache, meta, stats, true, event_type)
 end

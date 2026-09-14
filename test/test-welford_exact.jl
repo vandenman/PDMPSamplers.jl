@@ -415,4 +415,27 @@ import QuadGK
         @test allocs_mean == 0
     end
 
+    @testset "Sticky free-time welford_update!" begin
+        d = 3
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        x0 = [1.0, 0.0, -2.0]
+        θ0 = zeros(d)
+        free0 = BitVector([true, false, true])
+        PDMPSamplers.welford_update!(ws, x0, θ0, free0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, x0, θ0, free0, 1.0, flow)
+
+        @test ws.total_time ≈ 1.0
+        @test ws.free_time ≈ [1.0, 0.0, 1.0]
+        @test ws.free_sum_x_dt[1] ≈ sin(1.0)
+        @test ws.free_sum_x_dt[2] == 0.0
+        @test ws.free_sum_x_dt[3] ≈ -2.0 * sin(1.0)
+
+        allocs = minimum(
+            @allocated(PDMPSamplers.welford_update!(ws, x0, θ0, free0, 1.5 + 0.1 * i, flow))
+            for i in 1:20
+        )
+        @test allocs == 0
+    end
+
 end

@@ -1,11 +1,50 @@
-struct PDMPChains{T<:AbstractPDMPTrace,S}
+struct PDMPTerminalState{F}
+    t::Float64
+    position::Vector{Float64}
+    physical_velocity::Vector{Float64}
+    stored_frozen_velocity::Vector{Float64}
+    free::BitVector
+    flow::F
+end
+
+function PDMPTerminalState(state::AbstractPDMPState, flow)
+    stored = state isa StickyPDMPState ? copy(state.stored_velocity) :
+        zeros(Float64, length(state.ξ))
+    free = state isa StickyPDMPState ? copy(state.free) : trues(length(state.ξ))
+    # Endpoint provenance must also work for legacy covariance wrappers whose
+    # internal factor object has no `copy` method.  This does not alter the
+    # sampler's working flow; it only snapshots it for export.
+    flow_snapshot = try
+        _copy_flow(flow)
+    catch err
+        err isa MethodError || rethrow()
+        deepcopy(flow)
+    end
+    return PDMPTerminalState(Float64(state.t[]), Float64.(state.ξ.x),
+        Float64.(state.ξ.θ), stored, free, flow_snapshot)
+end
+
+struct PDMPChains{T<:AbstractPDMPTrace,S,E}
     traces::Vector{T}
     stats::Vector{S}
+    initial_states::Vector{E}
+    retained_initial_states::Vector{E}
+    terminal_states::Vector{E}
 end
+
+PDMPChains(traces::Vector{T}, stats::Vector{S}) where {T<:AbstractPDMPTrace,S} =
+    PDMPChains(traces, stats, Any[], Any[], Any[])
+PDMPChains(traces::Vector{T}, stats::Vector{S}, terminal_states::Vector{E}) where
+        {T<:AbstractPDMPTrace,S,E} =
+    PDMPChains(traces, stats, Any[], Any[], terminal_states)
 
 n_chains(chains::PDMPChains) = length(chains.traces)
 
 Base.getindex(chains::PDMPChains, i::Integer) = (chains.traces[i], chains.stats[i])
+terminal_state(chains::PDMPChains, i::Integer=1) = chains.terminal_states[i]
+initial_state(chains::PDMPChains, i::Integer=1) = chains.initial_states[i]
+retained_initial_state(chains::PDMPChains, i::Integer=1) =
+    chains.retained_initial_states[i]
 Base.firstindex(chains::PDMPChains) = 1
 Base.lastindex(chains::PDMPChains) = n_chains(chains)
 Base.length(chains::PDMPChains) = n_chains(chains)
@@ -120,11 +159,11 @@ function Base.show(io::IO, chains::PDMPChains)
     n_events = [length(chains.traces[i]) for i in 1:nc]
     print(io, "PDMPChains with $nc chain$(isone(nc) ? "" : "s") ($(join(n_events, ", ")) events)")
 
-    total_lazy_low_tightness = sum(stat.lazy_fallback_low_tightness for stat in chains.stats)
-    total_lazy_bound_violation = sum(stat.lazy_fallback_bound_violation for stat in chains.stats)
-    total_lazy_attempts = sum(stat.lazy_proposal_attempts for stat in chains.stats)
-    total_lazy_rejections = sum(stat.lazy_proposal_rejections for stat in chains.stats)
-    total_grid_resets = sum(stat.grid_resets_from_dynamics_adaptation for stat in chains.stats)
+    total_lazy_low_tightness = sum(_get_counter_lazy_fallback_low_tightness, chains.stats)
+    total_lazy_bound_violation = sum(_get_counter_lazy_fallback_bound_violation, chains.stats)
+    total_lazy_attempts = sum(_get_counter_lazy_proposal_attempts, chains.stats)
+    total_lazy_rejections = sum(_get_counter_lazy_proposal_rejections, chains.stats)
+    total_grid_resets = sum(_get_counter_grid_resets_from_dynamics_adaptation, chains.stats)
 
     if total_lazy_low_tightness > 0 || total_lazy_bound_violation > 0 || total_lazy_attempts > 0 || total_grid_resets > 0
         print(io,
