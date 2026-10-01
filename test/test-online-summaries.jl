@@ -85,6 +85,9 @@
                     @test got[3] ≈ ref[3] atol = 1e-4
                 end
                 @test got[4] ≈ ref[4] atol = 1e-5
+                # Without stored events the trajectory cannot be replayed;
+                # say so instead of replaying a path without events.
+                @test_throws r"write_events = false" iterate(streamed)
                 # Totals agree with the existing exact streaming moments.
                 @test vec(sum(got[1]; dims=2)) ≈ streamed.moments.sum_x
                 @test vec(sum(got[2]; dims=2)) ≈ streamed.moments.sum_x2
