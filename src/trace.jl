@@ -1093,6 +1093,9 @@ function _restore_streaming_trace(directory::AbstractString,
         terminal_state; physical_events::Integer,
         computational_boundaries::Integer, buffer_maximum::Integer)
     chunk_count >= 0 || throw(ArgumentError("negative streaming chunk count"))
+    # Events without chunks: the trace was sampled with write_events = false.
+    chunk_count == 0 && physical_events > 0 &&
+        throw(ArgumentError(_STREAM_NOT_STORED_MESSAGE))
     resolved_directory = abspath(String(directory))
     total_bytes = Int64(0)
     for i in 1:chunk_count
@@ -1201,7 +1204,15 @@ function _stream_apply_event!(cursor::StreamingTraceCursor,
     return nothing
 end
 
+const _STREAM_NOT_STORED_MESSAGE =
+    "the trajectory of this streaming trace was not stored: it was sampled " *
+    "with write_events = false, so only its online summaries were kept and " *
+    "the path between the initial and terminal states cannot be replayed. " *
+    "Sample with write_events = true to keep the trajectory, or use the " *
+    "online summaries (including their snapshot grid)."
+
 function Base.iterate(trace::StreamingPDMPTrace)
+    trace.write_events || throw(ArgumentError(_STREAM_NOT_STORED_MESSAGE))
     trace.finalized || _flush_streaming_trace!(trace)
     cursor = _stream_cursor(trace)
     initial = trace.initial_state
