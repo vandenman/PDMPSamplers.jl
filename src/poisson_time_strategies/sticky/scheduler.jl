@@ -19,14 +19,22 @@ get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:Function}, i, args...) = sti
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_state.κ[i]
 get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_state.κ(i, args...)
 
+# Sticky rates evaluated for many coordinates at one state share a context:
+# summary statistics of the state that a rate function computes once (see
+# BetaBernoulliKappa). The default context is empty.
+_kappa_context(κ, x, free) = nothing
+_kappa_value(κ::AbstractVector, context, i, args...) = κ[i]
+_kappa_value(κ::Function, ::Nothing, i, args...) = κ(i, args...)
+
 function rebuild_sticky_schedule!(rng::Random.AbstractRNG, alg::StickyLoopState, state::StickyPDMPState, flow::ContinuousDynamics)
 
     t = state.t[]
+    κ_context = _kappa_context(alg.κ, state.ξ.x, state.free)
     for i in alg.stickable_indices
         if state.free[i]
             _set_sticky_time!(alg, i, t + sticking_time(state.ξ, flow, i))
         else # stuck
-            _set_sticky_time!(alg, i, t + unsticking_time(rng, alg, state, flow, i))
+            _set_sticky_time!(alg, i, t + unsticking_time(rng, alg, state, flow, i, κ_context))
         end
         isnan(alg.sticky_times[i]) && error("sticky_times[$i] is NaN ($(alg.sticky_times[i])) after scheduling a stick/unstick event (θ[i] = $(state.ξ.θ[i]))")
     end
@@ -203,7 +211,7 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState,
     else
         _update_sticky_time_at_index!(rng, alg, state, flow, i)
     end
-    validate_state(state, flow, "after stick_or_unstick! at index $i")
+    validate_state(state, flow, "after stick_or_unstick!")
     return accepted
 end
 
@@ -238,10 +246,10 @@ function stick_or_unstick!(rng::Random.AbstractRNG, state::StickyPDMPState, flow
         else
             reschedule_aggregate_unstick_time!(rng, alg, state, flow)
         end
-        validate_state(state, flow, "after aggregate stick_or_unstick! at index $i")
+        validate_state(state, flow, "after aggregate stick_or_unstick!")
         return accepted
     end
-    validate_state(state, flow, "after aggregate stick_or_unstick! at index $i")
+    validate_state(state, flow, "after aggregate stick_or_unstick!")
     return true
 end
 
@@ -251,6 +259,7 @@ function _bounded_inner_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:G
     return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
         max_horizon, false, :sticky_horizon_hit, detect_boundaries)
 end
+
 
 function _bounded_inner_event_time(rng::Random.AbstractRNG,
         model::PDMPModel{<:SubsampledControlVariate}, flow::ContinuousDynamics,
@@ -277,9 +286,12 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     return next_event_time(rng, model, flow, alg, state, cache, stats, Inf, detect_boundaries)
 end
 
-function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+struct _StickyTupleConsumer end
+@inline (::_StickyTupleConsumer)(τ, kind, meta) = (τ, kind, meta)
+
+function _next_sticky_event_consume(consume::F, rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
         alg::AggregateStickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
-        step_horizon::Float64, detect_boundaries::Bool=false)
+        step_horizon::Float64, detect_boundaries::Bool=false) where {F}
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
 
@@ -296,29 +308,36 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
             max_horizon, detect_boundaries)
 
         if step_horizon <= τ_inner && step_horizon <= τ_sticky && step_horizon <= τ_refresh
-            return step_horizon, :horizon_hit, EmptyMeta()
+            return consume(step_horizon, :horizon_hit, EmptyMeta())
         elseif τ_sticky <= τ_inner && τ_sticky <= τ_refresh
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
             if t_unstick <= t_stick
                 i_unstick = sample_label(rng, alg.clock, flow, state, τ_sticky, alg.can_stick)
-                return τ_sticky, :sticky, CoordinateMeta(i_unstick)
+                return consume(τ_sticky, :sticky, CoordinateMeta(i_unstick))
             end
-            return τ_sticky, :sticky, CoordinateMeta(i_stick)
+            return consume(τ_sticky, :sticky, CoordinateMeta(i_stick))
         elseif τ_refresh <= τ_inner
             _inc_counter_sticky_inner_wasted_by_refresh(stats)
-            return τ_refresh, :refresh, GradientMeta(alg.empty_∇ϕx)
+            return consume(τ_refresh, :refresh, alg.empty_gradient_meta)
         else
             _inc_counter_sticky_inner_wins(stats)
-            return τ_inner, event_type, meta
+            return consume(τ_inner, event_type, meta)
         end
     else
         _inc_counter_sticky_all_frozen_events(stats)
         step_horizon <= t_unstick - t &&
-            return step_horizon, :horizon_hit, EmptyMeta()
-        isfinite(t_unstick) || return Inf, :sticky, CoordinateMeta(0)
+            return consume(step_horizon, :horizon_hit, EmptyMeta())
+        isfinite(t_unstick) || return consume(Inf, :sticky, CoordinateMeta(0))
         i_unstick = sample_label(rng, alg.clock, flow, state, t_unstick - t, alg.can_stick)
-        return t_unstick - t, :sticky, CoordinateMeta(i_unstick)
+        return consume(t_unstick - t, :sticky, CoordinateMeta(i_unstick))
     end
+end
+
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+        alg::AggregateStickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        step_horizon::Float64, detect_boundaries::Bool=false)
+    return _next_sticky_event_consume(_StickyTupleConsumer(), rng, model,
+        flow, alg, state, cache, stats, step_horizon, detect_boundaries)
 end
 
 function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
@@ -327,9 +346,9 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     return next_event_time(rng, model, flow, alg, state, cache, stats, Inf, detect_boundaries)
 end
 
-function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+function _next_sticky_event_consume(consume::F, rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
         alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
-        step_horizon::Float64, detect_boundaries::Bool=false)
+        step_horizon::Float64, detect_boundaries::Bool=false) where {F}
     t = state.t[]
     inner_alg_state = alg.inner_alg_state
 
@@ -378,16 +397,16 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
             rng, model, flow, inner_alg_state, state, cache, stats, max_horizon, detect_boundaries)
 
         if step_horizon <= τ && step_horizon <= τ_sticky && step_horizon <= τ_refresh
-            return step_horizon, :horizon_hit, EmptyMeta()
+            return consume(step_horizon, :horizon_hit, EmptyMeta())
         elseif τ_sticky <= τ && τ_sticky <= τ_refresh # sticky event happens first
             _inc_counter_sticky_inner_wasted_by_sticky(stats)
-            return τ_sticky, :sticky, CoordinateMeta(i)
+            return consume(τ_sticky, :sticky, CoordinateMeta(i))
         elseif τ_refresh <= τ
             _inc_counter_sticky_inner_wasted_by_refresh(stats)
-            return τ_refresh, :refresh, GradientMeta(alg.empty_∇ϕx)
+            return consume(τ_refresh, :refresh, alg.empty_gradient_meta)
         else
             _inc_counter_sticky_inner_wins(stats)
-            return τ, event_type, meta
+            return consume(τ, event_type, meta)
         end
 
         # original
@@ -401,9 +420,16 @@ function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradi
     else
         _inc_counter_sticky_all_frozen_events(stats)
         Δt = tᶠ - t
-        step_horizon <= Δt && return step_horizon, :horizon_hit, EmptyMeta()
-        return Δt, :sticky, CoordinateMeta(i)
+        step_horizon <= Δt && return consume(step_horizon, :horizon_hit, EmptyMeta())
+        return consume(Δt, :sticky, CoordinateMeta(i))
     end
+end
+
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics,
+        alg::StickyLoopState, state::StickyPDMPState, cache, stats::AbstractStatisticCounter,
+        step_horizon::Float64, detect_boundaries::Bool=false)
+    return _next_sticky_event_consume(_StickyTupleConsumer(), rng, model,
+        flow, alg, state, cache, stats, step_horizon, detect_boundaries)
 end
 
 _reset_inner_grid!(alg::StickyLoopState) = _reset_inner_grid!(alg.inner_alg_state)

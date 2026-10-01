@@ -165,14 +165,15 @@ end
         @test all(diag(flow.Γ) .> 0)
     end
 
-    @testset "sticky diagonal adaptation uses a globally zero-centred reference" begin
-        d = 3
-        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+    # Shared warmup statistics: coordinates 1 and 3 are stickable, and
+    # coordinate 3 has spent too little time free for the legacy scale update.
+    function sticky_diagonal_fixture()
+        flow = AdaptiveBoomerang(3; scheme=:diagonal)
         flow.μ .= [8.0, 8.0, 8.0]
         flow.Γ[3, 3] = 4.0
         flow.L[3, 3] = 2.0
         flow.ΣL[3, 3] = 0.5
-        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        ws = PDMPSamplers.WelfordBoomerangStats(3)
         ws.total_time = 20.0
         ws.sum_x_dt .= [40.0, 40.0, 20.0]
         ws.sum_x2_dt .= [100.0, 100.0, 40.0]
@@ -180,10 +181,28 @@ end
         PDMPSamplers._ensure_free_moments!(ws)
         ws.free_sum_x_dt .= [40.0, 40.0, 5.0]
         ws.free_sum_x2_dt .= [100.0, 100.0, 10.0]
-        can_stick = BitVector([true, false, true])
+        return flow, ws, BitVector([true, false, true])
+    end
 
+    @testset "sticky diagonal adaptation: centred nuisance, fixed stickable scales" begin
+        flow, ws, can_stick = sticky_diagonal_fixture()
         PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
             PDMPSamplers.BoomerangAdaptationOptions(), can_stick)
+
+        @test flow.μ[1] == 0.0
+        @test flow.Γ[1, 1] == 1.0 # stickable: scale before warmup kept
+        @test flow.μ[2] ≈ 2.0     # warmup mean 40 / 20
+        @test flow.Γ[2, 2] ≈ 1.0  # inverse variance 100 / 20 - 2^2 = 1
+        @test flow.μ[3] == 0.0
+        @test flow.Γ[3, 3] == 4.0
+        @test flow.L[2, 2] ≈ 1.0 && flow.ΣL[3, 3] ≈ 0.5
+    end
+
+    @testset "sticky diagonal adaptation: legacy zero-centred reference" begin
+        flow, ws, can_stick = sticky_diagonal_fixture()
+        PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
+            PDMPSamplers.BoomerangAdaptationOptions(center_nonstickable=false,
+                adapt_stickable_scales=true), can_stick)
 
         @test flow.μ[1] == 0.0
         @test flow.Γ[1, 1] ≈ 0.2 # inverse E[x^2 | free] = 1 / 5
@@ -193,28 +212,39 @@ end
         @test flow.Γ[3, 3] == 4.0 # too little free time: retain scale
     end
 
-    @testset "research nuisance-centre ablation preserves sticky centres and covariance" begin
-        d = 3
-        legacy = AdaptiveBoomerang(d; scheme=:diagonal)
-        learned = AdaptiveBoomerang(d; scheme=:diagonal)
-        ws = PDMPSamplers.WelfordBoomerangStats(d)
-        ws.total_time = 20.0
-        ws.sum_x_dt .= [40.0, -30.0, 10.0]
-        ws.sum_x2_dt .= [100.0, 65.0, 30.0]
-        ws.free_time .= 20.0
-        can_stick = BitVector([true, false, false])
+    @testset "each sticky option changes only its own coordinates" begin
+        options(; kw...) = PDMPSamplers.BoomerangAdaptationOptions(; kw...)
+        install(opts) = begin
+            flow, ws, can_stick = sticky_diagonal_fixture()
+            PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
+                opts, can_stick)
+            flow
+        end
+        legacy = install(options(center_nonstickable=false, adapt_stickable_scales=true))
+        centred = install(options(center_nonstickable=true, adapt_stickable_scales=true))
+        fixed = install(options(center_nonstickable=false, adapt_stickable_scales=false))
 
-        PDMPSamplers.update_boomerang!(legacy, ws, Val(:diagonal), nothing,
-            PDMPSamplers.BoomerangAdaptationOptions(), can_stick)
-        PDMPSamplers.update_boomerang!(learned, ws, Val(:diagonal), nothing,
-            PDMPSamplers.BoomerangAdaptationOptions(
-                learn_nonstickable_means=true), can_stick)
+        stickable, nuisance = [1, 3], [2]
+        @test centred.μ[stickable] == legacy.μ[stickable]
+        @test diag(centred.Γ)[stickable] == diag(legacy.Γ)[stickable]
+        @test centred.μ[nuisance] != legacy.μ[nuisance]
+        @test fixed.μ == legacy.μ
+        @test diag(fixed.Γ)[nuisance] == diag(legacy.Γ)[nuisance]
+        @test fixed.Γ[1, 1] != legacy.Γ[1, 1]
+    end
 
-        @test learned.μ == [0.0, -1.5, 0.5]
-        @test legacy.μ == zeros(d)
-        @test diag(learned.Γ) == diag(legacy.Γ)
-        @test diag(learned.L) == diag(legacy.L)
-        @test diag(learned.ΣL) == diag(legacy.ΣL)
+    @testset "without stickable coordinates the options have no effect" begin
+        install(opts) = begin
+            flow, ws, _ = sticky_diagonal_fixture()
+            PDMPSamplers.update_boomerang!(flow, ws, Val(:diagonal), nothing,
+                opts, falses(3))
+            flow
+        end
+        a = install(PDMPSamplers.BoomerangAdaptationOptions())
+        b = install(PDMPSamplers.BoomerangAdaptationOptions(
+            center_nonstickable=false, adapt_stickable_scales=true))
+        @test a.μ == b.μ
+        @test diag(a.Γ) == diag(b.Γ)
     end
 
     @testset "opt-in initial-variance floor survives repeated diagonal updates" begin
@@ -227,7 +257,8 @@ end
             flow.ΣL[i, i] = sqrt(initial_var[i])
         end
         options = PDMPSamplers.BoomerangAdaptationOptions(
-            initial_variance_floor_fraction=0.1)
+            initial_variance_floor_fraction=0.1,
+            center_nonstickable=false, adapt_stickable_scales=true)
         floor_mask = BitVector([false, true, false, true])
         ad = PDMPSamplers.default_dynamics_adapter(flow, 1.0, 0.0;
             options, can_stick=BitVector([true, false, true, false]),

@@ -61,6 +61,50 @@ function _compute_reflection_gradient!(
     end
 end
 
+function _apply_sticky_transition_at_current_time!(
+    rng::Random.AbstractRNG, model_or_gradient, flow::ContinuousDynamics,
+    alg::PoissonTimeStrategy, state::StickyPDMPState,
+    stats::AbstractStatisticCounter, i::Int)
+    _sticky_t0 = time_ns()
+    _inc_counter_sticky_events(stats)
+    _inc_counter_sticky_boundary_events(stats)
+    was_free = state.free[i]
+    transition_accepted = stick_or_unstick!(rng, state, flow, alg, i)
+    if transition_accepted
+        if was_free
+            _inc_counter_sticky_freezes(stats)
+        else
+            _inc_counter_sticky_unfreezes(stats)
+        end
+    elseif !was_free
+        _inc_counter_sticky_unfreeze_rejections(stats)
+    end
+    if transition_accepted &&
+        alg isa Union{StickyLoopState,AggregateStickyLoopState} &&
+        alg.inner_alg_state isa GridAdaptiveState
+        _invalidate_cached_gradient!(alg.inner_alg_state)
+    end
+    transition_accepted && set_active_set!(model_or_gradient, state.free)
+    validate_state(state, flow, "after stick_or_unstick!")
+    transition_accepted || _set_counter_last_rejected(stats, true)
+    _inc_counter_sticky_update_seconds(stats,
+        (time_ns() - _sticky_t0) * 1.0e-9)
+    return transition_accepted
+end
+
+function _handle_sticky_event_no_boundary!(
+    rng::Random.AbstractRNG, τ::Real, model_or_gradient,
+    flow::ContinuousDynamics, alg::PoissonTimeStrategy,
+    state::StickyPDMPState, stats::AbstractStatisticCounter, i::Int)
+    move_forward_time!(state, τ, flow)
+    validate_state(state, flow, "after moving forward in time")
+    _set_counter_last_rejected(stats, false)
+    accepted = _apply_sticky_transition_at_current_time!(rng,
+        model_or_gradient, flow, alg, state, stats, i)
+    _check_sticky_times!(alg, state)
+    return accepted
+end
+
 function _handle_global_event_impl!(
     rng::Random.AbstractRNG,
     τ::Real,
@@ -147,35 +191,13 @@ function _handle_global_event_impl!(
         (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
 
     elseif event_type == :sticky
-        _sticky_t0 = time_ns()
-        _inc_counter_sticky_events(stats)
-        _inc_counter_sticky_boundary_events(stats)
         i = meta.i
-        was_free = state.free[i]
-        transition_accepted = stick_or_unstick!(rng, state::StickyPDMPState, flow, alg, i)
-        if transition_accepted
-            if was_free
-                _inc_counter_sticky_freezes(stats)
-            else
-                _inc_counter_sticky_unfreezes(stats)
-            end
-        elseif !was_free
-            _inc_counter_sticky_unfreeze_rejections(stats)
-        end
-        if transition_accepted &&
-            alg isa Union{StickyLoopState,AggregateStickyLoopState} &&
-            alg.inner_alg_state isa GridAdaptiveState
-            _invalidate_cached_gradient!(alg.inner_alg_state)
-        end
-        transition_accepted && set_active_set!(model_or_gradient, state.free)
-        validate_state(state, flow, "after stick_or_unstick!")
+        transition_accepted = _apply_sticky_transition_at_current_time!(rng,
+            model_or_gradient, flow, alg, state::StickyPDMPState, stats, i)
         needs_saving = transition_accepted
-        transition_accepted || _set_counter_last_rejected(stats, true)
         # Preserve the changed coordinate for typed streaming output. Dense
         # global traces still expand this into a full state in record_event!.
         saving_args = i
-        _inc_counter_sticky_update_seconds(stats,
-            (time_ns() - _sticky_t0) * 1.0e-9)
 
     elseif event_type == :anchor_selection_boundary
         # A position-bank boundary is computational only.  The state has
@@ -189,7 +211,10 @@ function _handle_global_event_impl!(
 
     elseif event_type == :horizon_hit
         (_is_sticky_loop_state(alg) && state isa StickyPDMPState) && _update_sticky_schedule_after_horizon_hit!(rng, alg, state, flow)
-        _set_counter_last_rejected(stats, true)
+        # A positive-time computational horizon is not a rejected Poisson
+        # proposal.  Counting it as one makes low-rate but healthy samplers
+        # trip the consecutive-rejection guard after ordinary grid advances.
+        _set_counter_last_rejected(stats, false)
         needs_saving = true
         isfactorized(flow) && (saving_args = first(eachindex(state.ξ.x)))
     end
@@ -250,7 +275,7 @@ function _handle_coordinatewise_event_impl!(
     if event_type === :horizon_hit
         move_forward_time!(state, τ, flow)
         validate_state(state, flow, "after coordinate-wise horizon hit")
-        _set_counter_last_rejected(stats, true)
+        _set_counter_last_rejected(stats, false)
         return true, first(eachindex(state.ξ.x))
     end
     event_type === :reflect || throw(ArgumentError("unsupported coordinate-wise event type: $event_type"))

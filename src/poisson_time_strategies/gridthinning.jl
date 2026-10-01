@@ -351,10 +351,17 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     else
         nothing
     end
+    pcb = PiecewiseConstantBound(
+        collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base))
+    sizehint!(pcb.t_grid, N_max + 1)
+    sizehint!(pcb.Λ_vals, N_max)
+    sizehint!(pcb.y_vals, N_max + 1)
+    sizehint!(pcb.d_vals, N_max + 1)
+    empty_gradient = similar(state.ξ.x, 0)
     GridAdaptiveState(
-        PiecewiseConstantBound(collect(range(0.0, strat.t_max, N_base + 1)), zeros(T, N_base)),
-        PiecewiseAffineBound(2N_base),
-        PiecewiseAffineBound(2N_base),
+        pcb,
+        PiecewiseAffineBound(2N_max),
+        PiecewiseAffineBound(2N_max),
         Base.RefValue{Int}(N_base),
         Base.RefValue{Float64}(strat.t_max),
         strat.α⁺,
@@ -366,7 +373,8 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         est,
         state_cache,
         state_cache2,
-        similar(state.ξ.x, 0),
+        empty_gradient,
+        GradientMeta(empty_gradient),
         strat.curvature_backend,
         fd_buf,
         fd_grad_buf,
@@ -399,7 +407,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q,B} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     affine_bound::PiecewiseAffineBound{Float64}
     subsampling_bound::PiecewiseAffineBound{Float64}
@@ -415,6 +423,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q} <: PoissonT
     state_cache::S
     state_cache2::S
     empty_∇ϕx::V
+    empty_gradient_meta::GradientMeta
     curvature_backend::Symbol
     fd_buf::Vector{Float64}
     fd_grad_buf::Vector{Float64}
@@ -434,7 +443,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q} <: PoissonT
     grad_provider::P
     exact_provider::Q
     bound::Symbol
-    curvature_bound
+    curvature_bound::B
     bound_violation::Symbol
     linear_area_threshold::Float64
     linear_min_area_gain::Float64

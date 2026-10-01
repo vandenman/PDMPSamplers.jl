@@ -259,7 +259,7 @@ function next_event_time(rng::Random.AbstractRNG,
             roof)
         if result.accepted
             _inc_counter_subsampling_final_reflections(stats)
-            return τ, :reflect, GradientMeta(cache.∇ϕx)
+            return τ, :reflect, _gradient_meta(cache)
         end
     end
 end

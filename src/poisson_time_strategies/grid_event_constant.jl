@@ -11,7 +11,7 @@ function _constant_bound_event_time(
     alg.has_cached_rate_derivative[] = false
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
     τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
-    default_return = GradientMeta(alg.empty_∇ϕx)
+    default_return = alg.empty_gradient_meta
 
     state_ = alg.state_cache
     copyto!(state_, state)

@@ -121,6 +121,7 @@
             state.t[] = event / 100
             state.ξ.x .+= 0.01 .* state.ξ.θ
             state.ξ.θ .*= -1
+            PDMPSamplers.prepare_trace_storage_boundary!(trace)
             PDMPSamplers._record_streaming_event!(trace, state, flow,
                 nothing, :reflect)
         end
@@ -146,6 +147,7 @@
             state.t[] += 0.1
             state.ξ.x .+= 0.1 .* state.ξ.θ
             state.ξ.θ .*= -1
+            PDMPSamplers.prepare_trace_storage_boundary!(trace)
             PDMPSamplers._record_streaming_event!(trace, state, flow,
                 nothing, :reflect)
         end
@@ -218,6 +220,7 @@
         move_forward_time!(state, 0.2, flow)
         state.ξ.θ[2] = state.stored_velocity[2]
         state.stored_velocity[2] = 0.0; state.free[2] = true
+        PDMPSamplers.prepare_trace_storage_boundary!(trace)
         PDMPSamplers._record_streaming_event!(trace, state, flow, 2, :sticky)
         move_forward_time!(state, 0.2, flow)
         state.ξ.θ .= [0.45, -0.6]

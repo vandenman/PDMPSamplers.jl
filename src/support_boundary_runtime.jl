@@ -151,16 +151,79 @@ function _step!(
     max_horizon_event::Symbol=:horizon_hit,
 ) where {FL<:ContinuousDynamics}
     τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling(), max_horizon)
-    τ, event_type, meta = _cap_event_time_for_step(τ, event_type, meta,
-        max_horizon, max_horizon_event)
+    capped = isfinite(max_horizon) &&
+        (τ > max_horizon ||
+         (τ == max_horizon && event_type === :horizon_hit))
+    if capped
+        τ = Float64(max_horizon)
+        event_type = max_horizon_event
+    end
     @assert ispositive(τ) || (iszero(τ) && event_type in
         (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-    needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
+    # Keep the two metadata types on separate compiled paths.  Merging a
+    # GradientMeta with an EmptyMeta before dispatch boxes the former for each
+    # physical event, even when both values already exist in reusable caches.
+    needs_saving, saving_args = if capped
+        _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+            cache, event_type, EmptyMeta(), stats, phase)
+    else
+        _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+            cache, event_type, meta, stats, phase)
+    end
     needs_saving && record_event!(trace_manager, state, flow, saving_args,
         phase, event_type)
 
     return event_type
+end
+
+# The sticky scheduler can return three metadata shapes.  Consuming each
+# branch where it is constructed keeps the mixed return tuple out of the
+# physical-step call path while preserving the public next_event_time API.
+function _step!(
+    rng::Random.AbstractRNG,
+    state::StickyPDMPState,
+    model_::PDMPModel{<:GlobalGradientStrategy},
+    flow::FL,
+    alg_::A,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    trace_manager::TraceManager,
+    ::NoBoundaryHandling,
+    phase::Symbol,
+    max_horizon::Real=Inf,
+    max_horizon_event::Symbol=:horizon_hit,
+) where {FL<:ContinuousDynamics,A<:Union{StickyLoopState,AggregateStickyLoopState}}
+    horizon = Float64(max_horizon)
+    consume = function (τ, event_type, meta)
+        capped = isfinite(horizon) &&
+            (τ > horizon || (τ == horizon && event_type === :horizon_hit))
+        if capped
+            τ = horizon
+            event_type = max_horizon_event
+        end
+        @assert ispositive(τ) || (iszero(τ) && event_type in
+            (:sticky, :horizon_hit, :anchor_selection_boundary))
+        if !capped && event_type === :sticky
+            needs_saving = _handle_sticky_event_no_boundary!(rng, τ,
+                model_, flow, alg_, state, stats, meta.i)
+            needs_saving && record_event!(trace_manager, state, flow,
+                meta.i, phase, event_type)
+            return event_type
+        end
+        needs_saving, saving_args = if capped
+            _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+                cache, event_type, EmptyMeta(), stats, phase)
+        else
+            _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+                cache, event_type, meta, stats, phase)
+        end
+        needs_saving && record_event!(trace_manager, state, flow,
+            saving_args, phase, event_type)
+        return event_type
+    end
+    return _next_sticky_event_consume(consume, rng, model_, flow, alg_,
+        state, cache, stats, horizon, false)
 end
 
 function _step!(
@@ -753,7 +816,7 @@ function _line_search_truncated_refresh_boundary!(
             next_event_time(rng, model, flow, alg, state, cache, stats, safe_time, true, :support_boundary, true)
         catch err
             if err isa _ProbeFailureException || err isa _GridSafetyLimitException
-                0.0, :support_boundary, GradientMeta(cache.∇ϕx)
+                0.0, :support_boundary, _gradient_meta(cache)
             else
                 rethrow()
             end

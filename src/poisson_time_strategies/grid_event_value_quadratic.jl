@@ -132,7 +132,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
     copyto!(state_, state)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-    default_return = GradientMeta(alg.empty_∇ϕx)
+    default_return = alg.empty_gradient_meta
 
     τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
 

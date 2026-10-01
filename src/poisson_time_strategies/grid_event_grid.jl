@@ -12,7 +12,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
     time_offset = 0.0
     tail_restart_count = 0
-    default_return = GradientMeta(alg.empty_∇ϕx)
+    default_return = alg.empty_gradient_meta
 
     while true
         pcb = alg.pcb
@@ -293,7 +293,7 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
     copyto!(state_, state)
 
     λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-    default_return = GradientMeta(alg.empty_∇ϕx)
+    default_return = alg.empty_gradient_meta
 
     τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
 

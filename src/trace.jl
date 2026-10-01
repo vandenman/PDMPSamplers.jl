@@ -40,6 +40,23 @@ struct PDMPTrace{T, U<:ContinuousDynamics, M<:AbstractMatrix{T}, F} <: AbstractP
     velocities::M   # d × N
     flow::U
     free_masks::F   # nothing for ordinary traces; d × N for sticky traces
+    recording_capacity::Base.RefValue{Int}
+end
+
+function PDMPTrace(times::Vector{T}, positions::M, velocities::M,
+        flow::U, free_masks::F) where {T,U<:ContinuousDynamics,
+        M<:AbstractMatrix{T},F}
+    capacity = max(16, length(times))
+    trace = PDMPTrace{T,U,M,F}(times, positions, velocities, flow,
+        free_masks, Ref(capacity))
+    if positions isa GrowableMatrix
+        sizehint!(trace.times, capacity)
+        d = size(positions, 1)
+        sizehint!(trace.positions, d, capacity)
+        sizehint!(trace.velocities, d, capacity)
+        free_masks === nothing || sizehint!(free_masks, d, capacity)
+    end
+    return trace
 end
 
 PDMPTrace(times::Vector{T}, positions::M, velocities::M, flow::U) where {T,U<:ContinuousDynamics,M<:AbstractMatrix{T}} =
@@ -92,19 +109,30 @@ mutable struct FactorizedTrace{T<:FactorizedEvent, U<:ContinuousDynamics, V<:PDM
     const flow::U
     initial_state::V
     last_state::V
+    last_state_time::Float64
     last_state_valid::Bool
     bounds_cache::Dict{Int, Tuple{Float64, Float64}}
+    recording_capacity::Base.RefValue{Int}
 end
 
 function FactorizedTrace(state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(state)
+    last_state = PDMPEvent(state)
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
-    FactorizedTrace(events, flow, initial_state, initial_state, true, Dict{Int, Tuple{Float64, Float64}}())
+    sizehint!(events, 16)
+    FactorizedTrace(events, flow, initial_state, last_state,
+        Float64(state.t[]), true, Dict{Int, Tuple{Float64, Float64}}(),
+        Ref(16))
 end
 function make_empty_trace(::Type{<:FactorizedTrace}, state::AbstractPDMPState, flow::ContinuousDynamics)
     initial_state = PDMPEvent(-one(state.t[]), state.ξ.x, state.ξ.θ)
+    last_state = PDMPEvent(-one(state.t[]), copy(state.ξ.x),
+        copy(state.ξ.θ))
     events = Vector{FactorizedEvent{typeof(state.t[]), eltype(state.ξ.x), eltype(state.ξ.θ)}}()
-    FactorizedTrace(events, flow, initial_state, initial_state, false, Dict{Int, Tuple{Float64, Float64}}())
+    sizehint!(events, 16)
+    FactorizedTrace(events, flow, initial_state, last_state,
+        Float64(-one(state.t[])), false,
+        Dict{Int, Tuple{Float64, Float64}}(), Ref(16))
 end
 
 function _invalidate_factorized_caches!(trace::FactorizedTrace)
@@ -128,11 +156,11 @@ end
 function _advance_last_state(trace::FactorizedTrace, event::FactorizedEvent)
     trace.last_state_valid || return trace
     e = trace.last_state
-    x, θ = copy(e.position), copy(e.velocity)
-    Δt = event.time - e.time
-    move_forward_time!(SkeletonPoint(x, θ), Δt, trace.flow)
-    _to_next_event!(x, θ, event)
-    trace.last_state = PDMPEvent(event.time, x, θ)
+    Δt = event.time - trace.last_state_time
+    move_forward_time!(SkeletonPoint(e.position, e.velocity), Δt,
+        trace.flow)
+    _to_next_event!(e.position, e.velocity, event)
+    trace.last_state_time = event.time
     return trace
 end
 
@@ -180,7 +208,9 @@ compact(trace::FactorizedTrace) = trace
 # ---------------------------------------------------------------------------
 
 """
-    StreamingTraceStorage(directory; buffer_events=4096)
+    StreamingTraceStorage(directory; buffer_events=4096, write_events=true,
+                          online_batches=0, online_end_time=NaN,
+                          online_grid_spacing=NaN)
 
 Opt-in bounded trace storage. Sampling writes immutable typed-event chunks to
 `directory`; flushing a full buffer only performs file I/O. It never calls a
@@ -191,16 +221,93 @@ all free velocities (BPS/Boomerang reflections, refreshment, and dynamics
 adaptation). Coordinate events store one coordinate. Computational horizons
 and position-anchor boundaries are observed for elapsed-time bookkeeping but
 are not physical trace records.
+
+With `online_batches > 0` the main phase also accumulates exact
+continuous-time batch integrals (see [`StreamingOnlineSummaries`](@ref)) over
+`online_batches` equal batches ending at `online_end_time`, plus
+position/mask snapshots every `online_grid_spacing`, and writes them to
+`online_summaries.bin` in the main-phase directory. With `write_events=false`
+the main phase writes no event chunks, so memory and disk use do not grow with
+the number of events; the online summaries are then its only retained output.
 """
 struct StreamingTraceStorage
     directory::String
     buffer_events::Int
+    write_events::Bool
+    online_batches::Int
+    online_end_time::Float64
+    online_grid_spacing::Float64
     function StreamingTraceStorage(directory::AbstractString;
-            buffer_events::Integer=4096)
+            buffer_events::Integer=4096, write_events::Bool=true,
+            online_batches::Integer=0, online_end_time::Real=NaN,
+            online_grid_spacing::Real=NaN)
         buffer_events >= 1 || throw(ArgumentError(
             "streaming trace buffer_events must be positive"))
-        new(abspath(String(directory)), Int(buffer_events))
+        online_batches >= 0 || throw(ArgumentError(
+            "online_batches must be nonnegative"))
+        online_batches == 0 || isfinite(online_end_time) || throw(ArgumentError(
+            "online summaries require a finite online_end_time"))
+        isnan(online_grid_spacing) || online_grid_spacing > 0 || throw(
+            ArgumentError("online_grid_spacing must be positive or NaN"))
+        write_events || online_batches > 0 || throw(ArgumentError(
+            "write_events=false requires online summaries (online_batches > 0)"))
+        new(abspath(String(directory)), Int(buffer_events), write_events,
+            Int(online_batches), Float64(online_end_time),
+            Float64(online_grid_spacing))
     end
+end
+
+"""
+Exact continuous-time batch integrals accumulated during the main phase.
+
+For equal batches of width `(end_time - start_time) / n_batches` it stores,
+per coordinate, the integrals of x, x², x⁴ and of the free indicator over
+each batch; per batch, the integrals of S and S² for S the number of free
+coordinates (the model size plus the constant number of non-sticky
+coordinates); per-coordinate sticky transition counts per batch; and
+position/free-mask snapshots on a regular physical-time grid. Memory is O(d · (batches + grid))
+and independent of the number of events. Fourth moments are available for
+linear flows only (NaN for Boomerang).
+"""
+mutable struct StreamingOnlineSummaries
+    n_batches::Int
+    end_time::Float64
+    grid_spacing::Float64
+    start_time::Float64
+    width::Float64
+    next_batch_end::Float64
+    next_grid::Float64
+    cur_time::Float64
+    cur_x::Vector{Float64}
+    cur_x2::Vector{Float64}
+    cur_x4::Vector{Float64}
+    cur_free::Vector{Float64}
+    cur_size::Float64
+    cur_size2::Float64
+    cur_transitions::Vector{Int}
+    batch_time::Vector{Float64}
+    batch_x::Vector{Float64}
+    batch_x2::Vector{Float64}
+    batch_x4::Vector{Float64}
+    batch_free::Vector{Float64}
+    batch_size::Vector{Float64}
+    batch_size2::Vector{Float64}
+    batch_transitions::Vector{Int}
+    transitions::Vector{Int}
+    grid_times::Vector{Float64}
+    grid_x::Vector{Float64}
+    grid_free::Vector{UInt8}
+    scratch_x::Vector{Float64}
+    scratch_v::Vector{Float64}
+end
+
+function StreamingOnlineSummaries(d::Integer, storage::StreamingTraceStorage)
+    StreamingOnlineSummaries(storage.online_batches, storage.online_end_time,
+        storage.online_grid_spacing, NaN, NaN, NaN, NaN, 0.0,
+        zeros(d), zeros(d), zeros(d), zeros(d), 0.0, 0.0, zeros(Int, d),
+        Float64[], Float64[], Float64[], Float64[], Float64[], Float64[],
+        Float64[], Int[], zeros(Int, d),
+        Float64[], Float64[], UInt8[], zeros(d), zeros(d))
 end
 
 const _STREAM_TRACE_MAGIC = UInt8[0x50, 0x44, 0x4d, 0x50, 0x54, 0x59, 0x50, 0x31]
@@ -326,6 +433,8 @@ mutable struct StreamingPDMPTrace{F<:ContinuousDynamics} <: AbstractPDMPTrace
     computational_boundaries::Int
     buffer_maximum::Int
     finalized::Bool
+    write_events::Bool
+    online::Union{Nothing,StreamingOnlineSummaries}
 end
 
 function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
@@ -335,10 +444,16 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
     mkpath(directory)
     grid = warmup_end === nothing ? nothing :
         StreamingWarmupGrid(state, state.t[], warmup_end)
+    # Online summaries and event suppression apply to the retained phase only;
+    # warmup finalizers still read the warmup event stream.
+    is_main = warmup_end === nothing
+    online = is_main && storage.online_batches > 0 ?
+        StreamingOnlineSummaries(length(state.ξ.x), storage) : nothing
     trace = StreamingPDMPTrace(flow, directory, String(prefix),
         StreamingEventBuffer(length(state.ξ.x), storage.buffer_events),
         StreamingChunkIndex(directory, 0, 0), nothing, nothing, grid,
-        StreamingRawMoments(state), 0, 0, 0, false)
+        StreamingRawMoments(state), 0, 0, 0, false,
+        storage.write_events || !is_main, online)
     # A zero-event (or zero-duration) warmup is still a valid source for an
     # adaptation finalizer. Main starts later and is installed explicitly at
     # retained-phase entry, so it must not capture the pre-warmup state here.
@@ -402,6 +517,54 @@ function _stream_observe_warmup!(trace::StreamingPDMPTrace,
     return nothing
 end
 
+# Add the exact integrals of x, x² (and x⁴ for linear flows, when `sum_x4`
+# is not `nothing`) over one flow interval of length `elapsed` that starts at
+# `x` with velocity `velocity`; frozen coordinates stay at their position.
+function _stream_add_interval_integrals!(sum_x, sum_x2, sum_x4, x, velocity,
+        free, elapsed, base)
+    if base isa AnyBoomerang
+        sine, cosine = sincos(elapsed)
+        sine2 = sine * sine
+        sin2 = sin(2elapsed)
+        @inbounds for i in eachindex(sum_x)
+            x0 = x[i]
+            if !free[i]
+                sum_x[i] += x0 * elapsed
+                sum_x2[i] += x0 * x0 * elapsed
+                sum_x4 === nothing || (sum_x4[i] += x0^4 * elapsed)
+                continue
+            end
+            v = velocity[i]
+            mean = base.μ[i]
+            a = x0 - mean
+            omc = 1 - cosine
+            sum_x[i] += a * sine + v * omc + mean * elapsed
+            sum_x2[i] +=
+                a * a * (elapsed / 2 + sin2 / 4) +
+                v * v * (elapsed / 2 - sin2 / 4) +
+                mean * mean * elapsed + a * v * sine2 +
+                2a * mean * sine + 2v * mean * omc
+            sum_x4 === nothing || (sum_x4[i] = NaN)
+        end
+    else
+        elapsed2 = elapsed * elapsed
+        elapsed3 = elapsed2 * elapsed
+        @inbounds for i in eachindex(sum_x)
+            x0 = x[i]
+            v = free[i] ? velocity[i] : 0.0
+            sum_x[i] += x0 * elapsed + 0.5 * v * elapsed2
+            sum_x2[i] += x0 * x0 * elapsed + x0 * v * elapsed2 +
+                v * v * elapsed3 / 3
+            if sum_x4 !== nothing
+                sum_x4[i] += elapsed * x0^4 + 2elapsed2 * x0^3 * v +
+                    2elapsed3 * x0^2 * v^2 + elapsed2^2 * x0 * v^3 +
+                    elapsed2 * elapsed3 * v^4 / 5
+            end
+        end
+    end
+    return nothing
+end
+
 function _stream_accumulate_moments!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState)
     moments = trace.moments
@@ -410,47 +573,16 @@ function _stream_accumulate_moments!(trace::StreamingPDMPTrace,
     elapsed >= -64eps(max(abs(current_time), 1.0)) || throw(ArgumentError(
         "streaming moment observations are not chronological"))
     if elapsed > 0
-        base = _underlying_flow(trace.flow)
-        if base isa AnyBoomerang
-            sine, cosine = sincos(elapsed)
-            sine2 = sine * sine
-            sin2 = sin(2elapsed)
-            @inbounds for i in eachindex(moments.sum_x)
-                x0 = moments.last_position[i]
-                if !moments.last_free[i]
-                    moments.sum_x[i] += x0 * elapsed
-                    moments.sum_x2[i] += x0 * x0 * elapsed
-                    continue
-                end
-                velocity = moments.last_velocity[i]
-                mean = base.μ[i]
-                a = x0 - mean
-                omc = 1 - cosine
-                moments.sum_x[i] +=
-                    a * sine + velocity * omc + mean * elapsed
-                moments.sum_x2[i] +=
-                    a * a * (elapsed / 2 + sin2 / 4) +
-                    velocity * velocity * (elapsed / 2 - sin2 / 4) +
-                    mean * mean * elapsed + a * velocity * sine2 +
-                    2a * mean * sine + 2velocity * mean * omc
-            end
-        else
-            elapsed2 = elapsed * elapsed
-            elapsed3 = elapsed2 * elapsed
-            @inbounds for i in eachindex(moments.sum_x)
-                x0 = moments.last_position[i]
-                velocity = moments.last_free[i] ? moments.last_velocity[i] : 0.0
-                moments.sum_x[i] += x0 * elapsed + 0.5 * velocity * elapsed2
-                moments.sum_x2[i] += x0 * x0 * elapsed +
-                    x0 * velocity * elapsed2 +
-                    velocity * velocity * elapsed3 / 3
-            end
-        end
+        _stream_add_interval_integrals!(moments.sum_x, moments.sum_x2, nothing,
+            moments.last_position, moments.last_velocity, moments.last_free,
+            elapsed, _underlying_flow(trace.flow))
         @inbounds for i in eachindex(moments.free_time)
             moments.last_free[i] && (moments.free_time[i] += elapsed)
         end
         moments.total_time += elapsed
     end
+    trace.online === nothing ||
+        _online_advance!(trace.online, trace, current_time, state)
     moments.last_time = current_time
     copyto!(moments.last_position, state.ξ.x)
     copyto!(moments.last_velocity, state.ξ.θ)
@@ -458,6 +590,179 @@ function _stream_accumulate_moments!(trace::StreamingPDMPTrace,
         fill!(moments.last_free, true)
     return nothing
 end
+
+# ---------------------------------------------------------------------------
+# Online batch summaries
+# ---------------------------------------------------------------------------
+
+function _online_begin!(online::StreamingOnlineSummaries, state::AbstractPDMPState)
+    t = Float64(state.t[])
+    online.start_time = t
+    online.width = (online.end_time - t) / online.n_batches
+    online.width > 0 || throw(ArgumentError(
+        "online_end_time must lie after the retained-phase start"))
+    online.next_batch_end = t + online.width
+    online.cur_time = 0.0
+    online.cur_size = 0.0
+    online.cur_size2 = 0.0
+    fill!(online.cur_transitions, 0)
+    for v in (online.cur_x, online.cur_x2, online.cur_x4, online.cur_free)
+        fill!(v, 0.0)
+    end
+    for v in (online.batch_time, online.batch_x, online.batch_x2,
+            online.batch_x4, online.batch_free, online.batch_size,
+            online.batch_size2, online.batch_transitions, online.grid_times,
+            online.grid_x, online.grid_free)
+        empty!(v)
+    end
+    fill!(online.transitions, 0)
+    online.next_grid = isfinite(online.grid_spacing) ? t : Inf
+    if online.next_grid == t
+        free = state isa StickyPDMPState ? state.free : trues(length(state.ξ.x))
+        _online_snapshot!(online, t, state.ξ.x, free)
+    end
+    return online
+end
+
+function _online_snapshot!(online::StreamingOnlineSummaries, t, x, free)
+    push!(online.grid_times, t)
+    append!(online.grid_x, x)
+    @inbounds for i in eachindex(free)
+        push!(online.grid_free, free[i] ? 0x01 : 0x00)
+    end
+    online.next_grid = online.start_time +
+        length(online.grid_times) * online.grid_spacing
+    return nothing
+end
+
+function _online_close_batch!(online::StreamingOnlineSummaries)
+    push!(online.batch_time, online.cur_time)
+    append!(online.batch_x, online.cur_x)
+    append!(online.batch_x2, online.cur_x2)
+    append!(online.batch_x4, online.cur_x4)
+    append!(online.batch_free, online.cur_free)
+    push!(online.batch_size, online.cur_size)
+    push!(online.batch_size2, online.cur_size2)
+    append!(online.batch_transitions, online.cur_transitions)
+    online.cur_time = 0.0
+    online.cur_size = 0.0
+    online.cur_size2 = 0.0
+    fill!(online.cur_transitions, 0)
+    for v in (online.cur_x, online.cur_x2, online.cur_x4, online.cur_free)
+        fill!(v, 0.0)
+    end
+    online.next_batch_end = online.start_time +
+        (length(online.batch_time) + 1) * online.width
+    return nothing
+end
+
+# Integrate the outgoing state of the previous observation (the moments'
+# `last_*` fields, not yet overwritten) up to `t1`, splitting at batch ends
+# and grid times, then count sticky transitions at `t1`.
+function _online_advance!(online::StreamingOnlineSummaries,
+        trace::StreamingPDMPTrace, t1::Float64, state::AbstractPDMPState)
+    moments = trace.moments
+    t = moments.last_time
+    x = online.scratch_x
+    v = online.scratch_v
+    free = moments.last_free
+    base = _underlying_flow(trace.flow)
+    copyto!(x, moments.last_position)
+    copyto!(v, moments.last_velocity)
+    if !(base isa AnyBoomerang)
+        @inbounds for i in eachindex(v)
+            free[i] || (v[i] = 0.0)
+        end
+    end
+    while true
+        boundary = min(online.next_batch_end, online.next_grid)
+        stop = min(boundary, t1)
+        if stop > t
+            elapsed = stop - t
+            _stream_add_interval_integrals!(online.cur_x, online.cur_x2,
+                online.cur_x4, x, v, free, elapsed, base)
+            size = 0
+            @inbounds for i in eachindex(free)
+                free[i] || continue
+                online.cur_free[i] += elapsed
+                size += 1
+            end
+            online.cur_size += size * elapsed
+            online.cur_size2 += size^2 * elapsed
+            online.cur_time += elapsed
+            _stream_move!(x, v, free, elapsed, trace.flow)
+            t = stop
+        end
+        boundary <= t1 || break
+        boundary == online.next_grid && _online_snapshot!(online, boundary, x, free)
+        boundary == online.next_batch_end && _online_close_batch!(online)
+    end
+    if state isa StickyPDMPState
+        @inbounds for i in eachindex(free)
+            if state.free[i] != free[i]
+                online.transitions[i] += 1
+                online.cur_transitions[i] += 1
+            end
+        end
+    end
+    return nothing
+end
+
+const _ONLINE_SUMMARY_MAGIC = UInt8[0x50, 0x44, 0x4d, 0x50, 0x4f, 0x4e, 0x4c, 0x31]
+
+function _online_finish!(online::StreamingOnlineSummaries,
+        state::AbstractPDMPState, directory::AbstractString)
+    final_time = Float64(state.t[])
+    tolerance = 1e-9 * max(online.width, 1.0)
+    if online.cur_time > tolerance || isempty(online.batch_time)
+        _online_close_batch!(online)
+    elseif online.cur_time > 0
+        # Rounding sliver after the last planned batch end: fold it in.
+        d = length(online.cur_x)
+        offset = length(online.batch_time) - 1
+        online.batch_time[end] += online.cur_time
+        for (target, source) in ((online.batch_x, online.cur_x),
+                (online.batch_x2, online.cur_x2),
+                (online.batch_x4, online.cur_x4),
+                (online.batch_free, online.cur_free))
+            @views target[offset * d + 1:(offset + 1) * d] .+= source
+        end
+        online.batch_size[end] += online.cur_size
+        online.batch_size2[end] += online.cur_size2
+        @views online.batch_transitions[offset * d + 1:(offset + 1) * d] .+=
+            online.cur_transitions
+    end
+    if online.next_grid <= final_time + tolerance
+        free = state isa StickyPDMPState ? state.free : trues(length(state.ξ.x))
+        _online_snapshot!(online, final_time, state.ξ.x, free)
+    end
+    d = length(online.cur_x)
+    path = joinpath(directory, "online_summaries.bin")
+    temporary = path * ".tmp." * string(getpid())
+    open(temporary, "w") do io
+        write(io, _ONLINE_SUMMARY_MAGIC)
+        write(io, Int64(d), Int64(length(online.batch_time)),
+            Int64(length(online.grid_times)))
+        write(io, online.start_time, online.width, final_time)
+        write(io, online.batch_time, online.batch_x, online.batch_x2,
+            online.batch_x4, online.batch_free, online.batch_size,
+            online.batch_size2)
+        write(io, Int64.(online.batch_transitions))
+        write(io, online.grid_times, online.grid_x, online.grid_free)
+        flush(io)
+    end
+    mv(temporary, path; force=true)
+    return path
+end
+
+"""
+    online_summaries(trace::StreamingPDMPTrace)
+
+The retained-phase [`StreamingOnlineSummaries`](@ref), or `nothing` when the
+trace was not configured with `online_batches > 0`.
+"""
+online_summaries(trace::StreamingPDMPTrace) = trace.online
+online_summaries(::AbstractPDMPTrace) = nothing
 
 function _stream_chunk_path(trace::StreamingPDMPTrace, index::Integer)
     joinpath(trace.directory, "chunk_" * lpad(string(index), 8, '0') * ".bin")
@@ -467,6 +772,12 @@ function _flush_streaming_trace!(trace::StreamingPDMPTrace)
     buffer = trace.buffer
     n = buffer.n_events
     iszero(n) && return trace
+    if !trace.write_events
+        # Online-only retained phase: events are observed, never persisted.
+        buffer.n_events = 0
+        buffer.n_full = 0
+        return trace
+    end
     path = _stream_chunk_path(trace, length(trace.chunks) + 1)
     temporary = path * ".tmp." * string(getpid())
     open(temporary, "w") do io
@@ -493,6 +804,36 @@ function _flush_streaming_trace!(trace::StreamingPDMPTrace)
     return trace
 end
 
+# Storage I/O belongs to the phase driver, before an event is drawn.  A full
+# buffer can be flushed without touching the sampler state or its RNG.
+function prepare_trace_storage_boundary!(trace::StreamingPDMPTrace)
+    trace.buffer.n_events == length(trace.buffer.times) &&
+        _flush_streaming_trace!(trace)
+    return nothing
+end
+prepare_trace_storage_boundary!(::AbstractPDMPTrace) = nothing
+function prepare_trace_storage_boundary!(trace::PDMPTrace{T,U,<:GrowableMatrix}) where {T,U}
+    next_event = length(trace.times) + 1
+    next_event <= trace.recording_capacity[] && return nothing
+    capacity = max(next_event, 2 * trace.recording_capacity[])
+    d = size(trace.positions, 1)
+    sizehint!(trace.times, capacity)
+    sizehint!(trace.positions, d, capacity)
+    sizehint!(trace.velocities, d, capacity)
+    trace.free_masks === nothing || sizehint!(trace.free_masks, d, capacity)
+    trace.recording_capacity[] = capacity
+    return nothing
+end
+function prepare_trace_storage_boundary!(trace::FactorizedTrace,
+        additional_events::Integer=1)
+    required = length(trace.events) + additional_events
+    required <= trace.recording_capacity[] && return nothing
+    capacity = max(required, 2 * trace.recording_capacity[])
+    sizehint!(trace.events, capacity)
+    trace.recording_capacity[] = capacity
+    return nothing
+end
+
 @inline function _stream_effective_velocity(state::AbstractPDMPState, i)
     state isa StickyPDMPState && !state.free[i] ?
         state.stored_velocity[i] : state.ξ.θ[i]
@@ -501,7 +842,8 @@ end
 function _stream_record_full!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, kind::UInt8)
     buffer = trace.buffer
-    buffer.n_events == length(buffer.times) && _flush_streaming_trace!(trace)
+    buffer.n_events < length(buffer.times) || throw(ArgumentError(
+        "streaming trace buffer is full; prepare its storage boundary before the step"))
     event = (buffer.n_events += 1)
     slot = (buffer.n_full += 1)
     buffer.times[event] = state.t[]
@@ -523,7 +865,8 @@ end
 function _stream_record_coordinate!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, kind::UInt8, coordinate::Integer)
     buffer = trace.buffer
-    buffer.n_events == length(buffer.times) && _flush_streaming_trace!(trace)
+    buffer.n_events < length(buffer.times) || throw(ArgumentError(
+        "streaming trace buffer is full; prepare its storage boundary before the step"))
     event = (buffer.n_events += 1)
     buffer.times[event] = state.t[]
     buffer.kinds[event] = kind
@@ -543,6 +886,7 @@ function begin_trace_phase!(trace::StreamingPDMPTrace,
     trace.initial_state === nothing || return trace
     trace.initial_state = _stream_terminal_state(state, flow)
     trace.moments = StreamingRawMoments(state)
+    trace.online === nothing || _online_begin!(trace.online, state)
     _stream_observe_warmup!(trace, state)
     return trace
 end
@@ -554,6 +898,8 @@ function finish_trace_phase!(trace::StreamingPDMPTrace,
     _stream_observe_warmup!(trace, state)
     trace.terminal_state = _stream_terminal_state(state, flow)
     _flush_streaming_trace!(trace)
+    trace.online === nothing ||
+        _online_finish!(trace.online, state, trace.directory)
     trace.finalized = true
     return trace
 end
@@ -766,7 +1112,7 @@ function _restore_streaming_trace(directory::AbstractString,
             initial_state.t, copy(initial_state.position),
             copy(initial_state.physical_velocity), copy(initial_state.free)),
         Int(physical_events), Int(computational_boundaries),
-        Int(buffer_maximum), true)
+        Int(buffer_maximum), true, true, nothing)
     return _restore_streaming_moments!(trace)
 end
 
@@ -1095,9 +1441,17 @@ function _adaptation_std(trace::StreamingPDMPTrace)
         variances = _streaming_factorized_adaptation_moment(trace, means)
         return sqrt.(variances)
     end
-    means = _streaming_adaptation_integral(trace, Statistics.mean)
-    return sqrt.(_streaming_adaptation_integral(
-        trace, Statistics.var, means))
+    # Non-factorized flows adapt often (the Bouncy Particle sampler every unit
+    # of time). Rescanning the whole warmup stream from disk at every update
+    # made warmup cost quadratic in its length, so use the exact running
+    # integrals of x and x^2 that the trace accumulates as it records events.
+    # They cover the phase from its start rather than from its first event,
+    # which only changes the first segment of the warmup statistics.
+    trace.moments.total_time > 0 ||
+        return sqrt.(_streaming_adaptation_integral(trace, Statistics.var,
+            _streaming_adaptation_integral(trace, Statistics.mean)))
+    means = Statistics.mean(trace)
+    return sqrt.(Statistics.var(trace, means))
 end
 
 function _streaming_factorized_adaptation_moment(
@@ -1191,9 +1545,11 @@ end
 function Base.last(trace::FactorizedTrace)
     if !trace.last_state_valid
         trace.last_state = _replay_last_state(trace)
+        trace.last_state_time = trace.last_state.time
         trace.last_state_valid = true
     end
-    trace.last_state
+    return PDMPEvent(trace.last_state_time,
+        copy(trace.last_state.position), copy(trace.last_state.velocity))
 end
 
 function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, event::PDMPEvent) where {T,U}
@@ -1211,7 +1567,15 @@ function Base.push!(trace::PDMPTrace{T,U,<:GrowableMatrix}, state::AbstractPDMPS
     append!(trace.positions, state.ξ.x)
     append!(trace.velocities, state.ξ.θ)
     if trace.free_masks !== nothing
-        append!(trace.free_masks, state.free)
+        # `append!(Vector{Bool}, BitVector)` unpacks into a temporary array.
+        # The underlying ElasticArray vector already has space from the
+        # explicit storage preflight, so write the bits directly.
+        mask_data = trace.free_masks.data
+        start = length(mask_data)
+        resize!(mask_data, start + length(state.free))
+        @inbounds for i in eachindex(state.free)
+            mask_data[start + i] = state.free[i]
+        end
     end
     trace
 end
@@ -1226,7 +1590,9 @@ function Base.push!(trace::FactorizedTrace, state::AbstractPDMPState)
     trace.initial_state.time < zero(trace.initial_state.time) || error("Cannot append a full state to an initialized FactorizedTrace without a changed coordinate index")
     event = PDMPEvent(state)
     trace.initial_state = event
-    trace.last_state = event
+    copyto!(trace.last_state.position, state.ξ.x)
+    copyto!(trace.last_state.velocity, state.ξ.θ)
+    trace.last_state_time = state.t[]
     trace.last_state_valid = true
     _invalidate_factorized_caches!(trace)
     return trace
@@ -1236,13 +1602,17 @@ function Base.push!(trace::FactorizedTrace, event::AbstractPDMPState, i::Integer
     # TODO: this needs to figure out which index i changed... but it's much easier to have the caller provide it...
     if trace.initial_state.time >= zero(trace.initial_state.time)
         push!(trace.events, FactorizedEvent(i, event.t[], event.ξ.x[i], event.ξ.θ[i]))
-        trace.last_state = PDMPEvent(event)
+        copyto!(trace.last_state.position, event.ξ.x)
+        copyto!(trace.last_state.velocity, event.ξ.θ)
+        trace.last_state_time = event.t[]
         trace.last_state_valid = true
     else
         # @info "setting initial event to " event
         e = PDMPEvent(event)
         trace.initial_state = e
-        trace.last_state = e
+        copyto!(trace.last_state.position, event.ξ.x)
+        copyto!(trace.last_state.velocity, event.ξ.θ)
+        trace.last_state_time = event.t[]
         trace.last_state_valid = true
     end
     _invalidate_factorized_caches!(trace)
@@ -1314,6 +1684,21 @@ struct TraceManager{T}
     main_trace::T
     warmup_trace::T
     t_warmup::Float64
+end
+function prepare_trace_storage_boundary!(mgr::TraceManager, phase::Symbol)
+    trace = phase === :warmup ? mgr.warmup_trace : mgr.main_trace
+    prepare_trace_storage_boundary!(trace)
+    return nothing
+end
+function prepare_dynamics_adaptation_storage_boundary!(mgr::TraceManager,
+        phase::Symbol, state::AbstractPDMPState)
+    trace = phase === :warmup ? mgr.warmup_trace : mgr.main_trace
+    if trace isa FactorizedTrace
+        prepare_trace_storage_boundary!(trace, length(state.ξ.x))
+    else
+        prepare_trace_storage_boundary!(trace)
+    end
+    return nothing
 end
 function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics, alg::PoissonTimeStrategy, t_warmup::Real)
     TT = _trace_type(flow, alg)

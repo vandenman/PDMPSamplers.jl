@@ -110,6 +110,8 @@ export
     StreamingTraceStorage,
     StreamingPDMPTrace,
     streaming_trace_manifest,
+    StreamingOnlineSummaries,
+    online_summaries,
     PDMPChains,
     PDMPTerminalState,
     terminal_state,

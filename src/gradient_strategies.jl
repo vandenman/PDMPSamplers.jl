@@ -429,9 +429,11 @@ function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
             "TrajectoryResidualEnvelope and SubsampledControlVariate anchors must match"))
     end
     active_anchor = _subsampling_anchor_owner(envelope, requested_anchor)
+    sampling_map = Dict{Int,Int}()
+    sizehint!(sampling_map, Int(m))
     return SubsampledControlVariate(deterministic_gradient!, residual_oracle, envelope,
         active_anchor, deterministic_hvp!, refresh_anchor!, subset_design, Int(m),
-        Vector{Int}(undef, m), zeros(Float64, length(active_anchor)), Dict{Int,Int}())
+        Vector{Int}(undef, m), zeros(Float64, length(active_anchor)), sampling_map)
 end
 
 function _validate_subsampling_anchor(envelope::AbstractResidualEnvelope, anchor)
@@ -635,6 +637,23 @@ record_subsampling_proposal!(oracle, args...) = nothing
 record_subsampling_candidate!(oracle, args...) = nothing
 record_subsampling_mark_source!(oracle, residual_source::Bool) = nothing
 
+"""Invalidate oracle workspaces before a newly selected subsampling mark."""
+begin_subsampling_mark!(oracle) = nothing
+
+"""Type-stable result for optional deferred deterministic-rate evaluation."""
+struct DeferredSubsamplingRate{T}
+    signed::T
+    active::Bool
+end
+
+"""Optional signed deterministic rate used to defer vector construction."""
+subsampling_deterministic_signed_rate(oracle, cv, state, flow) =
+    DeferredSubsamplingRate(0.0, false)
+
+"""Complete a deferred scalar event-rate calculation from a selected residual."""
+subsampling_deferred_candidate_rate(
+    oracle, state, residual, scale, flow, signed_rate, subset) = nothing
+
 """Internal hook for cheaply tightening a sampled subset's event-rate bound."""
 subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
     _signed_subset_bound(state, gradient, flow, D, M)
@@ -654,7 +673,19 @@ call as the fallback for all other strategies.
 """
 subsampling_cached_residual!(oracle, out, state, subset, anchor) = false
 
+"""Materialize one selected residual, reusing refinement work when present."""
+function subsampling_selected_residual!(oracle, out, state, subset, anchor)
+    fill!(out, zero(eltype(out)))
+    subsampling_cached_residual!(oracle, out, state, subset, anchor) ||
+        oracle(out, state.ξ.x, subset, anchor)
+    return out
+end
+
 deterministic_gradient!(out, cv::SubsampledControlVariate, x) = cv.deterministic_gradient!(out, x)
+function deterministic_gradient!(out, cv::SubsampledControlVariate, state, flow)
+    deterministic_gradient!(out, cv, state.ξ.x)
+    return out
+end
 
 struct CoordinateWiseGradient{F} <: CoordinateWiseGradientStrategy
     f::F
@@ -679,6 +710,15 @@ record_subsampling_proposal!(oracle::WithResidualStats, args...) =
     record_subsampling_proposal!(oracle.f, args...)
 record_subsampling_candidate!(oracle::WithResidualStats, args...) =
     record_subsampling_candidate!(oracle.f, args...)
+begin_subsampling_mark!(oracle::WithResidualStats) =
+    begin_subsampling_mark!(oracle.f)
+subsampling_deterministic_signed_rate(
+        oracle::WithResidualStats, cv, state, flow) =
+    subsampling_deterministic_signed_rate(oracle.f, cv, state, flow)
+subsampling_deferred_candidate_rate(oracle::WithResidualStats, state,
+        residual, scale, flow, signed_rate, subset) =
+    subsampling_deferred_candidate_rate(
+        oracle.f, state, residual, scale, flow, signed_rate, subset)
 record_subsampling_mark_source!(oracle::WithResidualStats, residual_source::Bool) =
     record_subsampling_mark_source!(oracle.f, residual_source)
 subsampling_subset_bound(oracle::WithResidualStats, state, gradient, flow,
@@ -694,6 +734,14 @@ subsampling_residual_subset_bound(oracle::WithResidualStats, state, gradient,
     oracle.f, state, gradient, flow, D, M, subset, scale)
 subsampling_cached_residual!(oracle::WithResidualStats, out, state, subset, anchor) =
     subsampling_cached_residual!(oracle.f, out, state, subset, anchor)
+function subsampling_selected_residual!(oracle::WithResidualStats, out,
+        state, subset, anchor)
+    fill!(out, zero(eltype(out)))
+    if !subsampling_cached_residual!(oracle.f, out, state, subset, anchor)
+        oracle(out, state.ξ.x, subset, anchor)
+    end
+    return out
+end
 subsampling_failure_context(oracle::WithResidualStats, envelope, subset) =
     subsampling_failure_context(oracle.f, envelope, subset)
 function with_stats(cv::SubsampledControlVariate, stats::AbstractStatisticCounter)
@@ -759,6 +807,15 @@ end
 # Main entry point: compute gradient from state
 function compute_gradient!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
     ∇ϕx = compute_gradient!(gradient_strategy, state.ξ.x, cache.∇ϕx)
+    correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
+    return ∇ϕx
+end
+
+function compute_gradient!(state::AbstractPDMPState,
+        gradient_strategy::SubsampledControlVariate,
+        flow::ContinuousDynamics, cache)
+    ∇ϕx = deterministic_gradient!(
+        cache.∇ϕx, gradient_strategy, state, flow)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
     return ∇ϕx
 end
