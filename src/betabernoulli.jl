@@ -112,12 +112,17 @@ BetaBernoulliKappa(a::Real, b::Real, mpdfs::AbstractVector{<:Real}) =
     BetaBernoulliKappa(a, b, mpdfs, trues(length(mpdfs)))
 
 function (κ::BetaBernoulliKappa)(i::Integer, x, γ, args...)
+    return _kappa_value(κ, _kappa_context(κ, x, γ), i, x, γ)
+end
+
+# The rate depends on the state only through the number of free stickable
+# coordinates. Count them once so that a schedule rebuild costs O(d), not
+# O(d) per stuck coordinate.
+function _kappa_context(κ::BetaBernoulliKappa, x, γ)
     length(x) == length(κ.can_stick) || throw(DimensionMismatch(
         "state and can_stick vectors must have the same length"))
     length(γ) == length(κ.can_stick) || throw(DimensionMismatch(
         "free-state and can_stick vectors must have the same length"))
-    κ.can_stick[i] || throw(ArgumentError(
-        "coordinate $i is not governed by this BetaBernoulliKappa"))
     k_free = 0
     n_tot = 0
     @inbounds for j in eachindex(κ.can_stick, γ)
@@ -126,7 +131,15 @@ function (κ::BetaBernoulliKappa)(i::Integer, x, γ, args...)
             k_free += γ[j]
         end
     end
-    denom  = κ.b + n_tot - k_free - 1
+    return (k_free, n_tot)
+end
+
+function _kappa_value(κ::BetaBernoulliKappa, counts::Tuple{Int,Int},
+        i::Integer, args...)
+    κ.can_stick[i] || throw(ArgumentError(
+        "coordinate $i is not governed by this BetaBernoulliKappa"))
+    k_free, n_tot = counts
+    denom = κ.b + n_tot - k_free - 1
     if denom <= 0
         return Inf
     end

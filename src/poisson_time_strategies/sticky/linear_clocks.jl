@@ -118,6 +118,13 @@ const _VelocityPreservingLinearFlow = Union{
         D<:Union{ZigZag,BouncyParticle}},
 }
 
+# Diagonal Boomerang flows with the velocity-preserving sticky kernel. Their
+# orbits are not linear, so they get the thinning clock at the end of this file.
+const _VelocityPreservingBoomerang = Union{
+    Boomerang{U,T,S,LT} where {U,T,S,LT<:Diagonal},
+    MutableBoomerang{U,T,S,LT} where {U,T,S,LT<:Diagonal},
+}
+
 function _linear_gaussian_available_hazard(clock::LinearGaussianAggregateClock, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, can_stick::BitVector)
     cache, nactive = _prepare_linear_gaussian_cache!(clock, state, can_stick)
     _factor_linear_gaussian_active_block!(cache, nactive)
@@ -351,8 +358,8 @@ end
 
 function _exchangeable_log_total_weight(
     clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
-    flow::_VelocityPreservingLinearFlow, active::BitVector,
-    stickable::BitVector, k::Integer, state::StickyPDMPState)
+    flow::Union{_VelocityPreservingLinearFlow,_VelocityPreservingBoomerang},
+    active::BitVector, stickable::BitVector, k::Integer, state::StickyPDMPState)
     indices = beta_indices(clock.slab_provider)
     max_logw = -Inf
     @inbounds for j in eachindex(indices, active, stickable)
@@ -940,8 +947,9 @@ end
 Simulate the time a stuck/ frozen particle takes to unfreeze/ unstick
 """
 function unsticking_time(rng::Random.AbstractRNG, alg::StickyLoopState,
-        state::StickyPDMPState, flow::ContinuousDynamics, i::Integer)
-    κ = get_κ(alg, i, state.ξ.x, state.free, state.ξ.θ)
+        state::StickyPDMPState, flow::ContinuousDynamics, i::Integer,
+        κ_context=_kappa_context(alg.κ, state.ξ.x, state.free))
+    κ = _kappa_value(alg.κ, κ_context, i, state.ξ.x, state.free, state.ξ.θ)
     κ isa Real || throw(ArgumentError(
         "sticky κ for frozen coordinate $i must be a real scalar rate"))
     isnan(κ) && throw(ArgumentError(
@@ -954,3 +962,89 @@ function unsticking_time(rng::Random.AbstractRNG, alg::StickyLoopState,
     C = _boundary_proposal_clock_constant(flow, state, i)
     return rand(rng, Exponential(inv(κ * C)))
 end
+
+# ---- Exchangeable Gaussian slab on a diagonal Boomerang orbit ------------------
+#
+# Between events every free coordinate follows
+#     x_i(τ) = μ_i + (x_i - μ_i) cos τ + θ_i sin τ,
+# so the conditional boundary mean of the exchangeable slab is
+#     m(τ) = m0 + m1 cos τ + m2 sin τ,
+# while the active count k, the conditional sd s and the stored speeds are fixed.
+# The aggregate release rate W φ(m(τ)/s)/s then has no closed-form hazard, but it
+# is bounded by W / (s √(2π)). Thinning against that bound samples the release
+# time exactly, at O(1) cost per candidate after one O(|β|) pass.
+
+function _exchangeable_boomerang_params(
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::_VelocityPreservingBoomerang, state::StickyPDMPState,
+        can_stick::BitVector)
+    provider = clock.slab_provider
+    indices = beta_indices(provider)
+    active = clock.cache.active_beta
+    stickable = clock.cache.stickable_beta
+    μs = _exchangeable_linear_mean(provider)
+    μ = flow.μ
+    k = 0
+    nU = 0
+    sum_offset = 0.0      # Σ_A (μ_i - μs)
+    sum_cos = 0.0         # Σ_A (x_i - μ_i)
+    sum_sin = 0.0         # Σ_A θ_i
+    @inbounds for j in eachindex(indices)
+        i = indices[j]
+        is_active = state.free[i]
+        active[j] = is_active
+        stickable[j] = can_stick[i]
+        if is_active
+            k += 1
+            sum_offset += μ[i] - μs
+            sum_cos += state.ξ.x[i] - μ[i]
+            sum_sin += state.ξ.θ[i]
+        elseif can_stick[i]
+            nU += 1
+        end
+    end
+    denom = provider.u + k * provider.v
+    denom > 0 || throw(ArgumentError("u + k*v must be positive, got $denom"))
+    c = provider.v / denom
+    s2 = provider.u * (provider.u + (k + 1) * provider.v) / denom
+    s2 > 0 || throw(ArgumentError("conditional variance must be positive, got $s2"))
+    return active, stickable, k, nU, μs + c * sum_offset, c * sum_cos,
+        c * sum_sin, sqrt(s2)
+end
+
+function rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::_VelocityPreservingBoomerang, state::StickyPDMPState, τ::Real,
+        can_stick::BitVector)
+    @assert τ >= 0
+    active, stickable, k, nU, m0, m1, m2, s =
+        _exchangeable_boomerang_params(clock, flow, state, can_stick)
+    iszero(nU) && return 0.0
+    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k, state)
+    logW == -Inf && return 0.0
+    logW == Inf && return Inf
+    sn, cs = sincos(τ)
+    z = (m0 + m1 * cs + m2 * sn) / s
+    return exp(logW) * exp(-0.5 * abs2(z)) / (sqrt(2π) * s)
+end
+
+function sample_time(rng::Random.AbstractRNG,
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::_VelocityPreservingBoomerang, state::StickyPDMPState,
+        horizon::Real, can_stick::BitVector)
+    active, stickable, k, nU, m0, m1, m2, s =
+        _exchangeable_boomerang_params(clock, flow, state, can_stick)
+    iszero(nU) && return Inf
+    logW = _exchangeable_log_total_weight(clock, flow, active, stickable, k, state)
+    logW == -Inf && return Inf
+    logW == Inf && return 0.0
+    bound = exp(logW) / (sqrt(2π) * s)
+    τ = 0.0
+    while true
+        τ += Random.randexp(rng) / bound
+        τ >= horizon && return Inf
+        sn, cs = sincos(τ)
+        z = (m0 + m1 * cs + m2 * sn) / s
+        rand(rng) < exp(-0.5 * abs2(z)) && return τ
+    end
+end
+

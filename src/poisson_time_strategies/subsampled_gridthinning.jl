@@ -10,6 +10,15 @@ end
 
 function _draw_uniform_without_replacement!(rng::Random.AbstractRNG, out::AbstractVector,
     N::Int, scratch::Dict{Int,Int}; excluded::Int=0)
+    if length(out) == 1
+        out[1] = if iszero(excluded)
+            rand(rng, 1:N)
+        else
+            slot = rand(rng, 1:(N - 1))
+            slot < excluded ? slot : slot + 1
+        end
+        return out
+    end
     empty!(scratch)
     population = iszero(excluded) ? N : N - 1
     for j in eachindex(out)
@@ -294,12 +303,13 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     reused_screen || prepare_residual_sampling!(cv.envelope, candidate, flow, 0.0)
     _inc_counter_subset_draws(stats)
     _subset_t0 = time_ns()
+    begin_subsampling_mark!(cv.residual_oracle)
     M_subset = draw_subset!(rng, cv, D, B)
     selected_probability = _selected_subset_probability(cv, D, B, M_subset)
     _inc_counter_subset_draw_seconds(stats,
         (time_ns() - _subset_t0) * 1.0e-9)
     if needs_subsampling_residual_gradient(cv.residual_oracle)
-        deterministic_gradient!(cache.∇ϕx, cv, candidate.ξ.x)
+        deterministic_gradient!(cache.∇ϕx, cv, candidate, flow)
     end
     _refine_t0 = time_ns()
     _inc_counter_selected_subset_bound_evaluations(stats)
@@ -317,13 +327,22 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         return SubsamplingCandidateResult(false, 0.0, 0.0)
     end
 
-    _inc_counter_grid_acceptance_gradient_calls(stats)
-    G = compute_gradient!(candidate, cv, flow, cache)
-    deterministic_actual = λ(candidate, G, flow)
+    deferred_rate = subsampling_deterministic_signed_rate(
+        cv.residual_oracle, cv, candidate, flow)
+    deferred_gradient = deferred_rate.active
+    signed_rate = deferred_rate.signed
+    G = cache.∇ϕx
+    if deferred_gradient
+        deterministic_actual = pos(signed_rate)
+    else
+        _inc_counter_grid_acceptance_gradient_calls(stats)
+        G = compute_gradient!(candidate, cv, flow, cache)
+        deterministic_actual = λ(candidate, G, flow)
+    end
     if _bound_violated(deterministic_actual, D)
         _record_subsampling_bound_violation!(:deterministic,
             deterministic_actual, D, τ, violation_policy, candidate, flow, cv,
-            G, provider)
+            deferred_gradient ? nothing : G, provider)
     end
     if _subsampling_bound_violation(
             violation_policy, stats, deterministic_actual, D, :deterministic)
@@ -332,7 +351,7 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
 
     _inc_counter_selected_subset_bound_evaluations(stats)
     tight_subset_bound = subsampling_subset_bound(
-        cv.residual_oracle, candidate, G, flow, D,
+        cv.residual_oracle, candidate, deferred_gradient ? nothing : G, flow, D,
         residual_subset_bound, cv.subset, scale)
     _inc_counter_selected_subset_refinement_seconds(stats,
         (time_ns() - _refine_t0) * 1.0e-9)
@@ -349,17 +368,20 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     _capture_subsampling_candidate_fixture!(candidate, flow, cv,
         violation_policy, τ, D, B, cell_roof, M_subset,
         residual_subset_bound, tight_subset_bound, deterministic_actual, G)
-    fill!(cv.residual_buffer, 0.0)
     _residual_t0 = time_ns()
-    cached = subsampling_cached_residual!(cv.residual_oracle,
+    subsampling_selected_residual!(cv.residual_oracle,
         cv.residual_buffer, candidate, cv.subset, cv.anchor)
-    cached || cv.residual_oracle(
-        cv.residual_buffer, candidate.ξ.x, cv.subset, cv.anchor)
     _inc_counter_residual_oracle_seconds(stats,
         (time_ns() - _residual_t0) * 1.0e-9)
-    actual = subsampling_candidate_rate!(cv.residual_oracle, candidate, G,
-        cv.residual_buffer, scale, flow,
-        deterministic_actual, cv.subset)
+    actual = if deferred_gradient
+        something(subsampling_deferred_candidate_rate(cv.residual_oracle,
+            candidate, cv.residual_buffer, scale, flow, signed_rate,
+            cv.subset))
+    else
+        subsampling_candidate_rate!(cv.residual_oracle, candidate, G,
+            cv.residual_buffer, scale, flow,
+            deterministic_actual, cv.subset)
+    end
     _inc_counter_residual_oracle_evaluations(stats)
     _inc_counter_grid_acceptance_tests(stats)
     if _bound_violated(actual, tight_subset_bound)
@@ -384,6 +406,11 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     _inc_counter_final_thinning_seconds(stats,
         (time_ns() - _final_t0) * 1.0e-9)
     accepted && _inc_counter_final_thinning_acceptances(stats)
+    if accepted && deferred_gradient
+        _inc_counter_grid_acceptance_gradient_calls(stats)
+        G = compute_gradient!(candidate, cv, flow, cache)
+        axpy!(scale, cv.residual_buffer, G)
+    end
     record_subsampling_candidate!(cv.residual_oracle,
         cell_roof, D + B, true, selected_probability, tight_subset_bound,
         actual, accepted)
@@ -401,6 +428,76 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     _inc_counter_statistic_recording_seconds(stats,
         (time_ns() - _record_t0) * 1.0e-9)
     return SubsamplingCandidateResult(accepted, deterministic_actual, actual)
+end
+
+# Research-only marked joint roofs are supplied by an envelope that stores a
+# fixed partition and complete-mark cell caps. Ordinary envelopes retain the
+# existing deterministic/residual mixture unchanged.
+_joint_signed_group_enabled(::AbstractResidualEnvelope) = false
+_joint_signed_cell_mass!(cv, envelope::AbstractResidualEnvelope, state, flow,
+    left::Float64, right::Float64) = throw(MethodError(
+        _joint_signed_cell_mass!, (cv, envelope, state, flow, left, right)))
+_joint_signed_active_mass!(envelope::AbstractResidualEnvelope, state, t) =
+    throw(MethodError(_joint_signed_active_mass!, (envelope, state, t)))
+_joint_signed_draw_mark!(rng, envelope::AbstractResidualEnvelope, subset) =
+    throw(MethodError(_joint_signed_draw_mark!, (rng, envelope, subset)))
+
+function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
+        cv::SubsampledControlVariate, flow::ContinuousDynamics,
+        state::AbstractPDMPState, candidate::AbstractPDMPState, cache,
+        stats::AbstractStatisticCounter, violation_policy,
+        τ::Real, cell_roof::Real, provider)
+    _copy_t0 = time_ns()
+    copyto!(candidate, state)
+    _inc_counter_candidate_state_copies(stats)
+    _inc_counter_candidate_state_copy_seconds(stats,
+        (time_ns() - _copy_t0) * 1.0e-9)
+    _move_t0 = time_ns()
+    move_forward_time!(candidate, τ, flow)
+    _inc_counter_candidate_move_forwards(stats)
+    _inc_counter_candidate_move_forward_seconds(stats,
+        (time_ns() - _move_t0) * 1.0e-9)
+    _inc_counter_subset_draws(stats)
+    _subset_t0 = time_ns()
+    begin_subsampling_mark!(cv.residual_oracle)
+    cap = _joint_signed_draw_mark!(rng, cv.envelope, cv.subset)
+    # A ragged final joint mark changes the selected residual length. Keep
+    # the Horvitz--Thompson multiplier and candidate diagnostics on m_b.
+    cv.m = length(cv.subset)
+    _inc_counter_subset_draw_seconds(stats,
+        (time_ns() - _subset_t0) * 1.0e-9)
+    cap > 0 || return SubsamplingCandidateResult(false, 0.0, 0.0)
+    _inc_counter_grid_acceptance_gradient_calls(stats)
+    gradient = compute_gradient!(candidate, cv, flow, cache)
+    _inc_counter_subsampling_subset_evaluations(stats)
+    _residual_t0 = time_ns()
+    subsampling_selected_residual!(cv.residual_oracle,
+        cv.residual_buffer, candidate, cv.subset, cv.anchor)
+    _inc_counter_residual_oracle_seconds(stats,
+        (time_ns() - _residual_t0) * 1.0e-9)
+    axpy!(_subsampling_scale(cv), cv.residual_buffer, gradient)
+    actual = λ(candidate, gradient, flow)
+    _inc_counter_residual_oracle_evaluations(stats)
+    _inc_counter_grid_acceptance_tests(stats)
+    if _bound_violated(actual, cap)
+        _record_subsampling_bound_violation!(:subset, actual, cap,
+            τ, violation_policy, candidate, flow, cv, gradient, provider)
+    end
+    _subsampling_bound_violation(violation_policy, stats, actual, cap,
+        :subset) && return nothing
+    _final_t0 = time_ns()
+    accepted = rand(rng) * cap <= actual
+    _inc_counter_final_thinning_seconds(stats,
+        (time_ns() - _final_t0) * 1.0e-9)
+    accepted && _inc_counter_final_thinning_acceptances(stats)
+    selected_probability = cv.envelope.joint_group_size >= 16 ?
+        (length(cv.subset) / n_observations(cv.envelope)) *
+            (cap / cell_roof) :
+        cap / (size(cv.envelope.joint_groups, 2) * cell_roof)
+    record_subsampling_candidate!(cv.residual_oracle,
+        cell_roof, cell_roof, true, selected_probability,
+        cap, actual, accepted)
+    return SubsamplingCandidateResult(accepted, 0.0, actual)
 end
 
 function _append_subsampling_segment!(combined::PiecewiseAffineBound,
@@ -433,6 +530,18 @@ function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
     flow::ContinuousDynamics,
     effective_horizon::Float64, modes, first_cell::Int, last_cell::Int,
     first_deterministic_segment::Int)
+    if _joint_signed_group_enabled(cv.envelope)
+        pcb = alg.pcb
+        for j in first_cell:last_cell
+            left = pcb.t_grid[j]
+            left >= effective_horizon && break
+            right = min(pcb.t_grid[j + 1], effective_horizon)
+            mass = _joint_signed_cell_mass!(cv, cv.envelope,
+                state, flow, left, right)
+            append_affine_segment!(combined, left, right, mass, 0.0)
+        end
+        return combined
+    end
     if modes.use_linear
         deterministic = alg.affine_bound
         for j in first_deterministic_segment:deterministic.n_segments
@@ -596,6 +705,14 @@ end
     return (n_cells_bounded, deterministic_area)::Tuple{Int,Float64}
 end
 
+const _omrf_dispatch_capture = Ref{Any}(nothing)
+const _omrf_extension_capture = Ref{Any}(nothing)
+const _omrf_event_fixture = Ref{Any}(nothing)
+const _omrf_dispatch_capture_enabled = Ref(false)
+const _omrf_event_fixture_enabled = Ref(false)
+const _omrf_budget_branch_capture_enabled = Ref(false)
+const _omrf_budget_branch_fixtures = Ref{Any}(Dict{Symbol,Any}())
+
 function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
     provider,
     model::PDMPModel{<:SubsampledControlVariate}, flow::ContinuousDynamics,
@@ -603,8 +720,26 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
     stats::AbstractStatisticCounter, max_horizon::Float64=Inf,
     include_refresh::Bool=true, max_horizon_event::Symbol=:horizon_hit)::GridEvent
 
+    if _omrf_event_fixture_enabled[] && _omrf_event_fixture[] === nothing
+        _omrf_event_fixture[] = deepcopy((rng=rng, model=model, flow=flow,
+            alg=alg, state=state, cache=cache, stats=stats,
+            max_horizon=max_horizon, include_refresh=include_refresh,
+            max_horizon_event=max_horizon_event))
+    end
+
+    if _omrf_dispatch_capture_enabled[] && _omrf_dispatch_capture[] === nothing
+        _omrf_dispatch_capture[] = (
+            signature=Tuple{typeof(rng), typeof(provider), typeof(model),
+                typeof(flow), typeof(alg), typeof(state), typeof(cache),
+                typeof(stats), Float64, Bool, Symbol},
+            provider=typeof(provider), counter=typeof(stats),
+            counter_tuple=stats isa MultiCounter ? typeof(stats.counters) : Nothing,
+            flow=typeof(flow), state=typeof(state), cache=typeof(cache),
+            grid_state=typeof(alg), curvature_bound=typeof(alg.curvature_bound))
+    end
+
     cv = model.grad
-    default_return = GradientMeta(alg.empty_∇ϕx)
+    default_return = alg.empty_gradient_meta
 
     # A shrink restart discards the invalid proposal and rebuilds from the
     # unchanged physical state while retaining the frozen anchor.
@@ -625,29 +760,29 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
             cv.envelope, state, flow, effective_horizon)
         cumulative_exp = Random.randexp(rng)
         modes = _grid_bound_modes(alg, state, flow, provider, stats)
+        if _omrf_dispatch_capture_enabled[] && _omrf_extension_capture[] === nothing
+            _omrf_extension_capture[] = Tuple{typeof(cv), typeof(alg),
+                typeof(state), typeof(flow), typeof(provider), typeof(modes),
+                typeof(stats), Float64, Float64, Int, Float64}
+        end
         n_cells_bounded = 0
         deterministic_area = 0.0
         _schedule_t0 = time_ns()
         _inc_counter_grid_schedule_builds(stats)
-        combined = alg.subsampling_bound
-        n_horizon = _grid_cell_count(alg.pcb.t_grid,
-            length(alg.pcb.Λ_vals), effective_horizon)
-        while total_area(combined) <= cumulative_exp &&
-                n_cells_bounded < n_horizon
-            first_cell = n_cells_bounded + 1
-            cell_horizon = min(alg.pcb.t_grid[first_cell + 1],
-                effective_horizon)
-            first_segment = alg.affine_bound.n_segments + 1
-            n_cells_bounded, deterministic_area = _build_grid_bound_prefix!(
-                alg.pcb, state, flow, provider, alg, stats,
-                alg.state_cache, cell_horizon, Inf, NoGridBoundaryProbe(),
-                modes; start_cell=first_cell,
-                initial_integral=deterministic_area,
-                append=first_cell > 1)
-            _append_subsampling_prefix!(combined, cv, alg, state, flow,
-                effective_horizon, modes, first_cell, n_cells_bounded,
-                first_segment)
+        if _omrf_budget_branch_capture_enabled[]
+            fixtures = _omrf_budget_branch_fixtures[]
+            if !haskey(fixtures, :initial_extend)
+                fixtures[:initial_extend] = deepcopy((cv=cv, alg=alg,
+                    state=state, flow=flow, provider=provider, modes=modes,
+                    stats=stats, effective_horizon=effective_horizon,
+                    target_area=cumulative_exp, n_cells_bounded=0,
+                    deterministic_area=0.0))
+            end
         end
+        n_cells_bounded, deterministic_area =
+            _extend_subsampling_bound_to_budget!(cv, alg, state, flow,
+                provider, modes, stats, effective_horizon, cumulative_exp,
+                n_cells_bounded, deterministic_area)
         _inc_counter_grid_schedule_build_seconds(stats,
             (time_ns() - _schedule_t0) * 1.0e-9)
 
@@ -683,14 +818,21 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
 
             _inc_counter_subsampling_cell_roof_proposals(stats)
             _inc_counter_clock_candidates(stats)
-            D = modes.use_linear ? pos(alg.affine_bound(τ_proposal)) :
-                pos(alg.pcb(τ_proposal))
+            joint = _joint_signed_group_enabled(cv.envelope)
+            D = joint ? 0.0 : modes.use_linear ?
+                pos(alg.affine_bound(τ_proposal)) : pos(alg.pcb(τ_proposal))
             _inc_counter_pointwise_screen_evaluations(stats)
             _screen_t0 = time_ns()
-            B = screening_residual_bound(
-                cv.envelope, state, flow, τ_proposal)
+            B = joint ? _joint_signed_active_mass!(
+                cv.envelope, state, τ_proposal) :
+                screening_residual_bound(cv.envelope, state, flow, τ_proposal)
             _inc_counter_pointwise_screen_seconds(stats,
                 (time_ns() - _screen_t0) * 1.0e-9)
+            if _bound_violated(D + B, bar_M)
+                _record_subsampling_bound_violation!(:aggregate,
+                    D + B, bar_M, τ_proposal, alg, state, flow, cv,
+                    nothing, provider)
+            end
             if _subsampling_bound_violation(alg, stats, D + B, bar_M, :aggregate)
                 _shrink_grid_after_bound_violation!(alg, stats)
                 break
@@ -704,9 +846,12 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
             if ispositive(aggregate) && rand(rng) * bar_M <= aggregate
                 _inc_counter_subsampling_aggregate_accepts(stats)
                 _inc_counter_pointwise_screen_passes(stats)
-                result = _evaluate_subsampling_candidate!(rng, cv, flow, state,
-                    alg.state_cache2, cache, stats, alg, τ_proposal, D, B,
-                    bar_M, provider)
+                result = joint ? _evaluate_joint_signed_candidate!(rng, cv,
+                    flow, state, alg.state_cache2, cache, stats, alg,
+                    τ_proposal, bar_M, provider) :
+                    _evaluate_subsampling_candidate!(rng, cv, flow, state,
+                        alg.state_cache2, cache, stats, alg, τ_proposal,
+                        D, B, bar_M, provider)
                 if result === nothing
                     _shrink_grid_after_bound_violation!(alg, stats)
                     break
@@ -724,7 +869,7 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
                     _inc_counter_candidate_loop_iterations(stats)
                     _inc_counter_candidate_loop_overhead_seconds(stats,
                         (time_ns() - _loop_t0) * 1.0e-9)
-                    return τ_proposal, :reflect, GradientMeta(cache.∇ϕx)
+                    return τ_proposal, :reflect, _gradient_meta(cache)
                 end
             else
                 record_subsampling_candidate!(cv.residual_oracle,
@@ -733,31 +878,31 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
 
             # Every valid rejection consumes one further exponential budget.
             cumulative_exp += Random.randexp(rng)
-            # Keep this rejection-hot extension in the concrete caller.  The
-            # generic function barrier above is useful during initial schedule
-            # construction, but Julia 1.12 boxes its complete wrapped argument
-            # set when it is re-entered from this deeply parameterized loop
-            # (about 1.4 KiB per rejection for the OMRF statistics wrapper).
-            # This is exactly the same loop and summation order.
-            combined = alg.subsampling_bound
-            n_horizon = _grid_cell_count(alg.pcb.t_grid,
-                length(alg.pcb.Λ_vals), effective_horizon)
-            while total_area(combined) <= cumulative_exp &&
-                    n_cells_bounded < n_horizon
-                first_cell = n_cells_bounded + 1
-                cell_horizon = min(alg.pcb.t_grid[first_cell + 1],
-                    effective_horizon)
-                first_segment = alg.affine_bound.n_segments + 1
+            if _omrf_budget_branch_capture_enabled[]
+                branch = total_area(alg.subsampling_bound) <= cumulative_exp &&
+                    n_cells_bounded < _grid_cell_count(alg.pcb.t_grid,
+                        length(alg.pcb.Λ_vals), effective_horizon) ?
+                    :extend_cell : :covered_prefix
+                fixtures = _omrf_budget_branch_fixtures[]
+                if !haskey(fixtures, branch)
+                    fixtures[branch] = deepcopy((cv=cv, alg=alg, state=state,
+                        flow=flow, provider=provider, modes=modes, stats=stats,
+                        effective_horizon=effective_horizon,
+                        target_area=cumulative_exp,
+                        n_cells_bounded=n_cells_bounded,
+                        deterministic_area=deterministic_area))
+                end
+            end
+            # Avoid the no-op helper call when the already certified prefix
+            # covers the newly consumed exponential budget. Keep the exact
+            # entry comparisons of the helper's while loop.
+            if total_area(alg.subsampling_bound) <= cumulative_exp &&
+                    n_cells_bounded < _grid_cell_count(alg.pcb.t_grid,
+                        length(alg.pcb.Λ_vals), effective_horizon)
                 n_cells_bounded, deterministic_area =
-                    _build_grid_bound_prefix!(alg.pcb, state, flow, provider,
-                        alg, stats, alg.state_cache, cell_horizon, Inf,
-                        NoGridBoundaryProbe(), modes;
-                        start_cell=first_cell,
-                        initial_integral=deterministic_area,
-                        append=first_cell > 1)
-                _append_subsampling_prefix!(combined, cv, alg, state, flow,
-                    effective_horizon, modes, first_cell, n_cells_bounded,
-                    first_segment)
+                    _extend_subsampling_bound_to_budget!(cv, alg, state, flow,
+                        provider, modes, stats, effective_horizon,
+                        cumulative_exp, n_cells_bounded, deterministic_area)
             end
             _inc_counter_candidate_loop_iterations(stats)
             _inc_counter_candidate_loop_overhead_seconds(stats,

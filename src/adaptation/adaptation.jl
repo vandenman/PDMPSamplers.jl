@@ -9,18 +9,30 @@ adaptation_horizon(::AbstractAdapter, args...) = Inf
     BoomerangAdaptationOptions(; sticky_aware=true, sticky_min_free_time=10.0,
         sticky_free_shrink_time=50.0, adapt_refresh=true,
         refresh_objective=:evals_per_time, target_refresh_rate=NaN,
-        min_λref=0.01, max_λref=10.0,
-        learn_nonstickable_means=false, initial_variance_floor_fraction=0.0)
+        min_λref=0.01, max_λref=10.0, center_nonstickable=true,
+        adapt_stickable_scales=false, initial_variance_floor_fraction=0.0)
 
 Explicit configuration for `AdaptiveBoomerang` warmup adaptation.
 
 When `sticky_aware` is true and the sampler supplies a nonempty stickability
-mask, diagonal adaptation uses a globally zero-centred reference. Its scales
-are raw second moments; stickable coordinates use free-stratum moments and
-retain their previous scale until `sticky_min_free_time` has accumulated.
-`learn_nonstickable_means=true` is a research-only ablation: continuously
-moving coordinates use their time-weighted warmup means, while stickable
-coordinates remain centred at zero and all scale calculations are unchanged.
+mask, diagonal adaptation treats the two kinds of coordinate differently.
+Stickable coordinates stay centred at their sticky boundary, zero. With
+`adapt_stickable_scales=false` they also keep the scale they had before
+warmup, as the diagonal preconditioner of the Bouncy Particle and Zig-Zag
+samplers does: time spent stuck at zero carries no information about their
+scale, and in a Boomerang the scale is also the coordinate's speed, which sets
+how quickly it is released from zero. With `true` they use the raw second
+moment of their free-stratum trajectory, retaining their previous scale until
+`sticky_min_free_time` has accumulated.
+
+With `center_nonstickable=true`, continuously moving coordinates use their
+time-weighted warmup mean and variance, a Gaussian approximation of their
+posterior. With `false` they are centred at zero with the raw second moment as
+variance, so that orbits sweep through zero; for parameters whose posterior
+lies far from zero (log scales, thresholds) this produces wide orbits and many
+reflections. With a diagonal reference every coordinate's free orbit is an
+ellipse around its own centre, so these centres do not change how a stickable
+coordinate reaches zero; the target is exact for any reference.
 Full-rank and low-rank adaptation currently retain their original law.
 `initial_variance_floor_fraction` is an opt-in diagonal research safeguard.
 For coordinates selected by the adapter's `variance_floor_mask`, every update
@@ -36,7 +48,8 @@ struct BoomerangAdaptationOptions
     target_refresh_rate::Float64
     min_λref::Float64
     max_λref::Float64
-    learn_nonstickable_means::Bool
+    center_nonstickable::Bool
+    adapt_stickable_scales::Bool
     initial_variance_floor_fraction::Float64
 end
 
@@ -50,7 +63,7 @@ function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
     sticky_free_shrink_time::Real=50.0,
     adapt_refresh::Bool=true, refresh_objective::Symbol=:evals_per_time,
     target_refresh_rate::Real=NaN, min_λref::Real=0.01, max_λref::Real=10.0,
-    learn_nonstickable_means::Bool=false,
+    center_nonstickable::Bool=true, adapt_stickable_scales::Bool=false,
     initial_variance_floor_fraction::Real=0.0)
     min_free = float(sticky_min_free_time)
     shrink_time = float(sticky_free_shrink_time)
@@ -71,7 +84,7 @@ function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
     end
     return BoomerangAdaptationOptions(sticky_aware, min_free, shrink_time,
         adapt_refresh, refresh_objective, target, min_ref, max_ref,
-        learn_nonstickable_means, floor_fraction)
+        center_nonstickable, adapt_stickable_scales, floor_fraction)
 end
 
 struct SequenceAdapter{T} <: AbstractAdapter
@@ -893,31 +906,29 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
     length(variance_floor) == d || throw(DimensionMismatch(
         "variance_floor length $(length(variance_floor)) does not match dimension $d"))
     T = stats.total_time
-    # A nonzero reference centre in any coordinate changes every global
-    # Boomerang orbit and hence the reflection-mediated route by which sticky
-    # coordinates reach their boundary.  On a sticky target, use a coherent
-    # zero-centred reference for the whole diagonal flow and adapt only its
-    # second moments.  This retains scale adaptation without fitting the
-    # currently occupied model's location.
-    zero_center_sticky_target = options.sticky_aware && any(can_stick)
+    # On a sticky target, stickable coordinates stay centred at zero and
+    # non-stickable ones are centred at their warmup mean (or at zero with
+    # `center_nonstickable=false`); see `BoomerangAdaptationOptions`.
+    sticky_target = options.sticky_aware && any(can_stick)
     @inbounds for i in 1:d
         μ_total = stats.sum_x_dt[i] / T
         σ2_total = max(stats.sum_x2_dt[i] / T - μ_total * μ_total, BOOM_DIAG_FLOOR^2)
         Ti_free = stats.free_time[i]
         μi = μ_total
         σ2 = σ2_total
-        if zero_center_sticky_target
-            # Keep selectable coordinates centred at their sticky boundary.
-            # The opt-in nuisance-centre ablation changes only the reference
-            # mean: retaining E[x²] below makes its covariance identical to
-            # the legacy reference and isolates the centring mechanism.
-            μi = options.learn_nonstickable_means && !can_stick[i] ?
-                μ_total : 0.0
-            if !can_stick[i]
-                # Non-stickable coordinates are always in the continuous
-                # stratum.  For a zero-centred reference, their KL-optimal
-                # diagonal scale is E[x²], rather than Var(x).
+        if sticky_target && !can_stick[i]
+            # Non-stickable coordinates are always in the continuous stratum:
+            # a Gaussian approximation (mean and variance), or a zero-centred
+            # reference, for which the KL-optimal diagonal scale is E[x²].
+            if !options.center_nonstickable
+                μi = 0.0
                 σ2 = max(stats.sum_x2_dt[i] / T, BOOM_DIAG_FLOOR^2)
+            end
+        elseif sticky_target
+            μi = 0.0
+            if !options.adapt_stickable_scales
+                # Keep the scale installed before warmup.
+                σ2 = 1.0 / flow.Γ[i, i]
             elseif Ti_free >= options.sticky_min_free_time && ispositive(Ti_free)
                 use_total_free_moments = isempty(stats.free_sum_x2_dt) || Ti_free == T
                 sx2_free = use_total_free_moments ?

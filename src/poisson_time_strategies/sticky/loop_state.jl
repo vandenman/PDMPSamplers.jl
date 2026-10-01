@@ -8,6 +8,7 @@ struct StickyLoopState{T<:PoissonTimeStrategy,U<:Union{Function,AbstractVector},
     stickable_indices::Vector{Int}
     sticky_pq::Q
     empty_∇ϕx::V
+    empty_gradient_meta::GradientMeta
 end
 
 function _validate_sticky_rates(κ::AbstractVector, can_stick::BitVector,
@@ -47,6 +48,7 @@ mutable struct AggregateStickyLoopState{T<:PoissonTimeStrategy,C<:AbstractAggreg
     sticky_pq::Q
     aggregate_unstick_time::Float64
     empty_∇ϕx::V
+    empty_gradient_meta::GradientMeta
 end
 
 function _validated_stickable_coordinates(clock::AbstractAggregateUnstickClock,
@@ -116,7 +118,10 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
     state isa StickyPDMPState && set_active_set!(model, state.free)
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
 
-    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick, sticky_times, stickable_indices, sticky_pq, similar(state.ξ.x, 0))
+    empty_gradient = similar(state.ξ.x, 0)
+    alg = StickyLoopState(internal_alg_, strat.κ, strat.can_stick,
+        sticky_times, stickable_indices, sticky_pq, empty_gradient,
+        GradientMeta(empty_gradient))
     rebuild_sticky_schedule!(rng, alg, state, flow)
     # @show alg.sticky_times
     any(isnan, alg.sticky_times) && error("sticky_times contains NaN: $(alg.sticky_times)")
@@ -145,7 +150,10 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
     internal_alg_ = _to_internal(strat.alg, rng, flow, model, state, cache, stats)
     internal_alg_ isa GridAdaptiveState ||
         throw(ArgumentError("AggregateSticky requires an inner strategy with bounded event search; use GridThinningStrategy for now"))
-    alg = AggregateStickyLoopState(internal_alg_, copy(strat.clock), copy(strat.can_stick), sticky_times, stickable_indices, sticky_pq, Inf, similar(state.ξ.x, 0))
+    empty_gradient = similar(state.ξ.x, 0)
+    alg = AggregateStickyLoopState(internal_alg_, copy(strat.clock),
+        copy(strat.can_stick), sticky_times, stickable_indices, sticky_pq,
+        Inf, empty_gradient, GradientMeta(empty_gradient))
     rebuild_sticky_schedule!(rng, alg, state, flow)
     any(isnan, alg.sticky_times) && error("sticky_times contains NaN: $(alg.sticky_times)")
     isnan(alg.aggregate_unstick_time) && error("aggregate_unstick_time is NaN")

@@ -218,7 +218,11 @@ _chain_trace_storage(::Nothing, chain::Integer) = nothing
 function _chain_trace_storage(storage::StreamingTraceStorage, chain::Integer)
     return StreamingTraceStorage(joinpath(storage.directory,
         "chain_" * lpad(string(chain), 4, '0'));
-        buffer_events=storage.buffer_events)
+        buffer_events=storage.buffer_events,
+        write_events=storage.write_events,
+        online_batches=storage.online_batches,
+        online_end_time=storage.online_end_time,
+        online_grid_spacing=storage.online_grid_spacing)
 end
 
 _maybe_copy_criterion(::Nothing) = nothing
@@ -622,6 +626,7 @@ function _run_phase!(
         step_observer = _phase_step_observer[]
         step_observer === nothing || step_observer(:before_step, phase, state,
             criterion_horizon, adapter_horizon, :pending, stats)
+        prepare_trace_storage_boundary!(trace_manager, phase)
         event_type = _step!(rng, state, model_, flow, alg_, cache, stats,
             trace_manager, boundary_policy, phase,
             min(criterion_horizon, adapter_horizon),
@@ -679,6 +684,8 @@ function _handle_dynamics_adaptation!(
 
     !did_dynamics_adapt(adapter) && return nothing
 
+    prepare_dynamics_adaptation_storage_boundary!(trace_manager, phase,
+        state)
     record_dynamics_adaptation!(trace_manager, state, flow, phase)
 
     _reset_inner_grid!(alg_)
@@ -973,9 +980,20 @@ function _pdmp_sample_single(
         phase_alg, phase_cache, trace_manager, stats, health, :main,
         adapter, progress, prg, tstop, T_float, progress_stops,
         boundary_policy, original_model, support_boundary_options)
+    main_loop_done_ns = time_ns()
     finish_trace_phase!(trace_manager, state, flow, :main)
+    trace_done_ns = time_ns()
     _run_optional_hook!(_main_phase_profile_stop_hook[])
+    profile_hook_done_ns = time_ns()
     _write_progress_sidecar!(:main_end, state, stats; force=true, flow=flow, alg=phase_alg)
+    sidecar_done_ns = time_ns()
+    if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
+        println(stderr, "OMRF_PROFILE main_loop_seconds=",
+            (main_loop_done_ns - main_phase_start) / 1e9,
+            " trace_finish_seconds=", (trace_done_ns - main_loop_done_ns) / 1e9,
+            " profile_hook_seconds=", (profile_hook_done_ns - trace_done_ns) / 1e9,
+            " sidecar_seconds=", (sidecar_done_ns - profile_hook_done_ns) / 1e9)
+    end
     _set_counter_main_phase_elapsed_time(stats, (time_ns() - main_phase_start) / 1e9)
     _set_counter_main_phase_allocated_bytes(
         stats, Float64(Base.gc_bytes() - main_phase_allocated_start))

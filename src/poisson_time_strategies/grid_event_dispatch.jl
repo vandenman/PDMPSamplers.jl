@@ -116,8 +116,8 @@ function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
         flow::ContinuousDynamics, provider, stats::Union{Nothing,AbstractStatisticCounter}=nothing)
     use_direct = has_direct_deterministic_rate_cell_bound(provider)
     direct_started = use_direct && stats !== nothing ? time_ns() : UInt64(0)
-    direct_first = use_direct ? deterministic_rate_cell_bound(provider, state,
-        flow, alg.pcb.t_grid[1], alg.pcb.t_grid[2]) : nothing
+    direct_first = use_direct ? Float64(deterministic_rate_cell_bound(provider,
+        state, flow, alg.pcb.t_grid[1], alg.pcb.t_grid[2])) : 0.0
     use_direct && stats !== nothing && _inc_counter_grid_bound_seconds(
         stats, (time_ns() - direct_started) * 1.0e-9)
     use_linear = !use_direct && _use_linear_bound(alg, state, flow, provider)
