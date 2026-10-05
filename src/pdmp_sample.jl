@@ -222,7 +222,8 @@ function _chain_trace_storage(storage::StreamingTraceStorage, chain::Integer)
         write_events=storage.write_events,
         online_batches=storage.online_batches,
         online_end_time=storage.online_end_time,
-        online_grid_spacing=storage.online_grid_spacing)
+        online_grid_spacing=storage.online_grid_spacing,
+        online_warmup_batches=storage.online_warmup_batches)
 end
 
 _maybe_copy_criterion(::Nothing) = nothing

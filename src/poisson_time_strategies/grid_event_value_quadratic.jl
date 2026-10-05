@@ -1,6 +1,14 @@
 _can_use_value_quadratic_grid(flow::ContinuousDynamics, curvature_bound) =
     _rate_aggregation(flow) === :scalar && curvature_bound !== nothing
 
+# The full-gradient value-quadratic search below needs only the total rate at
+# the grid points and the acceptance test at the candidate, so it also applies
+# to componentwise (Zig-Zag) rates: the bound then concerns the total rate
+# sum_i (theta_i d_i U)_+, as for the scalar rates of the other dynamics, and
+# the grid points need gradients only (no rate derivatives).
+_can_use_global_value_quadratic_grid(flow::ContinuousDynamics, curvature_bound) =
+    _rate_aggregation(flow) in (:scalar, :componentwise) && curvature_bound !== nothing
+
 function _shared_node_cell_bound(
     t_previous::Real,
     y_previous::Real,
@@ -124,7 +132,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
     )::GridEvent where {FL<:ContinuousDynamics}
 
     shared_node = alg.bound === :shared_node
-    _can_use_value_quadratic_grid(flow, alg.curvature_bound) ||
+    _can_use_global_value_quadratic_grid(flow, alg.curvature_bound) ||
         return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 
     state_ = alg.state_cache
