@@ -210,7 +210,7 @@ compact(trace::FactorizedTrace) = trace
 """
     StreamingTraceStorage(directory; buffer_events=4096, write_events=true,
                           online_batches=0, online_end_time=NaN,
-                          online_grid_spacing=NaN)
+                          online_grid_spacing=NaN, online_warmup_batches=0)
 
 Opt-in bounded trace storage. Sampling writes immutable typed-event chunks to
 `directory`; flushing a full buffer only performs file I/O. It never calls a
@@ -229,6 +229,10 @@ position/mask snapshots every `online_grid_spacing`, and writes them to
 `online_summaries.bin` in the main-phase directory. With `write_events=false`
 the main phase writes no event chunks, so memory and disk use do not grow with
 the number of events; the online summaries are then its only retained output.
+
+With `online_warmup_batches > 0` the warmup phase accumulates the same batch
+integrals over that many equal batches (without snapshots) and writes them to
+`online_summaries.bin` in the warmup directory.
 """
 struct StreamingTraceStorage
     directory::String
@@ -237,10 +241,11 @@ struct StreamingTraceStorage
     online_batches::Int
     online_end_time::Float64
     online_grid_spacing::Float64
+    online_warmup_batches::Int
     function StreamingTraceStorage(directory::AbstractString;
             buffer_events::Integer=4096, write_events::Bool=true,
             online_batches::Integer=0, online_end_time::Real=NaN,
-            online_grid_spacing::Real=NaN)
+            online_grid_spacing::Real=NaN, online_warmup_batches::Integer=0)
         buffer_events >= 1 || throw(ArgumentError(
             "streaming trace buffer_events must be positive"))
         online_batches >= 0 || throw(ArgumentError(
@@ -251,9 +256,11 @@ struct StreamingTraceStorage
             ArgumentError("online_grid_spacing must be positive or NaN"))
         write_events || online_batches > 0 || throw(ArgumentError(
             "write_events=false requires online summaries (online_batches > 0)"))
+        online_warmup_batches >= 0 || throw(ArgumentError(
+            "online_warmup_batches must be nonnegative"))
         new(abspath(String(directory)), Int(buffer_events), write_events,
             Int(online_batches), Float64(online_end_time),
-            Float64(online_grid_spacing))
+            Float64(online_grid_spacing), Int(online_warmup_batches))
     end
 end
 
@@ -301,14 +308,18 @@ mutable struct StreamingOnlineSummaries
     scratch_v::Vector{Float64}
 end
 
-function StreamingOnlineSummaries(d::Integer, storage::StreamingTraceStorage)
-    StreamingOnlineSummaries(storage.online_batches, storage.online_end_time,
-        storage.online_grid_spacing, NaN, NaN, NaN, NaN, 0.0,
+function StreamingOnlineSummaries(d::Integer, n_batches::Integer,
+        end_time::Real, grid_spacing::Real)
+    StreamingOnlineSummaries(Int(n_batches), Float64(end_time),
+        Float64(grid_spacing), NaN, NaN, NaN, NaN, 0.0,
         zeros(d), zeros(d), zeros(d), zeros(d), 0.0, 0.0, zeros(Int, d),
         Float64[], Float64[], Float64[], Float64[], Float64[], Float64[],
         Float64[], Int[], zeros(Int, d),
         Float64[], Float64[], UInt8[], zeros(d), zeros(d))
 end
+StreamingOnlineSummaries(d::Integer, storage::StreamingTraceStorage) =
+    StreamingOnlineSummaries(d, storage.online_batches, storage.online_end_time,
+        storage.online_grid_spacing)
 
 const _STREAM_TRACE_MAGIC = UInt8[0x50, 0x44, 0x4d, 0x50, 0x54, 0x59, 0x50, 0x31]
 const _STREAM_EVENT_REFLECT_FULL = UInt8(1)
@@ -447,8 +458,15 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
     # Online summaries and event suppression apply to the retained phase only;
     # warmup finalizers still read the warmup event stream.
     is_main = warmup_end === nothing
-    online = is_main && storage.online_batches > 0 ?
-        StreamingOnlineSummaries(length(state.ξ.x), storage) : nothing
+    online = if is_main
+        storage.online_batches > 0 ?
+            StreamingOnlineSummaries(length(state.ξ.x), storage) : nothing
+    elseif storage.online_warmup_batches > 0 && warmup_end > state.t[]
+        StreamingOnlineSummaries(length(state.ξ.x),
+            storage.online_warmup_batches, warmup_end, NaN)
+    else
+        nothing
+    end
     trace = StreamingPDMPTrace(flow, directory, String(prefix),
         StreamingEventBuffer(length(state.ξ.x), storage.buffer_events),
         StreamingChunkIndex(directory, 0, 0), nothing, nothing, grid,
@@ -459,6 +477,7 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
     # retained-phase entry, so it must not capture the pre-warmup state here.
     warmup_end === nothing || (trace.initial_state =
         _stream_terminal_state(state, flow))
+    warmup_end === nothing || online === nothing || _online_begin!(online, state)
     return trace
 end
 
