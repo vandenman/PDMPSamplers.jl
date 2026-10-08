@@ -477,6 +477,20 @@ function rate_and_derivative(
         state, flow, _provider_grad(provider), _provider_hvp(provider), cached_gradient)
 end
 
+# With a vector-Hessian-vector provider (e.g. dependent slabs), as in
+# `_get_rate_and_deriv_vhv`: `provider.vhv` is the curvature of the raw target
+# gradient, and the Boomerang `∂λ∂t` subtracts the reference contribution itself.
+function rate_and_derivative(state::AbstractPDMPState, flow::AnyBoomerang, provider::VHVProvider)
+    ∇U = provider.grad(state.ξ.x)
+    return dot(∇U, state.ξ.θ), ∂λ∂t(state, ∇U, _compute_vhv_scalar(provider, state, ∇U, flow), flow)
+end
+
+function rate_and_derivative(state::AbstractPDMPState, flow::AnyBoomerang, provider::VHVProvider,
+    cached_gradient::AbstractVector)
+    return dot(cached_gradient, state.ξ.θ),
+        ∂λ∂t(state, cached_gradient, _compute_vhv_scalar(provider, state, cached_gradient, flow), flow)
+end
+
 function sticking_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
