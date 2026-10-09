@@ -695,76 +695,6 @@ mutable struct BoomerangAdapter{S, W, O} <: AbstractAdapter
     const variance_floor::Vector{Float64}
 end
 
-# Research instrumentation hook. The default `nothing` branch is inert. A
-# caller may temporarily install a callback `(stage, adapter, state, flow)` to
-# capture compact warmup snapshots without retaining raw traces in memory.
-const _BOOMERANG_ADAPTATION_AUDIT_HOOK = Ref{Any}(nothing)
-set_boomerang_adaptation_audit_hook!(hook) =
-    (_BOOMERANG_ADAPTATION_AUDIT_HOOK[] = hook; nothing)
-
-function _emit_boomerang_adaptation_audit(stage, ad, state, flow)
-    hook = _BOOMERANG_ADAPTATION_AUDIT_HOOK[]
-    isnothing(hook) || hook(stage, ad, state, flow)
-    return nothing
-end
-
-const _BOOMERANG_ADAPTATION_AUDIT_RECORDS = Ref{Any}(Any[])
-const _BOOMERANG_ADAPTATION_AUDIT_INDICES = Ref(Int[])
-const _BOOMERANG_ADAPTATION_AUDIT_ADAPTER = Ref{Any}(nothing)
-
-function start_boomerang_adaptation_audit!(indices::AbstractVector{<:Integer})
-    _BOOMERANG_ADAPTATION_AUDIT_INDICES[] = Int.(indices)
-    _BOOMERANG_ADAPTATION_AUDIT_RECORDS[] = Any[]
-    _BOOMERANG_ADAPTATION_AUDIT_ADAPTER[] = nothing
-    set_boomerang_adaptation_audit_hook!(_record_boomerang_adaptation_audit!)
-    return nothing
-end
-
-function _record_boomerang_adaptation_audit!(stage, ad, state, flow)
-    idx = _BOOMERANG_ADAPTATION_AUDIT_INDICES[]
-    stats = ad.stats
-    T = stats.total_time
-    candidate = [ispositive(T) ? stats.sum_x2_dt[i] / T : NaN for i in idx]
-    free = state isa StickyPDMPState ? copy(state.free[idx]) : trues(length(idx))
-    stored = state isa StickyPDMPState ? copy(state.stored_velocity[idx]) :
-        zeros(length(idx))
-    push!(_BOOMERANG_ADAPTATION_AUDIT_RECORDS[], (
-        stage=String(stage), physical_time=Float64(state.t[]),
-        update_index=ad.no_updates_done + 1,
-        total_exposure=Float64(T), free_exposure=copy(stats.free_time[idx]),
-        integrated_first=copy(stats.sum_x_dt[idx]),
-        integrated_second=copy(stats.sum_x2_dt[idx]),
-        empirical_candidate_variance=candidate,
-        installed_variance=Float64[1 / flow.Γ[i, i] for i in idx],
-        installed_mean=copy(flow.μ[idx]), position=copy(state.ξ.x[idx]),
-        physical_velocity=copy(state.ξ.θ[idx]), free=free,
-        stored_velocity=stored))
-    _BOOMERANG_ADAPTATION_AUDIT_ADAPTER[] = ad
-    return nothing
-end
-
-function finish_boomerang_adaptation_audit!()
-    set_boomerang_adaptation_audit_hook!(nothing)
-    ad = _BOOMERANG_ADAPTATION_AUDIT_ADAPTER[]
-    isnothing(ad) && return (snapshots=copy(_BOOMERANG_ADAPTATION_AUDIT_RECORDS[]),
-        final=nothing)
-    idx = _BOOMERANG_ADAPTATION_AUDIT_INDICES[]
-    stats = ad.stats
-    T = stats.total_time
-    candidate = Float64[ispositive(T) ? stats.sum_x2_dt[i] / T : NaN for i in idx]
-    final_candidate = max.(candidate, ad.variance_floor[idx])
-    final = (total_exposure=Float64(T), free_exposure=copy(stats.free_time[idx]),
-        integrated_first=copy(stats.sum_x_dt[idx]),
-        integrated_second=copy(stats.sum_x2_dt[idx]),
-        empirical_candidate_variance=candidate,
-        hypothetical_final_installed_variance=final_candidate,
-        last_installed_update=ad.no_updates_done,
-        last_installed_time=ad.last_update,
-        initial_variance=copy(ad.initial_variance[idx]),
-        variance_floor=copy(ad.variance_floor[idx]))
-    return (snapshots=copy(_BOOMERANG_ADAPTATION_AUDIT_RECORDS[]), final=final)
-end
-
 function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Symbol=:diagonal,
     options::BoomerangAdaptationOptions=BoomerangAdaptationOptions(),
     can_stick::Union{Nothing,AbstractVector{Bool}}=nothing,
@@ -804,13 +734,10 @@ function adapt!(rng::Random.AbstractRNG, ad::BoomerangAdapter{<:WelfordBoomerang
 
     dt_now = adapt_interval(ad.no_updates_done, ad.base_dt)
     if phase === :warmup && (state.t[] - ad.last_update >= dt_now)
-        _emit_boomerang_adaptation_audit(:before_update, ad, state, flow)
         update_boomerang!(flow, ad.stats, Val(ad.scheme), ad.workspace,
             ad.options, ad.can_stick, ad.variance_floor)
-        _emit_boomerang_adaptation_audit(:after_install, ad, state, flow)
         _invalidate_boundary_velocity_cache!(state)
         refresh_velocity!(rng, state, flow)
-        _emit_boomerang_adaptation_audit(:after_refresh, ad, state, flow)
         _boomerang_stats_reset_start!(ad.stats, state)
         ad.last_update = state.t[]
         ad.no_updates_done += 1
