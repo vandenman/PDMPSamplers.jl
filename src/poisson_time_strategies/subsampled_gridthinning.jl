@@ -225,60 +225,10 @@ struct SubsamplingCandidateResult
     actual::Float64
 end
 
-# Research-only immutable capture of the candidate immediately before the
-# selected residual oracle is invoked. It is disabled by default so the
-# production hot path retains its existing allocation behaviour.
-const _CAPTURE_SUBSAMPLING_FAILURE_FIXTURE = Ref(false)
-const _PENDING_SUBSAMPLING_FAILURE_FIXTURE = Ref{Any}(nothing)
-
-enable_subsampling_failure_fixture_capture!(enabled::Bool=true) =
-    (_CAPTURE_SUBSAMPLING_FAILURE_FIXTURE[] = enabled;
-     _PENDING_SUBSAMPLING_FAILURE_FIXTURE[] = nothing; nothing)
-
-subsampling_failure_context(oracle, envelope, subset) = NamedTuple()
-
-function _capture_subsampling_candidate_fixture!(candidate, flow, cv, alg,
-        τ, D, B, cell_roof, M_subset, residual_subset_bound,
-        tight_subset_bound, deterministic_actual, deterministic_gradient)
-    _CAPTURE_SUBSAMPLING_FAILURE_FIXTURE[] || return nothing
-    resolved_flow = _underlying_flow(flow)
-    mean = resolved_flow isa AnyBoomerang ? copy(resolved_flow.μ) : Float64[]
-    covariance = if hasproperty(resolved_flow, :ΣL)
-        factor = Matrix(resolved_flow.ΣL)
-        factor * transpose(factor)
-    else
-        Matrix{Float64}(undef, 0, 0)
-    end
-    free = hasproperty(candidate, :free) ? copy(candidate.free) : BitVector()
-    context = subsampling_failure_context(
-        cv.residual_oracle, cv.envelope, cv.subset)
-    _PENDING_SUBSAMPLING_FAILURE_FIXTURE[] = merge((
-        candidate_position=copy(candidate.ξ.x),
-        physical_velocity=copy(candidate.ξ.θ),
-        free=free,
-        flow_mean=mean,
-        flow_covariance=covariance,
-        physical_time=float(candidate.t[]),
-        proposal_elapsed=float(τ),
-        subset=copy(cv.subset),
-        factor_population=n_observations(cv.envelope),
-        batch_size=cv.m,
-        scaling=_subsampling_scale(cv),
-        deterministic_gradient=copy(deterministic_gradient),
-        deterministic_actual=float(deterministic_actual),
-        deterministic_roof=float(D),
-        residual_cell_mass=float(B),
-        complete_cell_roof=float(cell_roof),
-        selected_cell_bound=float(M_subset),
-        residual_subset_bound=float(residual_subset_bound),
-        tight_subset_bound=float(tight_subset_bound),
-        control_variate_anchor=copy(cv.anchor),
-        control_variate_anchor_identity=objectid(cv.anchor),
-        flow_type=string(typeof(flow)),
-        resolved_flow_type=string(typeof(resolved_flow)),
-        bound_strategy=string(alg.bound)), context)
-    return nothing
-end
+# No longer called by PDMPSamplers. Kept as an empty function only because
+# PDMPSamplersR (inst/julia/stan_subsampling_provider.jl) still adds methods to
+# it; remove it together with those methods.
+function subsampling_failure_context end
 
 """Evaluate one aggregate-accepted subsampling proposal without advancing the live state."""
 function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
@@ -360,9 +310,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     end
     _inc_counter_selected_subset_bound_passes(stats)
     _inc_counter_subsampling_subset_evaluations(stats)
-    _capture_subsampling_candidate_fixture!(candidate, flow, cv,
-        violation_policy, τ, D, B, cell_roof, M_subset,
-        residual_subset_bound, tight_subset_bound, deterministic_actual, G)
     _residual_t0 = time_ns()
     subsampling_selected_residual!(cv.residual_oracle,
         cv.residual_buffer, candidate, cv.subset, cv.anchor)
@@ -379,16 +326,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     end
     _inc_counter_residual_oracle_evaluations(stats)
     _inc_counter_grid_acceptance_tests(stats)
-    if _bound_violated(actual, tight_subset_bound)
-        if _CAPTURE_SUBSAMPLING_FAILURE_FIXTURE[] &&
-                _PENDING_SUBSAMPLING_FAILURE_FIXTURE[] !== nothing
-            _PENDING_SUBSAMPLING_FAILURE_FIXTURE[] = merge(
-                _PENDING_SUBSAMPLING_FAILURE_FIXTURE[], (
-                    selected_residual=copy(cv.residual_buffer),
-                    final_candidate_gradient=copy(G),
-                    actual_rate=float(actual)))
-        end
-    end
     if _subsampling_bound_violation(
             violation_policy, stats, actual, tight_subset_bound, :subset)
         return nothing

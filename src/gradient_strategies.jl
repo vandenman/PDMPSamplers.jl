@@ -742,8 +742,6 @@ function subsampling_selected_residual!(oracle::WithResidualStats, out,
     end
     return out
 end
-subsampling_failure_context(oracle::WithResidualStats, envelope, subset) =
-    subsampling_failure_context(oracle.f, envelope, subset)
 function with_stats(cv::SubsampledControlVariate, stats::AbstractStatisticCounter)
     return _reconstruct_subsampling(cv;
         deterministic_gradient! = WithStats(
