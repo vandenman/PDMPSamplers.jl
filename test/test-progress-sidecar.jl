@@ -47,7 +47,7 @@
             force=true, flow=nothing, alg=nothing)
 
         lines = readlines(path)
-        lastvalue(name) = split(last(filter(x -> startswith(x, name * "="),
+        lastvalue(name) = Base.split(last(filter(x -> startswith(x, name * "="),
             lines)), "="; limit=2)[2]
         @test lastvalue("physical_pdmp_time") == "0.25"
         @test lastvalue("grid_horizon_hits") == "2"

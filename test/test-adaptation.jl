@@ -1,21 +1,34 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 
+# The gradient handed to the adapter is wrapped for statistics, so identify it
+# by its value: the warmup gradient is constant (1000) while the retained
+# gradient is x + 10.
 mutable struct WarmupGradientRecordingAdapter <: PDMPSamplers.AbstractAdapter
-    expected::Any
+    expected_value::Float64
+    adapt_called::Bool
     adapt_matched::Bool
     finish_matched::Bool
 end
 
+_recorded_gradient_value(grad, x) =
+    first(PDMPSamplers.compute_gradient!(grad, copy(x), similar(x)))
+
 function PDMPSamplers.adapt!(::Random.AbstractRNG,
         adapter::WarmupGradientRecordingAdapter, state, flow, grad, trace;
         phase::Symbol=:warmup, kwargs...)
-    phase === :warmup && (adapter.adapt_matched |= grad === adapter.expected)
+    if phase === :warmup
+        matched = _recorded_gradient_value(grad, state.ξ.x) == adapter.expected_value
+        adapter.adapt_matched = adapter.adapt_called ?
+            adapter.adapt_matched && matched : matched
+        adapter.adapt_called = true
+    end
     return nothing
 end
 
 function PDMPSamplers.finish_warmup!(adapter::WarmupGradientRecordingAdapter,
         state, flow, grad, trace, stats)
-    adapter.finish_matched = grad === adapter.expected
+    adapter.finish_matched =
+        _recorded_gradient_value(grad, state.ξ.x) == adapter.expected_value
     return false
 end
 
@@ -26,13 +39,14 @@ end
             FullGradient((out, x) -> (out[1] = x[1] + 10; out)), nothing)
         warmup = PDMPModel(1,
             FullGradient((out, x) -> (out[1] = 1000.0; out)), nothing)
-        adapter = WarmupGradientRecordingAdapter(warmup.grad, false, false)
+        adapter = WarmupGradientRecordingAdapter(1000.0, false, false, false)
         pdmp_sample(SkeletonPoint([1.0], [-1.0]), ZigZag(1), retained,
             GridThinningStrategy(; N=4, t_max=0.1), 0.0, 0.1, 0.05;
             warmup_model=warmup,
             warmup_algorithm=GridThinningStrategy(; N=4, t_max=0.1),
             adapter, seed=90817, progress=false)
         @test adapter.finish_matched
+        @test adapter.adapt_called
         @test adapter.adapt_matched
     end
 

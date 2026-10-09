@@ -590,6 +590,11 @@ end
 
 refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
     flow::LowRankMutableBoomerang) = draw_stratum_velocity!(rng, state, flow)
+# Low-rank flows carry no Cholesky factor, so the diagonal-ΣL fast paths never
+# apply; these methods only resolve the dispatch ambiguity with them.
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::MutableBoomerang{U,T,S,LT,ET}) where {U<:LowRankPrecision,T,S,LT<:Diagonal,ET} =
+    draw_stratum_velocity!(rng, state, flow)
 
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::LowRankMutableBoomerang, cache)
     θ = ξ.θ
@@ -640,6 +645,11 @@ function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::LowRankMu
     end
     return nothing
 end
+
+reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::MutableBoomerang{U,T,S,LT,ET}, cache) where {U<:LowRankPrecision,T,S,LT<:Diagonal,ET} =
+    invoke(reflect!, Tuple{StickyPDMPState,AbstractVector,LowRankMutableBoomerang,Any},
+        state, ∇ϕ, flow, cache)
 
 function correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, flow::LowRankMutableBoomerang, cache)
     z = cache.z

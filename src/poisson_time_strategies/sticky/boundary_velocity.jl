@@ -354,6 +354,15 @@ _gaussian_covariance_entry(flow::PreconditionedDynamics{<:AbstractPreconditioner
         <:Union{BouncyParticle,AnyBoomerang}}, i::Integer) =
     sqrt(_preconditioned_gaussian_covariance_entry(flow, i, i))
 
+function _draw_preserved_coordinate_velocity(rng::Random.AbstractRNG,
+        flow::ContinuousDynamics, i::Integer)
+    σ = _physical_velocity_sd(flow, i)
+    if flow isa ZigZag || (flow isa PreconditionedDynamics && flow.dynamics isa ZigZag)
+        return rand(rng, Bool) ? σ : -σ
+    end
+    return σ * randn(rng)
+end
+
 function _initialize_preserved_sticky_velocity!(rng::Random.AbstractRNG,
         state::StickyPDMPState, flow::ContinuousDynamics)
     _velocity_preserving_sticky(flow) || return draw_stratum_velocity!(rng, state, flow)
@@ -361,12 +370,7 @@ function _initialize_preserved_sticky_velocity!(rng::Random.AbstractRNG,
         if state.free[i]
             state.stored_velocity[i] = 0.0
         elseif iszero(state.stored_velocity[i])
-            σ = _physical_velocity_sd(flow, i)
-            if flow isa ZigZag || (flow isa PreconditionedDynamics && flow.dynamics isa ZigZag)
-                state.stored_velocity[i] = rand(rng, Bool) ? σ : -σ
-            else
-                state.stored_velocity[i] = σ * randn(rng)
-            end
+            state.stored_velocity[i] = _draw_preserved_coordinate_velocity(rng, flow, i)
         end
     end
     return state

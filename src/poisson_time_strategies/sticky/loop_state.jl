@@ -85,7 +85,9 @@ _is_sticky_loop_state(::StickyLoopState) = true
 _is_sticky_loop_state(::AggregateStickyLoopState) = true
 
 function _enforce_nonstickable_coordinates_free!(
+    rng::Random.AbstractRNG,
     state::StickyPDMPState,
+    flow::ContinuousDynamics,
     can_stick::AbstractVector{Bool},
 )
     length(can_stick) == length(state.free) ||
@@ -93,6 +95,16 @@ function _enforce_nonstickable_coordinates_free!(
     changed = false
     @inbounds for i in eachindex(state.free, can_stick)
         if !can_stick[i] && !state.free[i]
+            # A frozen coordinate carries zero physical velocity.  Release it
+            # with its stored velocity (or a fresh draw from the velocity law)
+            # so that velocity-preserving flows do not keep it at rest; other
+            # flows redraw the stratum velocity afterwards.
+            if _velocity_preserving_sticky(flow)
+                v = state.stored_velocity[i]
+                iszero(v) && (v = _draw_preserved_coordinate_velocity(rng, flow, i))
+                state.ξ.θ[i] = v
+            end
+            state.stored_velocity[i] = 0.0
             state.free[i] = true
             changed = true
         end
@@ -108,7 +120,7 @@ function _to_internal(strat::Sticky, rng::Random.AbstractRNG, flow::ContinuousDy
         throw(DimensionMismatch("can_stick length $(length(strat.can_stick)) does not match dimension $d"))
     _validate_sticky_rates(strat.κ, strat.can_stick, d)
     state isa StickyPDMPState &&
-        _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
+        _enforce_nonstickable_coordinates_free!(rng, state, flow, strat.can_stick)
     state isa StickyPDMPState &&
         _initialize_preserved_sticky_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
@@ -141,7 +153,7 @@ function _to_internal(strat::AggregateSticky, rng::Random.AbstractRNG, flow::Con
     isempty(invalid) || throw(ArgumentError(
         "AggregateSticky can_stick marks unsupported coordinates $(invalid) as stickable; " *
         "$(nameof(typeof(strat.clock))) supports full-state coordinates $(collect(supported))"))
-    _enforce_nonstickable_coordinates_free!(state, strat.can_stick)
+    _enforce_nonstickable_coordinates_free!(rng, state, flow, strat.can_stick)
     _initialize_preserved_sticky_velocity!(rng, state, flow)
     sticky_times = fill(Inf, d)
     stickable_indices = findall(strat.can_stick)

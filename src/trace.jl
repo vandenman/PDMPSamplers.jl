@@ -979,7 +979,7 @@ function Statistics.mean!(out::AbstractVector, trace::StreamingPDMPTrace)
     return out
 end
 
-function Statistics.var(trace::StreamingPDMPTrace, means::AbstractVector)
+function Statistics.var(trace::StreamingPDMPTrace, means::AbstractVector{<:Real})
     trace.moments.total_time > 0 || error(
         "Cannot compute a variance on a streaming trace without elapsed time")
     result = trace.moments.sum_x2 ./ trace.moments.total_time .- means .^ 2
@@ -990,7 +990,7 @@ end
 Statistics.var(trace::StreamingPDMPTrace) =
     Statistics.var(trace, Statistics.mean(trace))
 Statistics.std(trace::StreamingPDMPTrace) = sqrt.(Statistics.var(trace))
-Statistics.std(trace::StreamingPDMPTrace, means::AbstractVector) =
+Statistics.std(trace::StreamingPDMPTrace, means::AbstractVector{<:Real}) =
     sqrt.(Statistics.var(trace, means))
 
 function inclusion_probs(trace::StreamingPDMPTrace)

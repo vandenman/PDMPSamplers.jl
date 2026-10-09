@@ -192,8 +192,6 @@ mutable struct HarmonicLogLinearAggregateWorkspace
     prefix::Vector{Float64}
     boundary_constants::Vector{Float64}
     log_boundary_constants::Vector{Float64}
-    flow_source::Any
-    metric_generation::UInt
     cells_used::Int
 end
 
@@ -224,8 +222,7 @@ function HarmonicLogLinearAggregateClock(
     fallback = SummedRateClock(slab_provider, model_prior; rtol, atol)
     m = length(beta_indices(slab_provider))
     workspace = HarmonicLogLinearAggregateWorkspace(falses(m), falses(m),
-        zeros(max_cells), zeros(max_cells + 1), zeros(m), zeros(m), nothing,
-        typemax(UInt), 0)
+        zeros(max_cells), zeros(max_cells + 1), zeros(m), zeros(m), 0)
     return HarmonicLogLinearAggregateClock(slab_provider, model_prior,
         Float64(max_cell_width), Int(max_cells), AggregateClockDiagnostics(),
         fallback, workspace)

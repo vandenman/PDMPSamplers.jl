@@ -369,8 +369,6 @@ end
             iszero(workspace.boundary_constants[j]) ? -Inf :
             log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
     end
-    workspace.flow_source = flow
-    workspace.metric_generation = flow.metric.generation
     return workspace.boundary_constants
 end
 
@@ -388,8 +386,6 @@ end
             iszero(workspace.boundary_constants[j]) ? -Inf :
             log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
     end
-    workspace.flow_source = flow
-    workspace.metric_generation = zero(UInt)
     return workspace.boundary_constants
 end
 
@@ -2659,12 +2655,14 @@ end
 
 function rate(clock::ChebyshevResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     τ < 0 && throw(ArgumentError("τ must be non-negative"))
+    _has_inactive_stickable_beta(clock.fallback, state, can_stick) || return 0.0
     seg = scalar_logscale_gaussian_line_segment(clock.slab_provider, clock.model_prior, flow, state, can_stick, max(Float64(τ), eps(Float64)))
     return _scalar_logscale_gaussian_line_rate(seg, τ)
 end
 
 function sample_time(rng::Random.AbstractRNG, clock::ChebyshevResidualAggregateClock{<:GlobalLogscaleExchangeableGaussianSlab},
                      flow::Union{ZigZag,BouncyParticle}, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
+    _has_inactive_stickable_beta(clock.fallback, state, can_stick) || return Inf
     capability = residual_envelope_capability(clock, flow, horizon)
     if capability isa _AnalyticResidualCapability
         seg = scalar_logscale_gaussian_line_segment(clock.slab_provider, clock.model_prior, flow, state, can_stick, Inf)

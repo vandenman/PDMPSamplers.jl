@@ -323,39 +323,6 @@ function _exchangeable_linear_params(clock::LinearGaussianAggregateClock{<:Abstr
     return active, stickable, k, nU, a, b, sqrt(s2)
 end
 
-function _exchangeable_log_weight_sum(prior::AbstractModelPrior, active::BitVector, stickable::BitVector, k::Integer)
-    max_logw = -Inf
-    @inbounds for j in eachindex(active)
-        if stickable[j] && !active[j]
-            max_logw = max(max_logw, _log_model_add_odds_with_count(prior, active, j, k))
-        end
-    end
-    max_logw == -Inf && return -Inf
-    max_logw == Inf && return Inf
-    total = 0.0
-    @inbounds for j in eachindex(active)
-        if stickable[j] && !active[j]
-            logw = _log_model_add_odds_with_count(prior, active, j, k)
-            total += isfinite(logw) ? exp(logw - max_logw) : 0.0
-        end
-    end
-    return max_logw + log(total)
-end
-
-function _exchangeable_log_weight_sum(prior::Union{ExchangeableModelSizePrior,BetaBernoulliModelPrior}, active::BitVector, stickable::BitVector, k::Integer)
-    nU = count(j -> stickable[j] && !active[j], eachindex(active))
-    iszero(nU) && return -Inf
-    logρ = _log_model_add_odds_with_count(prior, active, findfirst(j -> stickable[j] && !active[j], eachindex(active)), k)
-    logρ == -Inf && return -Inf
-    return log(nU) + logρ
-end
-
-function _exchangeable_log_total_weight(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::Union{ZigZag,BouncyParticle}, active::BitVector, stickable::BitVector, k::Integer)
-    log_sum = _exchangeable_log_weight_sum(clock.model_prior, active, stickable, k)
-    log_sum == -Inf && return -Inf
-    return log(unstick_rate_constant(flow, 1)) + log_sum
-end
-
 function _exchangeable_log_total_weight(
     clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
     flow::Union{_VelocityPreservingLinearFlow,_VelocityPreservingBoomerang},
@@ -596,6 +563,13 @@ end
 # selection reuses the exact O(p) fallback to retain those individual weights.
 function sample_label(rng::Random.AbstractRNG,
         clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
+        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
+        state::StickyPDMPState, can_stick::BitVector)
+    return sample_label(rng, clock.fallback, flow, state, can_stick)
+end
+
+function sample_label(rng::Random.AbstractRNG,
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:Union{ExchangeableModelSizePrior,BetaBernoulliModelPrior}},
         flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
         state::StickyPDMPState, can_stick::BitVector)
     return sample_label(rng, clock.fallback, flow, state, can_stick)

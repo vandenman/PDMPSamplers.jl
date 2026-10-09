@@ -109,6 +109,7 @@
         @test alg_ isa PDMPSamplers.StickyLoopState
 
         state.free .= false
+        state.stored_velocity .= state.ξ.θ
         state.ξ.x .= 0.0
         state.ξ.θ .= 0.0
         PDMPSamplers.rebuild_sticky_schedule!(rng, alg_, state, flow)
