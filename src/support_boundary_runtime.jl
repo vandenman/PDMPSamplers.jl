@@ -81,22 +81,6 @@ function _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
     flow::ContinuousDynamics,
-    alg::Union{VectorVariationAdaptiveState,PositiveVariationGridAdaptiveState},
-    state::AbstractPDMPState,
-    cache::NamedTuple,
-    stats::AbstractStatisticCounter,
-    policy::BoundaryPolicy,
-    max_horizon::Real,
-)
-    return next_event_time(rng, model, flow, alg, state, cache, stats,
-                           Float64(max_horizon), true, :horizon_hit,
-                           _detect_boundaries(policy))
-end
-
-function _next_event_time_for_step(
-    rng::Random.AbstractRNG,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
     alg::RootsPoissonTimeStrategy,
     state::AbstractPDMPState,
     cache::NamedTuple,

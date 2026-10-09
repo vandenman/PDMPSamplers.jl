@@ -75,8 +75,6 @@ include("poisson_time_strategies/grid_event_value_quadratic.jl")
 include("poisson_time_strategies/grid_event_dispatch.jl")
 include("poisson_time_strategies/grid_event_grid.jl")
 include("poisson_time_strategies/subsampled_gridthinning.jl")
-include("poisson_time_strategies/positive_variation_gridthinning.jl")
-include("poisson_time_strategies/vector_variation_thinning.jl")
 include("poisson_time_strategies/thinning.jl")
 include("poisson_time_strategies/sticky.jl")
 # these need to be implemented/ fixed

@@ -112,22 +112,4 @@ end
             @test stats.grid_builds >= 1
         end
     end
-
-    @testset "VectorVariationThinningStrategy" begin
-        strategy = PDMPSamplers.VectorVariationThinningStrategy(;
-            N=3, N_min=1, t_max=0.35, validation_rtol=0.0, validation_atol=1e-10,
-            fallback=GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:flat, bound_violation=:throw))
-        stats = _validate_strategy(zz_case, strategy; seed=32_001)
-        @test stats.positive_variation_fallbacks == 0
-    end
-
-    @testset "PositiveVariationGridThinningStrategy" begin
-        strategy = PDMPSamplers.PositiveVariationGridThinningStrategy(;
-            N=3, N_min=1, t_max=0.25, validation_rtol=0.0, validation_atol=1e-10,
-            fallback=GridThinningStrategy(; N=3, N_min=1, t_max=0.25,
-                lazy=false, bound=:flat, curvature_bound=0.0, bound_violation=:throw))
-        stats = _validate_strategy(boomerang_case, strategy; seed=33_001)
-        @test stats.grid_builds >= 1
-    end
 end
