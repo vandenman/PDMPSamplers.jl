@@ -8,16 +8,6 @@ Gaussian providers also dispatch through `active_prior_grad!`.
 active_prior_neggrad!(provider::AbstractGaussianSlabProvider, out::AbstractVector, x::AbstractVector, active_beta::BitVector) =
     active_prior_grad!(provider, out, x, active_beta)
 
-function active_prior_neggrad!(provider::ArbitrarySlabBoundary, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
-    length(out) == length(x) ||
-        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
-    provider.active_prior_neggrad!(out, x, active_beta)
-    return out
-end
-
-active_prior_grad!(provider::ArbitrarySlabBoundary, out::AbstractVector, x::AbstractVector, active_beta::BitVector) =
-    active_prior_neggrad!(provider, out, x, active_beta)
-
 """
     SummedRateClock(slab_provider, model_prior; rtol=1e-8, atol=1e-10,
                     initial_bracket=1.0, bracket_multiplier=2.0)
@@ -327,8 +317,6 @@ use `HarmonicLogLinearAggregateClock` for log-linear Gaussian scale slabs.
 Every clock falls back to the exact `SummedRateClock` where it has no
 specialized method.
 """
-default_aggregate_unstick_clock(provider::IndependentZeroMeanLogscaleGaussianSlab, model_prior::AbstractModelPrior) =
-    ExponentialSumAggregateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::LogLinearGaussianScaleSlab, model_prior::AbstractModelPrior) =
     ExponentialSumAggregateClock(provider, model_prior)
 default_aggregate_unstick_clock(provider::AbstractGaussianSlabProvider, model_prior::AbstractModelPrior) =
@@ -514,34 +502,6 @@ function boundary_logweights!(
     return out
 end
 
-"""
-    aggregate_lograte(provider, model_prior, log_Cv, x, active_beta, stickable_beta)
-
-Return the log aggregate unstick rate, equal to `log_Cv` plus the log-sum of
-inactive stickable boundary weights.
-"""
-function aggregate_lograte(
-    provider::AbstractExchangeableGaussianSlab,
-    model_prior::ExchangeableModelSizePrior,
-    log_Cv::Real,
-    x::AbstractVector,
-    active_beta::BitVector,
-    stickable_beta::BitVector,
-)
-    m = length(beta_indices(provider))
-    length(model_prior) == m ||
-        throw(DimensionMismatch("model-prior length $(length(model_prior)) does not match beta dimension $m"))
-    length(active_beta) == m || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $m"))
-    length(stickable_beta) == m || throw(DimensionMismatch("stickable_beta length $(length(stickable_beta)) does not match beta dimension $m"))
-    n_inactive_stickable = count(j -> stickable_beta[j] && !active_beta[j], 1:m)
-    iszero(n_inactive_stickable) && return -Inf
-    k = count(active_beta)
-    k < length(model_prior) || return -Inf
-    log_q = _exchangeable_log_q_zero(provider, x, active_beta)
-    log_rho = model_prior.log_omega[k + 2] - model_prior.log_omega[k + 1] + log(k + 1) - log(m - k)
-    return Float64(log_Cv) + log_q + log(n_inactive_stickable) + log_rho
-end
-
 function boundary_logweights!(
     out::AbstractVector,
     provider::AbstractGaussianSlabProvider,
@@ -592,6 +552,12 @@ function boundary_logweights!(
     return out
 end
 
+"""
+    aggregate_lograte(provider, model_prior, log_Cv, x, active_beta, stickable_beta)
+
+Return the log aggregate unstick rate, equal to `log_Cv` plus the log-sum of
+inactive stickable boundary weights.
+"""
 function aggregate_lograte(
     provider::AbstractSlabPrior,
     model_prior::AbstractModelPrior,
@@ -666,21 +632,4 @@ function sample_unstick_label(
     weights = Vector{Float64}(undef, length(beta_indices(provider)))
     boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
     return _sample_from_logweights(rng, beta_indices(provider), weights)
-end
-
-function sample_unstick_label(
-    rng::Random.AbstractRNG,
-    provider::AbstractExchangeableGaussianSlab,
-    model_prior::ExchangeableModelSizePrior,
-    x::AbstractVector,
-    active_beta::BitVector,
-    stickable_beta::BitVector,
-)
-    indices = beta_indices(provider)
-    candidates = Int[]
-    for j in eachindex(indices)
-        stickable_beta[j] && !active_beta[j] && push!(candidates, indices[j])
-    end
-    isempty(candidates) && throw(ArgumentError("cannot sample an unstick label because there are no inactive stickable coordinates"))
-    return rand(rng, candidates)
 end

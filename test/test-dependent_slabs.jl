@@ -293,21 +293,6 @@ end
         @test log_model_add_odds(bb, active_bb, 2) ≈ log(2.0 + 2) - log(3.0 + 4 - 2 - 1)
         @test_throws ArgumentError log_model_add_odds(bb, active_bb, 1)
 
-        log_omega = log.([0.1, 0.2, 0.3, 0.4])
-        size_prior = ExchangeableModelSizePrior(log_omega; normalize=true)
-        @test exp(LogExpFunctions.logsumexp(size_prior.log_omega)) ≈ 1.0
-        @test length(size_prior) == 3
-        size_prior_copy = copy(size_prior)
-        size_prior.log_omega[1] = -99.0
-        @test size_prior_copy.log_omega[1] != size_prior.log_omega[1]
-
-        active_size = BitVector([true, false, false])
-        @test log_model_add_odds(size_prior_copy, active_size, 2) ≈
-              size_prior_copy.log_omega[3] - size_prior_copy.log_omega[2] + log(2) - log(2)
-        @test_throws BoundsError log_model_add_odds(size_prior_copy, active_size, 0)
-        @test_throws DimensionMismatch log_model_add_odds(size_prior_copy, BitVector([false, true]), 1)
-        @test_throws ArgumentError log_model_add_odds(size_prior_copy, active_size, 1)
-
         endpoint_provider = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
         endpoint_prior_one = BernoulliModelPrior([1.0])
         endpoint_prior_zero = BernoulliModelPrior([0.0])
@@ -436,37 +421,8 @@ end
         _active_prior_grad_alloc(zero_exch, zero_exch_out, x, active)
         @test _active_prior_grad_alloc(zero_exch, zero_exch_out, x, active) == 0
 
-        κ = [0.2, 0.5, 0.8]
-        indep = IndependentZeroMeanGaussianSlab(κ, indices)
-        indep_out = fill(NaN, length(x))
-        active_prior_grad!(indep, indep_out, x, active)
-        expected_indep = zeros(length(x))
-        expected_indep[indices[[1, 3]]] .= @. 2π * κ[[1, 3]]^2 * x[indices[[1, 3]]]
-        @test indep_out ≈ expected_indep
-        @test conditional_logdensity_zero(indep, x, active, 2) ≈ log(κ[2])
-        indep_block = fill(NaN, length(indices))
-        @test_throws DimensionMismatch active_prior_grad!(indep, indep_block, x, active)
-        @test_throws DimensionMismatch active_prior_grad!(indep, fill(NaN, 4), x, active)
-
-        logscale = IndependentZeroMeanLogscaleGaussianSlab(indices, [1, 1, 3], log.([2.0, 3.0, 4.0]))
         logscale_x = [0.1, 1.3, -0.2, -0.1, 0.8]
         logscale_active = BitVector([true, true, false])
-        logscale_out = zeros(length(logscale_x))
-        active_prior_grad!(logscale, logscale_out, logscale_x, logscale_active)
-        expected_logscale = zeros(length(logscale_x))
-        for j in (1, 2)
-            β = logscale_x[indices[j]]
-            log_s = logscale.log_base_scales[j] + logscale_x[logscale.logscale_indices[j]]
-            inv_s2 = exp(-2log_s)
-            expected_logscale[indices[j]] += β * inv_s2
-            expected_logscale[logscale.logscale_indices[j]] += 1 - β^2 * inv_s2
-        end
-        @test logscale_out ≈ expected_logscale
-        logscale_block = fill(NaN, length(indices))
-        @test_throws DimensionMismatch active_prior_grad!(logscale, logscale_block, logscale_x, logscale_active)
-        @test_throws DimensionMismatch active_prior_grad!(logscale, fill(NaN, 4), logscale_x, logscale_active)
-        @test conditional_logdensity_zero(logscale, logscale_x, logscale_active, 3) ≈
-              -0.5 * log(2π) - (logscale.log_base_scales[3] + logscale_x[logscale.logscale_indices[3]])
 
         structured_design = [1.0 0.0; 0.5 0.5; 0.0 1.0]
         structured = LogLinearGaussianScaleSlab(
@@ -489,7 +445,6 @@ end
         structured_clock = ExponentialSumAggregateClock(
             structured, BernoulliModelPrior(fill(0.5, 3)))
         @test structured_clock isa ExponentialSumAggregateClock
-        @test_throws ArgumentError IndependentZeroMeanLogscaleGaussianSlab([1, 2], [2, 3], zeros(2))
     end
 
     @testset "DependentSlabTarget active-set synchronization at state transitions" begin
@@ -591,13 +546,11 @@ end
         @test !isempty(hvp_trace.times)
     end
 
-    @testset "Arbitrary slab target baseline" begin
+    @testset "Dependent slab target baseline" begin
         d = 3
         posterior_grad!(out, x) = (copyto!(out, x); out)
-        provider = ArbitrarySlabBoundary([1, 3];
-            active_prior_neggrad! = (out, x, active) -> (fill!(out, 0.0); active[1] && (out[1] = 2x[1]); active[2] && (out[3] = 3x[3]); out),
-            log_q_zero! = (x, active, j) -> logpdf(Normal(), 0.0),
-        )
+        # Precision diag(2, 3): the active slab gradient is (2 x₁, 3 x₃).
+        provider = DenseGaussianSlab(zeros(2), Matrix(Diagonal([1 / 2, 1 / 3])), [1, 3])
         target = DependentSlabTarget(d, posterior_grad!, provider, BernoulliModelPrior(fill(0.5, 2));
             initial_free=BitVector([true, false, false]))
         out = fill(NaN, d)
@@ -607,14 +560,11 @@ end
         @test PDMPModel(target) isa PDMPModel
     end
 
-    @testset "Arbitrary slab boundary and summed aggregate clock" begin
+    @testset "Diagonal Gaussian slab and summed aggregate clock" begin
         d = 3
         beta_idx = [1, 2, 3]
         σ = [2.0, 3.0, 5.0]
-        provider = ArbitrarySlabBoundary(beta_idx;
-            active_prior_neggrad! = (out, x, active) -> (fill!(out, 0.0); out),
-            log_q_zero! = (x, active, j) -> logpdf(Normal(0.0, σ[j]), 0.0),
-        )
+        provider = DenseGaussianSlab(zeros(d), Matrix(Diagonal(σ .^ 2)), beta_idx)
         odds = BernoulliModelPrior(fill(0.5, d))
         clock = SummedRateClock(provider, odds)
         flow = ZigZag(d)
@@ -676,41 +626,9 @@ end
         @test slab_cache_style(provider) isa FixedCovarianceCache
         @test slab_cache_key(provider, x, active) == active
 
-        cb = CallbackGaussianSlab(indices;
-            mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
-            active_prior_grad! = (out, x, active) -> (fill!(out, 0.0); out),
-        )
-        @test slab_cache_style(cb) isa NoSlabCache
-        @test slab_cache_key(cb, x, active) === nothing
-        cb_copy = copy(cb)
-        @test beta_indices(cb_copy) == indices
-        @test beta_indices(cb_copy) !== beta_indices(cb)
-
-        cb_grad = CallbackGaussianSlab(indices;
-            mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
-            active_prior_grad! = (out, x, active) -> begin
-                fill!(out, 0.0)
-                out[indices] .= active .* x[indices]
-                out
-            end,
-        )
-        cb_out = fill(NaN, length(x))
-        @test active_prior_grad!(cb_grad, cb_out, x, active) === cb_out
-        expected_cb = zeros(length(x))
-        expected_cb[indices] .= active .* x[indices]
-        @test cb_out ≈ expected_cb
-        cb_no_grad = CallbackGaussianSlab(indices;
-            mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
-        )
-        @test_throws ArgumentError active_prior_grad!(cb_no_grad, cb_out, x, active)
-
-        cb_weights = fill(NaN, 4)
-        boundary_logweights!(cb_weights, cb, odds, x, active, stickable)
-        @test cb_weights ≈ expected
-
         empty_active = falses(4)
         empty_weights = fill(NaN, 4)
-        boundary_logweights!(empty_weights, cb, odds, x, empty_active, stickable)
+        boundary_logweights!(empty_weights, provider, odds, x, empty_active, stickable)
         expected_empty = fill(-Inf, 4)
         for j in eachindex(expected_empty)
             if stickable[j]
@@ -721,7 +639,7 @@ end
         @test empty_weights ≈ expected_empty
     end
 
-    @testset "Exchangeable slabs and model-size prior" begin
+    @testset "Exchangeable slabs" begin
         indices = [1, 2, 3, 4]
         μ = 0.3
         u = 1.4
@@ -745,30 +663,12 @@ end
         @test slab_cache_key(exch, x, active) == active
         @test slab_cache_key(exch, x, active) !== active
         @test slab_cache_key(zero_exch, x, active) == active
-        indep = IndependentZeroMeanGaussianSlab([0.4, 0.5, 0.6, 0.7], indices)
-        x_with_scales = vcat(x, [0.1, -0.2])
-        logscale = IndependentZeroMeanLogscaleGaussianSlab(indices, [5, 5, 6, 6], log.([1.0, 1.5, 2.0, 2.5]))
-        @test slab_cache_style(indep) isa FixedCovarianceCache
-        @test slab_cache_style(logscale) isa NoSlabCache
-        @test slab_cache_key(indep, x, active) == active
-        @test slab_cache_key(indep, x, active) !== active
-        @test slab_cache_key(logscale, x, active) === nothing
 
         exch_mean = fill(NaN, 4)
         exch_cov = fill(NaN, 4, 4)
         @test gaussian_slab!(exch, exch_mean, exch_cov, x) === nothing
         @test exch_mean == fill(μ, 4)
         @test exch_cov ≈ dense_cov
-        indep_mean = fill(NaN, 4)
-        indep_cov = fill(NaN, 4, 4)
-        @test gaussian_slab!(indep, indep_mean, indep_cov, x) === nothing
-        @test indep_mean == zeros(4)
-        @test diag(indep_cov) ≈ inv.(indep.precision)
-        logscale_mean = fill(NaN, 4)
-        logscale_cov = fill(NaN, 4, 4)
-        @test gaussian_slab!(logscale, logscale_mean, logscale_cov, x_with_scales) === nothing
-        @test logscale_mean == zeros(4)
-        @test diag(logscale_cov) ≈ exp.(2 .* (logscale.log_base_scales .+ x_with_scales[logscale.logscale_indices]))
 
         zero_mean = fill(NaN, 4)
         zero_cov = fill(NaN, 4, 4)
@@ -778,19 +678,10 @@ end
 
         exch_copy = copy(exch)
         zero_copy = copy(zero_exch)
-        indep_copy = copy(indep)
-        logscale_copy = copy(logscale)
         @test beta_indices(exch_copy) == indices
         @test beta_indices(exch_copy) !== beta_indices(exch)
         @test beta_indices(zero_copy) == indices
         @test beta_indices(zero_copy) !== beta_indices(zero_exch)
-        @test beta_indices(indep_copy) == indices
-        @test beta_indices(indep_copy) !== beta_indices(indep)
-        @test indep_copy.kappa == indep.kappa
-        @test indep_copy.kappa !== indep.kappa
-        @test beta_indices(logscale_copy) == indices
-        @test logscale_copy.logscale_indices == logscale.logscale_indices
-        @test logscale_copy.logscale_indices !== logscale.logscale_indices
 
         x_same_sum = [0.5, 0.0, 0.1, 0.0]
         x_other_same_sum = [0.2, 0.0, 0.4, 0.0]
@@ -798,20 +689,13 @@ end
         log_q2 = PDMPSamplers._exchangeable_log_q_zero(zero_exch, x_other_same_sum, active)
         @test log_q1 ≈ log_q2
 
-        log_omega = log.([0.2, 0.3, 0.25, 0.15, 0.1])
-        size_prior = ExchangeableModelSizePrior(log_omega)
-        lograte = aggregate_lograte(exch, size_prior, log(1.0), x, active, stickable)
-        k = count(active)
-        q = exp(PDMPSamplers._exchangeable_log_q_zero(exch, x, active))
-        expected_rate = q * (4 - k) * exp(log_omega[k + 2] - log_omega[k + 1] + log(k + 1) - log(4 - k))
-        @test exp(lograte) ≈ expected_rate
-        short_prior = ExchangeableModelSizePrior(log.([0.3, 0.4, 0.3]))
+        short_prior = BernoulliModelPrior(fill(0.4, 2))
         @test_throws DimensionMismatch aggregate_lograte(exch, short_prior, log(1.0), x, active, stickable)
         @test_throws DimensionMismatch SummedRateClock(exch, short_prior)
         @test_throws DimensionMismatch LinearGaussianAggregateClock(exch, short_prior)
 
         rng = MersenneTwister(11)
-        labels = [sample_unstick_label(rng, exch, size_prior, x, active, stickable) for _ in 1:50]
+        labels = [sample_unstick_label(rng, exch, odds, x, active, stickable) for _ in 1:50]
         @test all(in((2, 4)), labels)
     end
 
@@ -824,11 +708,10 @@ end
         provider = DenseGaussianSlab(mean, cov, 1:4)
         odds = BernoulliModelPrior([0.5, 0.35, 0.6, 0.8])
         clock = LinearGaussianAggregateClock(provider, odds)
-        callback_provider = CallbackGaussianSlab(1:4;
-            mean_cov! = (mean_out, cov_out, x) -> (copyto!(mean_out, mean); copyto!(cov_out, cov); nothing),
-            active_prior_grad! = (out, x, active) -> (fill!(out, 0.0); out),
-        )
-        @test_throws ArgumentError LinearGaussianAggregateClock(callback_provider, odds)
+        # The linear clock needs a fixed slab covariance.
+        moving_scale_provider = LogLinearGaussianScaleSlab(
+            1:4, 5:8, zeros(4), Matrix{Float64}(I, 4, 4))
+        @test_throws ArgumentError LinearGaussianAggregateClock(moving_scale_provider, odds)
         flow = ZigZag(4)
 
         state = StickyPDMPState(
@@ -885,27 +768,6 @@ end
             const_can_stick) ≈ PDMPSamplers.sample_time(
                 MersenneTwister(199), tiny_summed, const_flow, const_state, Inf,
                 const_can_stick) rtol=1e-7
-
-        κ = [0.25, 0.5, 0.75]
-        indep_provider = IndependentZeroMeanGaussianSlab(κ, 1:3)
-        indep_dense = DenseGaussianSlab(zeros(3), Matrix(Diagonal(@. inv(2π * κ^2))), 1:3)
-        indep_odds = BernoulliModelPrior([0.3, 0.5, 0.8])
-        indep_clock = LinearGaussianAggregateClock(indep_provider, indep_odds)
-        indep_dense_clock = LinearGaussianAggregateClock(indep_dense, indep_odds)
-        indep_state = StickyPDMPState(
-            Ref(0.0),
-            SkeletonPoint([1.0, 0.0, -0.5], [0.2, 0.0, -0.3]),
-            BitVector([true, false, false]),
-        )
-        _store_frozen_speeds!(indep_state)
-        indep_can_stick = BitVector([true, true, false])
-        @test PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick) ≈
-              PDMPSamplers.rate(indep_dense_clock, flow, indep_state, 0.0, indep_can_stick)
-        @test PDMPSamplers.rate(indep_clock, flow, indep_state, 1.5, indep_can_stick) ≈
-              PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick)
-        λ_indep = PDMPSamplers.rate(indep_clock, flow, indep_state, 0.0, indep_can_stick)
-        @test PDMPSamplers.sample_time(MersenneTwister(200), indep_clock, flow, indep_state, Inf, indep_can_stick) ≈
-              rand(MersenneTwister(200), Exponential()) / λ_indep rtol=1e-7 atol=1e-8
 
         endpoint_linear = LinearGaussianAggregateClock(DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1]), BernoulliModelPrior([1.0]))
         endpoint_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0], [0.0]), falses(1))
@@ -1002,7 +864,7 @@ end
             falses(4),
         )
         _store_frozen_speeds!(subset_state)
-        size_prior_subset = ExchangeableModelSizePrior(log.([0.2, 0.3, 0.25, 0.15, 0.1]))
+        size_prior_subset = BetaBernoulliModelPrior(4, 2.0, 3.0)
         subset_clock = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, v), size_prior_subset)
         full_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, trues(4))
         subset_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, subset_all_inactive)
@@ -1029,8 +891,11 @@ end
               PDMPSamplers.rate(independent_dense, flow, exch_state, 0.4, trues(4))
     end
 
-    @testset "Independent logscale exponential-sum clock" begin
-        provider = IndependentZeroMeanLogscaleGaussianSlab([1, 2, 3], [4, 4, 5], log.([2.0, 3.0, 4.0]))
+    @testset "Log-linear scale exponential-sum clock" begin
+        # Coefficients 1 and 2 share the log scale x[4], coefficient 3 uses x[5].
+        scale_coord = [4, 4, 5]
+        provider = LogLinearGaussianScaleSlab([1, 2, 3], [4, 5],
+            log.([2.0, 3.0, 4.0]), [1.0 0.0; 1.0 0.0; 0.0 1.0])
         odds = BernoulliModelPrior([0.25, 0.5, 0.75])
         clock = ExponentialSumAggregateClock(provider, odds)
         flow = ZigZag(5)
@@ -1047,8 +912,8 @@ end
             active = falses(3)
             for j in (1, 3)
                 logρ = log_model_add_odds(odds, active, j)
-                log_s0 = provider.log_base_scales[j] + state.ξ.x[provider.logscale_indices[j]]
-                r = state.ξ.θ[provider.logscale_indices[j]]
+                log_s0 = provider.log_base_scales[j] + state.ξ.x[scale_coord[j]]
+                r = state.ξ.θ[scale_coord[j]]
                 total += abs(_frozen_speed(j)) *
                     exp(logρ - 0.5 * log(2π) - log_s0 - r * t)
             end
@@ -1256,10 +1121,8 @@ end
 
     @testset "AggregateSticky requests sticky state" begin
         d = 2
-        provider = ArbitrarySlabBoundary(1:d;
-            active_prior_neggrad! = (out, x, active) -> (fill!(out, 0.0); out),
-            log_q_zero! = (x, active, j) -> logpdf(Normal(), 0.0),
-        )
+        # Independent standard-normal slab: density pdf(Normal(), 0) at zero.
+        provider = DenseGaussianSlab(zeros(d), Matrix{Float64}(I, d, d), 1:d)
         clock = SummedRateClock(provider, BernoulliModelPrior(fill(0.5, d)))
         alg = AggregateSticky(GridThinningStrategy(), clock, trues(d))
         @test PDMPSamplers.requires_sticky_state(alg)

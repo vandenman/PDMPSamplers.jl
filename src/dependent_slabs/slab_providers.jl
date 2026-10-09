@@ -105,59 +105,6 @@ struct ZeroMeanExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
 end
 
 """
-    IndependentZeroMeanGaussianSlab(kappa, beta_indices=eachindex(kappa))
-
-Independent zero-mean fixed Gaussian slab parameterized by its boundary
-density at zero, `kappa[j] = q_j(0)`. This is the aggregate-clock equivalent of
-the R `independent_slab_density()` specification.
-"""
-struct IndependentZeroMeanGaussianSlab <: AbstractGaussianSlabProvider
-    beta_indices::Vector{Int}
-    kappa::Vector{Float64}
-    log_q_zero::Vector{Float64}
-    precision::Vector{Float64}
-    function IndependentZeroMeanGaussianSlab(kappa::AbstractVector{<:Real}, beta_indices::AbstractVector{<:Integer}=eachindex(kappa))
-        isempty(kappa) && throw(ArgumentError("kappa must be non-empty"))
-        length(beta_indices) == length(kappa) || throw(DimensionMismatch("beta_indices length $(length(beta_indices)) does not match kappa length $(length(kappa))"))
-        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-        κ = Vector{Float64}(kappa)
-        all(>(0), κ) || throw(ArgumentError("kappa entries must be positive"))
-        new(Vector{Int}(beta_indices), κ, log.(κ), @. 2π * κ^2)
-    end
-end
-
-"""
-    IndependentZeroMeanLogscaleGaussianSlab(beta_indices, logscale_indices, log_base_scales)
-
-Independent zero-mean Gaussian slab with
-`log(s_j(x)) = log_base_scales[j] + x[logscale_indices[j]]`. Repeated
-`logscale_indices` represent shared scale coordinates.
-"""
-struct IndependentZeroMeanLogscaleGaussianSlab <: AbstractLogLinearIndependentGaussianSlab
-    beta_indices::Vector{Int}
-    logscale_indices::Vector{Int}
-    log_base_scales::Vector{Float64}
-    function IndependentZeroMeanLogscaleGaussianSlab(
-        beta_indices::AbstractVector{<:Integer},
-        logscale_indices::AbstractVector{<:Integer},
-        log_base_scales::AbstractVector{<:Real},
-    )
-        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
-        length(logscale_indices) == length(beta_indices) ||
-            throw(DimensionMismatch("logscale_indices length $(length(logscale_indices)) does not match beta dimension $(length(beta_indices))"))
-        length(log_base_scales) == length(beta_indices) ||
-            throw(DimensionMismatch("log_base_scales length $(length(log_base_scales)) does not match beta dimension $(length(beta_indices))"))
-        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-        all(>(0), logscale_indices) || throw(ArgumentError("logscale_indices must be positive"))
-        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-        isempty(intersect(Int.(beta_indices), Int.(logscale_indices))) ||
-            throw(ArgumentError("logscale_indices must be disjoint from beta_indices"))
-        new(Vector{Int}(beta_indices), Vector{Int}(logscale_indices), Vector{Float64}(log_base_scales))
-    end
-end
-
-"""
     LogLinearGaussianScaleSlab(beta_indices, logscale_indices,
                                log_base_scales, logscale_design)
 
@@ -255,9 +202,6 @@ end
 Base.copy(provider::DenseGaussianSlab) = DenseGaussianSlab(copy(provider.mean), copy(provider.cov), copy(provider.beta_indices))
 Base.copy(provider::ExchangeableGaussianSlab) = ExchangeableGaussianSlab(copy(provider.beta_indices), provider.mean, provider.u, provider.v)
 Base.copy(provider::ZeroMeanExchangeableGaussianSlab) = ZeroMeanExchangeableGaussianSlab(copy(provider.beta_indices), provider.u, provider.v)
-Base.copy(provider::IndependentZeroMeanGaussianSlab) = IndependentZeroMeanGaussianSlab(copy(provider.kappa), copy(provider.beta_indices))
-Base.copy(provider::IndependentZeroMeanLogscaleGaussianSlab) =
-    IndependentZeroMeanLogscaleGaussianSlab(copy(provider.beta_indices), copy(provider.logscale_indices), copy(provider.log_base_scales))
 Base.copy(provider::LogLinearGaussianScaleSlab) =
     LogLinearGaussianScaleSlab(copy(provider.beta_indices), copy(provider.logscale_indices),
         copy(provider.log_base_scales), copy(provider.rowptr),
@@ -288,13 +232,9 @@ does not support active-set-only caching.
 slab_cache_key(::AbstractSlabPrior, ::AbstractVector, ::BitVector) = nothing
 slab_cache_style(::DenseGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::AbstractExchangeableGaussianSlab) = FixedCovarianceCache()
-slab_cache_style(::IndependentZeroMeanGaussianSlab) = FixedCovarianceCache()
-slab_cache_style(::IndependentZeroMeanLogscaleGaussianSlab) = NoSlabCache()
 slab_cache_style(::LogLinearGaussianScaleSlab) = NoSlabCache()
 slab_cache_key(::DenseGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
 slab_cache_key(::AbstractExchangeableGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
-slab_cache_key(::IndependentZeroMeanGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
-slab_cache_key(::IndependentZeroMeanLogscaleGaussianSlab, ::AbstractVector, ::BitVector) = nothing
 slab_cache_key(::LogLinearGaussianScaleSlab, ::AbstractVector, ::BitVector) = nothing
 """
     gaussian_slab!(provider, mean_out, cov_out, x)
@@ -329,27 +269,6 @@ function gaussian_slab!(provider::ZeroMeanExchangeableGaussianSlab, mean_out::Ab
     return nothing
 end
 
-function gaussian_slab!(provider::IndependentZeroMeanGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
-    m = length(provider.beta_indices)
-    fill!(mean_out, 0.0)
-    fill!(cov_out, 0.0)
-    @inbounds for j in 1:m
-        cov_out[j, j] = inv(provider.precision[j])
-    end
-    return nothing
-end
-
-function gaussian_slab!(provider::IndependentZeroMeanLogscaleGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
-    m = length(provider.beta_indices)
-    fill!(mean_out, 0.0)
-    fill!(cov_out, 0.0)
-    @inbounds for j in 1:m
-        log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
-        cov_out[j, j] = exp(2log_s)
-    end
-    return nothing
-end
-
 @inline function _loglinear_log_scale(provider::LogLinearGaussianScaleSlab,
         x::AbstractVector, j::Int)
     value = provider.log_base_scales[j]
@@ -360,14 +279,9 @@ end
     return value
 end
 
-@inline _independent_log_scale(provider::IndependentZeroMeanLogscaleGaussianSlab,
-    x::AbstractVector, j::Int) = provider.log_base_scales[j] +
-        x[provider.logscale_indices[j]]
 @inline _independent_log_scale(provider::LogLinearGaussianScaleSlab,
     x::AbstractVector, j::Int) = _loglinear_log_scale(provider, x, j)
 
-@inline _independent_log_scale_slope(provider::IndependentZeroMeanLogscaleGaussianSlab,
-    velocity::AbstractVector, j::Int) = velocity[provider.logscale_indices[j]]
 @inline function _independent_log_scale_slope(provider::LogLinearGaussianScaleSlab,
         velocity::AbstractVector, j::Int)
     value = 0.0
@@ -386,62 +300,6 @@ function gaussian_slab!(provider::LogLinearGaussianScaleSlab,
     @inbounds for j in 1:m
         cov_out[j, j] = exp(2 * _loglinear_log_scale(provider, x, j))
     end
-    return nothing
-end
-
-"""
-    CallbackGaussianSlab(beta_indices; mean_cov!, active_prior_grad!=nothing)
-
-Gaussian slab whose mean/covariance are supplied by `mean_cov!(mean, cov, x)`.
-If the provider is used inside `DependentSlabTarget`, `active_prior_grad!` must
-write the negative-gradient contribution for the active slab prior into a
-full-state output vector with the same layout as `x`.
-"""
-struct CallbackGaussianSlab{I<:AbstractVector{Int},F,G} <: AbstractGaussianSlabProvider
-    beta_indices::I
-    mean_cov!::F
-    active_prior_grad!::G
-end
-
-"""
-    ArbitrarySlabBoundary(beta_indices; active_prior_neggrad!, log_q_zero!)
-
-General active-face boundary provider. `active_prior_neggrad!(out, x,
-active_beta)` writes the negative-gradient contribution for the active slab
-prior into a full-state output vector with the same layout as `x`.
-`log_q_zero!(x, active_beta, j)` returns the log boundary density for adding
-inactive beta coordinate `j`.
-"""
-struct ArbitrarySlabBoundary{I<:AbstractVector{Int},G,Q} <: AbstractSlabPrior
-    beta_indices::I
-    active_prior_neggrad!::G
-    log_q_zero!::Q
-end
-
-function ArbitrarySlabBoundary(beta_indices::AbstractVector{<:Integer}; active_prior_neggrad!, log_q_zero!)
-    isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
-    all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-    length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-    return ArbitrarySlabBoundary(Vector{Int}(beta_indices), active_prior_neggrad!, log_q_zero!)
-end
-
-Base.copy(provider::ArbitrarySlabBoundary) =
-    ArbitrarySlabBoundary(copy(provider.beta_indices); active_prior_neggrad! = provider.active_prior_neggrad!, log_q_zero! = provider.log_q_zero!)
-
-beta_indices(provider::ArbitrarySlabBoundary) = provider.beta_indices
-
-function CallbackGaussianSlab(beta_indices::AbstractVector{<:Integer}; mean_cov!, active_prior_grad! = nothing)
-    isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
-    all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-    length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-    return CallbackGaussianSlab(Vector{Int}(beta_indices), mean_cov!, active_prior_grad!)
-end
-
-Base.copy(provider::CallbackGaussianSlab) =
-    CallbackGaussianSlab(copy(provider.beta_indices); mean_cov! = provider.mean_cov!, active_prior_grad! = provider.active_prior_grad!)
-
-function gaussian_slab!(provider::CallbackGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
-    provider.mean_cov!(mean_out, cov_out, x)
     return nothing
 end
 
@@ -629,19 +487,6 @@ Density version of `conditional_logdensity_zero`.
 conditional_density_zero(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector, j_beta::Integer) =
     exp(conditional_logdensity_zero(provider, x, active_beta, j_beta))
 
-function conditional_logdensity_zero(provider::IndependentZeroMeanGaussianSlab, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
-    1 <= j_beta <= length(provider.beta_indices) || throw(BoundsError(provider.kappa, j_beta))
-    active_beta[j_beta] && throw(ArgumentError("conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
-    return provider.log_q_zero[j_beta]
-end
-
-function conditional_logdensity_zero(provider::IndependentZeroMeanLogscaleGaussianSlab, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
-    1 <= j_beta <= length(provider.beta_indices) || throw(BoundsError(provider.log_base_scales, j_beta))
-    active_beta[j_beta] && throw(ArgumentError("conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
-    log_s = provider.log_base_scales[j_beta] + x[provider.logscale_indices[j_beta]]
-    return -0.5 * log2π - log_s
-end
-
 function conditional_logdensity_zero(provider::LogLinearGaussianScaleSlab,
         x::AbstractVector, active_beta::BitVector, j_beta::Integer)
     1 <= j_beta <= length(provider.beta_indices) ||
@@ -662,14 +507,6 @@ providers dispatch to their `log_q_zero!` callback.
 """
 log_boundary_density_zero(provider::AbstractGaussianSlabProvider, x::AbstractVector, active_beta::BitVector, j_beta::Integer) =
     conditional_logdensity_zero(provider, x, active_beta, j_beta)
-
-function log_boundary_density_zero(provider::ArbitrarySlabBoundary, x::AbstractVector, active_beta::BitVector, j_beta::Integer)
-    indices = beta_indices(provider)
-    1 <= j_beta <= length(indices) || throw(BoundsError(indices, j_beta))
-    length(active_beta) == length(indices) || throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
-    active_beta[j_beta] && throw(ArgumentError("boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
-    return Float64(provider.log_q_zero!(x, active_beta, j_beta))
-end
 
 function _cholesky_factor_prefix!(A::AbstractMatrix{Float64}, k::Integer)
     @inbounds for j in 1:k
@@ -746,44 +583,6 @@ function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x:
     _cholesky_solve_spd_prefix!(work_cov, work_rhs, k)
     return _write_active_gradient_full!(out, indices, active_beta, work_rhs, k)
 end
-
-function active_prior_grad!(provider::IndependentZeroMeanGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
-    indices = beta_indices(provider)
-    length(out) == length(x) ||
-        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
-    length(active_beta) == length(indices) ||
-        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
-    fill!(out, 0.0)
-    maximum(indices) <= length(out) ||
-        throw(DimensionMismatch("beta indices exceed full-state output length $(length(out))"))
-    @inbounds for j in eachindex(indices)
-        active_beta[j] && (out[indices[j]] = provider.precision[j] * x[indices[j]])
-    end
-    return out
-end
-
-function active_prior_grad!(provider::IndependentZeroMeanLogscaleGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
-    indices = beta_indices(provider)
-    length(out) == length(x) ||
-        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
-    length(active_beta) == length(indices) ||
-        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
-    fill!(out, 0.0)
-    full_required = max(maximum(indices), maximum(provider.logscale_indices))
-    full_required <= length(out) ||
-        throw(DimensionMismatch("slab indices exceed full-state output length $(length(out))"))
-    @inbounds for j in eachindex(indices)
-        if active_beta[j]
-            β = x[indices[j]]
-            log_s = provider.log_base_scales[j] + x[provider.logscale_indices[j]]
-            inv_s2 = exp(-2log_s)
-            out[indices[j]] += β * inv_s2
-            out[provider.logscale_indices[j]] += 1 - β^2 * inv_s2
-        end
-    end
-    return out
-end
-
 
 function active_prior_grad!(provider::LogLinearGaussianScaleSlab,
         out::AbstractVector, x::AbstractVector, active_beta::BitVector)
@@ -897,13 +696,4 @@ function active_prior_grad!(provider::AbstractGaussianSlabProvider, out::Abstrac
     delta = Vector{Float64}(x[indices[A]] .- mean[A])
     grad_active = F \ delta
     return _write_active_gradient_full!(out, indices, active_beta, grad_active, length(A))
-end
-
-function active_prior_grad!(provider::CallbackGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
-    length(out) == length(x) ||
-        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
-    provider.active_prior_grad! === nothing &&
-        throw(ArgumentError("CallbackGaussianSlab requires active_prior_grad! for active prior gradients"))
-    provider.active_prior_grad!(out, x, active_beta)
-    return out
 end

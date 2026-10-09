@@ -47,9 +47,10 @@ The supported aggregate clocks are:
 Every accelerated clock falls back to the exact `SummedRateClock` for
 dynamics it has no specialized method for.
 
-The public, user-facing constructors are the prior and slab types such as `BernoulliModelPrior`, `BetaBernoulliModelPrior`, `ExchangeableModelSizePrior`,
-`DenseGaussianSlab`, `IndependentZeroMeanGaussianSlab`, `IndependentZeroMeanLogscaleGaussianSlab`, `ExchangeableGaussianSlab`,
-`ZeroMeanExchangeableGaussianSlab`, and `LogLinearGaussianScaleSlab`.
+The public, user-facing constructors are the model priors `BernoulliModelPrior`
+and `BetaBernoulliModelPrior`, and the slabs `DenseGaussianSlab`,
+`ExchangeableGaussianSlab`, `ZeroMeanExchangeableGaussianSlab`, and
+`LogLinearGaussianScaleSlab`.
 
 ## Complete example
 

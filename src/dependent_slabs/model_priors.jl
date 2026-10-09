@@ -62,37 +62,3 @@ function log_model_add_odds(prior::BetaBernoulliModelPrior, active::BitVector, j
     denom <= 0 && return Inf
     return log(prior.a + k) - log(denom)
 end
-
-"""
-    ExchangeableModelSizePrior(log_omega; normalize=false)
-
-Exchangeable model-size prior over sizes `0:p`. `log_omega[k + 1]` stores the
-log prior mass for model size `k`. If `normalize=true`, the entries are shifted
-by `logsumexp(log_omega)`.
-"""
-struct ExchangeableModelSizePrior <: AbstractModelPrior
-    log_omega::Vector{Float64}
-    function ExchangeableModelSizePrior(log_omega::AbstractVector{<:Real}; normalize::Bool=false)
-        length(log_omega) >= 2 || throw(ArgumentError("log_omega must contain model-size probabilities for k=0:p"))
-        vals = Vector{Float64}(log_omega)
-        all(isfinite, vals) || throw(ArgumentError("log_omega entries must be finite"))
-        if normalize
-            lse = LogExpFunctions.logsumexp(vals)
-            vals .-= lse
-        end
-        new(vals)
-    end
-end
-
-Base.length(prior::ExchangeableModelSizePrior) = length(prior.log_omega) - 1
-Base.copy(prior::ExchangeableModelSizePrior) = ExchangeableModelSizePrior(copy(prior.log_omega))
-
-function log_model_add_odds(prior::ExchangeableModelSizePrior, active::BitVector, j::Integer)
-    p = length(prior)
-    1 <= j <= p || throw(BoundsError(active, j))
-    length(active) == p || throw(DimensionMismatch("active set length $(length(active)) does not match prior length $p"))
-    active[j] && throw(ArgumentError("log_model_add_odds is defined for adding an inactive coordinate; coordinate $j is already active"))
-    k = count(active)
-    k < p || return -Inf
-    return prior.log_omega[k + 2] - prior.log_omega[k + 1] + log(k + 1) - log(p - k)
-end

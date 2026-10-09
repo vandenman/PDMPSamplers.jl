@@ -7,13 +7,6 @@ function _log_model_add_odds_with_count(prior::BetaBernoulliModelPrior, active::
     denom <= 0 && return Inf
     return log(prior.a + k) - log(denom)
 end
-function _log_model_add_odds_with_count(prior::ExchangeableModelSizePrior, active::BitVector, j::Integer, k::Integer)
-    p = length(prior)
-    active[j] && throw(ArgumentError("log_model_add_odds is defined for adding an inactive coordinate; coordinate $j is already active"))
-    k < p || return -Inf
-    return prior.log_omega[k + 2] - prior.log_omega[k + 1] + log(k + 1) - log(p - k)
-end
-
 """
     _prepare_linear_gaussian_cache!(clock, state, can_stick, τ=0)
 
@@ -545,7 +538,7 @@ function sample_label(rng::Random.AbstractRNG,
 end
 
 function sample_label(rng::Random.AbstractRNG,
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:Union{ExchangeableModelSizePrior,BetaBernoulliModelPrior}},
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:BetaBernoulliModelPrior},
         flow::_VelocityPreservingLinearFlow, state::StickyPDMPState,
         can_stick::BitVector)
     active, stickable, _, nU, _, _, _ = _exchangeable_linear_params(clock, state, can_stick)
@@ -569,7 +562,7 @@ function sample_label(rng::Random.AbstractRNG,
 end
 
 function sample_label(rng::Random.AbstractRNG,
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:Union{ExchangeableModelSizePrior,BetaBernoulliModelPrior}},
+        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:BetaBernoulliModelPrior},
         flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
         state::StickyPDMPState, can_stick::BitVector)
     return sample_label(rng, clock.fallback, flow, state, can_stick)
@@ -590,66 +583,6 @@ end
 function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     cache, _ = _linear_gaussian_label_weights!(clock, flow, state, can_stick, τ)
     return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
-end
-
-function _independent_fixed_logweights!(clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, can_stick::BitVector)
-    provider = clock.slab_provider
-    indices = beta_indices(provider)
-    cache = clock.cache
-    @inbounds for j in eachindex(indices)
-        i = indices[j]
-        active = state.free[i]
-        cache.active_beta[j] = active
-        cache.stickable_beta[j] = can_stick[i]
-    end
-    max_logw = -Inf
-    @inbounds for j in eachindex(indices)
-        if cache.stickable_beta[j] && !cache.active_beta[j]
-            i = indices[j]
-            C = _boundary_proposal_clock_constant(flow, state, i)
-            cache.log_weights[j] = iszero(C) ? -Inf :
-                log_model_add_odds(clock.model_prior, cache.active_beta, j) +
-                provider.log_q_zero[j] + log(C)
-            max_logw = max(max_logw, cache.log_weights[j])
-        else
-            cache.log_weights[j] = -Inf
-        end
-    end
-    return cache, max_logw
-end
-
-function _independent_fixed_rate(clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, can_stick::BitVector)
-    cache, max_logw = _independent_fixed_logweights!(clock, flow, state, can_stick)
-    max_logw == -Inf && return 0.0
-    max_logw == Inf && return Inf
-    return exp(LogExpFunctions.logsumexp(cache.log_weights))
-end
-
-function rate(clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
-    @assert τ >= 0
-    return _independent_fixed_rate(clock, flow, state, can_stick)
-end
-
-function cumulative_hazard(clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector)
-    @assert 0 <= t0 <= t1
-    return (Float64(t1) - Float64(t0)) * _independent_fixed_rate(clock, flow, state, can_stick)
-end
-
-function sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
-    λ = _independent_fixed_rate(clock, flow, state, can_stick)
-    iszero(λ) && return Inf
-    λ == Inf && return 0.0
-    τ = rand(rng, Exponential()) / λ
-    return τ <= horizon ? τ : Inf
-end
-
-function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, can_stick::BitVector)
-    cache, _ = _independent_fixed_logweights!(clock, flow, state, can_stick)
-    return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
-end
-
-function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:IndependentZeroMeanGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
-    return sample_label(rng, clock, flow, state, can_stick)
 end
 
 const _ExponentialSumLinearFlow = Union{

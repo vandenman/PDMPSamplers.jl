@@ -25,22 +25,13 @@ const _CertifiedHarmonicBoomerang = Union{
     c0 = provider.log_base_scales[j]
     cc = 0.0
     cs = 0.0
-    if provider isa IndependentZeroMeanLogscaleGaussianSlab
+    @inbounds for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
         p0, pc, ps = _boomerang_position_coeffs(
-            flow, state, provider.logscale_indices[j])
-        c0 += p0
-        cc += pc
-        cs += ps
-    else
-        @inbounds for ptr in provider.rowptr[j]:(provider.rowptr[j + 1] - 1)
-            p0, pc, ps = _boomerang_position_coeffs(
-                flow, state,
-                provider.logscale_indices[provider.colidx[ptr]])
-            weight = provider.nzval[ptr]
-            c0 += weight * p0
-            cc += weight * pc
-            cs += weight * ps
-        end
+            flow, state, provider.logscale_indices[provider.colidx[ptr]])
+        weight = provider.nzval[ptr]
+        c0 += weight * p0
+        cc += weight * pc
+        cs += weight * ps
     end
     (isfinite(c0) && isfinite(cc) && isfinite(cs)) || throw(DomainError(
         (c0, cc, cs),

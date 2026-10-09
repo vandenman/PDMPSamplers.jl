@@ -75,7 +75,7 @@ end
         PreconditionedDynamics(DiagonalPreconditioner([1.0]),
             BouncyParticle(1, 0.0)),
     )
-    provider = IndependentZeroMeanGaussianSlab([pdf(Normal(), 0.0)], [1])
+    provider = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
     prior = BernoulliModelPrior([0.3])
     can_stick = trues(1)
     expected_unit = pdf(Normal(), 0.0) * 0.3 / 0.7
@@ -97,8 +97,7 @@ end
     end
 
     # Unequal stored speeds must also determine the aggregate-event label.
-    provider2 = IndependentZeroMeanGaussianSlab(
-        fill(pdf(Normal(), 0.0), 2), [1, 2])
+    provider2 = DenseGaussianSlab(zeros(2), Matrix{Float64}(I, 2, 2), [1, 2])
     prior2 = BernoulliModelPrior(fill(0.3, 2))
     clock2 = default_aggregate_unstick_clock(provider2, prior2,
         BouncyParticle(2, 0.0))
@@ -120,8 +119,8 @@ end
     )
     prior = BernoulliModelPrior(fill(0.4, 2))
     fixed = ZeroMeanExchangeableGaussianSlab([1, 2], 1.0, 0.2)
-    varying = IndependentZeroMeanLogscaleGaussianSlab(
-        [1, 2], [3, 4], zeros(2))
+    varying = LogLinearGaussianScaleSlab(
+        [1, 2], [3, 4], zeros(2), Matrix{Float64}(I, 2, 2))
     state = StickyPDMPState(0.0,
         SkeletonPoint(zeros(4), zeros(4)),
         BitVector([false, false, true, true]), [1.0, 3.0, 0.0, 0.0])
@@ -159,7 +158,7 @@ end
 
 @testset "complete boundary ratio under both model priors" begin
     q0 = pdf(Normal(0.0, 1.7), 0.0)
-    provider = IndependentZeroMeanGaussianSlab([q0], [1])
+    provider = DenseGaussianSlab([0.0], reshape([1.7^2], 1, 1), [1])
     flow = PreconditionedDynamics(DiagonalPreconditioner([2.3]),
         BouncyParticle(1, 0.0))
     state = StickyPDMPState(0.0, SkeletonPoint([0.0], [0.0]),
@@ -209,8 +208,8 @@ end
 end
 
 @testset "harmonic aggregate clock refreshes stored-speed constants" begin
-    provider = IndependentZeroMeanLogscaleGaussianSlab(
-        [1, 2], [3, 4], zeros(2))
+    provider = LogLinearGaussianScaleSlab(
+        [1, 2], [3, 4], zeros(2), Matrix{Float64}(I, 2, 2))
     prior = BernoulliModelPrior([0.35, 0.65])
     clock = PDMPSamplers.HarmonicLogLinearAggregateClock(provider, prior)
     flow = PreconditionedDynamics(DiagonalPreconditioner(ones(4)),
@@ -286,7 +285,7 @@ end
 end
 
 @testset "aggregate-clock BPS and Boomerang occupancy" begin
-    provider = IndependentZeroMeanGaussianSlab([pdf(Normal(), 0.0)], [1])
+    provider = DenseGaussianSlab([0.0], reshape([1.0], 1, 1), [1])
     prior = BernoulliModelPrior([0.5])
     model = PDMPModel(1, FullGradient((out, x) -> copyto!(out, x)),
         (out, x, v) -> copyto!(out, v))
