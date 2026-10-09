@@ -105,14 +105,6 @@ coordinatewise flip rates.
 """
 abstract type AbstractResidualEnvelope end
 
-"""
-    prepare_residual_horizon!(envelope, state, flow, horizon)
-
-Optional hook for residual envelopes whose certificate is shared across a
-complete finite event-search horizon. Ordinary envelopes require no setup.
-"""
-prepare_residual_horizon!(::AbstractResidualEnvelope, state, flow, horizon) =
-    nothing
 
 struct SeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
     weights::Matrix{Float64}
@@ -125,76 +117,6 @@ struct SeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
     cumulative_masses::Vector{Float64}
 end
 
-"""
-    BlockSeparableResidualEnvelope(weights, component_blocks, n_blocks,
-                                   component_scales!;
-                                   component_cell_scales! = nothing)
-
-Compact separable envelope for a Cartesian set of observations `(block, local)`.
-Each component row belongs to exactly one block and `weights[r, i]` stores only
-the local-observation weights. The represented full matrix has
-`n_blocks * size(weights, 2)` columns and structural zeros outside the row's
-block. This avoids materializing block-diagonal factor envelopes.
-"""
-struct BlockSeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
-    weights::Matrix{Float64}
-    component_blocks::Vector{Int}
-    block_components::Vector{Vector{Int}}
-    n_blocks::Int
-    component_scales!::F
-    component_cell_scales!::C
-    totals::Vector{Float64}
-    alias_tables::Vector{Union{Nothing,AliasTables.AliasTable{UInt64,Int}}}
-    scales::Vector{Float64}
-    cell_scales::Vector{Float64}
-    cumulative_masses::Vector{Float64}
-end
-
-"""
-    GroupedResidualEnvelope(groups, component_scales!;
-                            component_cell_scales!)
-
-Compact separable envelope for one-hot component memberships. `groups[k, i]`
-is the component containing observation `i` in partition `k`. This represents
-the same bound as a zero-one component-by-observation matrix without storing
-that dense matrix or one full alias table per component.
-"""
-struct GroupedResidualEnvelope{F,C} <: AbstractResidualEnvelope
-    groups::Matrix{Int}
-    members::Vector{Vector{Int}}
-    component_scales!::F
-    component_cell_scales!::C
-    totals::Vector{Float64}
-    scales::Vector{Float64}
-    cell_scales::Vector{Float64}
-    cumulative_masses::Vector{Float64}
-end
-
-function GroupedResidualEnvelope(groups::AbstractMatrix{<:Integer},
-        n_components::Integer, component_scales!;
-        component_cell_scales! = nothing)
-    n_components >= 1 || throw(ArgumentError(
-        "grouped residual envelope must have at least one component"))
-    stored_groups = Matrix{Int}(groups)
-    isempty(stored_groups) && throw(ArgumentError(
-        "grouped residual envelope memberships must be nonempty"))
-    all(group -> 1 <= group <= n_components, stored_groups) ||
-        throw(ArgumentError("grouped residual envelope memberships are out of range"))
-    members = [Int[] for _ in 1:n_components]
-    totals = zeros(Float64, n_components)
-    @inbounds for observation in axes(stored_groups, 2), partition in axes(stored_groups, 1)
-        component = stored_groups[partition, observation]
-        push!(members[component], observation)
-        totals[component] += 1.0
-    end
-    all(member -> !isempty(member), members) || throw(ArgumentError(
-        "every grouped residual-envelope component must contain an observation"))
-    component_cell_scales! === nothing && throw(ArgumentError(
-        "grouped residual envelopes require an explicit certified component_cell_scales! callback"))
-    return GroupedResidualEnvelope(stored_groups, members, component_scales!,
-        component_cell_scales!, totals, zeros(n_components), zeros(n_components),
-        zeros(n_components))
-end
 
 """Internal wrapper recording the caller's explicit affine certification."""
 struct CertifiedAffineComponentScales{F}
@@ -226,45 +148,6 @@ function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
         zeros(Float64, size(stored_weights, 1)))
 end
 
-function BlockSeparableResidualEnvelope(weights::AbstractMatrix,
-        component_blocks::AbstractVector{<:Integer}, n_blocks::Integer,
-        component_scales!; component_cell_scales! = nothing,
-        certified_affine::Bool=false)
-    isempty(weights) && throw(ArgumentError(
-        "block-separable residual envelope weights must be nonempty"))
-    any(x -> !isfinite(x) || x < 0, weights) && throw(ArgumentError(
-        "block-separable residual envelope weights must be finite and nonnegative"))
-    n_blocks >= 1 || throw(ArgumentError(
-        "block-separable residual envelope must have at least one block"))
-    length(component_blocks) == size(weights, 1) || throw(DimensionMismatch(
-        "one block index is required per residual-envelope component"))
-    stored_blocks = Int.(component_blocks)
-    all(block -> 1 <= block <= n_blocks, stored_blocks) || throw(ArgumentError(
-        "block-separable residual-envelope block indices are out of range"))
-    stored_weights = Matrix{Float64}(weights)
-    totals = vec(sum(stored_weights; dims=2))
-    tables = Union{Nothing,AliasTables.AliasTable{UInt64,Int}}[
-        ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
-        for r in axes(stored_weights, 1)
-    ]
-    block_components = [Int[] for _ in 1:n_blocks]
-    @inbounds for component in eachindex(stored_blocks)
-        push!(block_components[stored_blocks[component]], component)
-    end
-    all(components -> !isempty(components), block_components) || throw(ArgumentError(
-        "every block must own at least one residual-envelope component"))
-    component_cell_scales! === nothing && !certified_affine && throw(ArgumentError(
-        "arbitrary residual-envelope component scales require an explicit certified " *
-        "component_cell_scales! callback; set certified_affine=true only for " *
-        "component scales that are affine in time"))
-    stored_scales = certified_affine ?
-        CertifiedAffineComponentScales(component_scales!) : component_scales!
-    return BlockSeparableResidualEnvelope(stored_weights, stored_blocks,
-        block_components, Int(n_blocks), stored_scales, component_cell_scales!,
-        totals, tables, zeros(Float64, size(stored_weights, 1)),
-        zeros(Float64, size(stored_weights, 1)),
-        zeros(Float64, size(stored_weights, 1)))
-end
 
 struct TrajectoryComponentScales
     anchor::Vector{Float64}
@@ -360,27 +243,6 @@ derived from them.
 abstract type AbstractSubsamplingDesign end
 struct UniformSubsamplingDesign <: AbstractSubsamplingDesign end
 
-"""Internal balanced design for equal-size contiguous observation strata."""
-struct BalancedStratifiedSubsamplingDesign <: AbstractSubsamplingDesign
-    n_strata::Int
-    stratum_size::Int
-    per_stratum::Int
-end
-
-function balanced_stratified_subsampling_design(N::Integer, n_strata::Integer,
-        m::Integer)
-    n_strata >= 1 || throw(ArgumentError("number of subsampling strata must be positive"))
-    N % n_strata == 0 || throw(ArgumentError(
-        "balanced subsampling strata must have equal sizes"))
-    m % n_strata == 0 || throw(ArgumentError(
-        "subsample size must be divisible by the number of strata"))
-    stratum_size = N ÷ n_strata
-    per_stratum = m ÷ n_strata
-    1 <= per_stratum <= stratum_size || throw(ArgumentError(
-        "each subsampling stratum must contribute between one and all entries"))
-    return BalancedStratifiedSubsamplingDesign(
-        Int(n_strata), Int(stratum_size), Int(per_stratum))
-end
 
 mutable struct SubsampledControlVariate{F,O,E<:AbstractResidualEnvelope,H,R,D<:AbstractSubsamplingDesign} <: GlobalGradientStrategy
     deterministic_gradient!::F
@@ -416,12 +278,6 @@ function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
     subset_design::AbstractSubsamplingDesign=UniformSubsamplingDesign())
     N = n_observations(envelope)
     1 <= m <= N || throw(ArgumentError("minibatch size m must lie in 1:N"))
-    if subset_design isa BalancedStratifiedSubsamplingDesign
-        subset_design.n_strata * subset_design.stratum_size == N ||
-            throw(DimensionMismatch("balanced subset design does not cover the envelope columns"))
-        subset_design.n_strata * subset_design.per_stratum == m ||
-            throw(DimensionMismatch("balanced subset design does not match minibatch size m"))
-    end
     requested_anchor = collect(Float64, anchor)
     trajectory_anchor = _trajectory_scale_anchor(envelope)
     if trajectory_anchor !== nothing
@@ -586,9 +442,6 @@ reuse_screened_residual_sampling!(::AbstractResidualEnvelope, state, flow, t,
     ::Any) = false
 
 n_observations(envelope::SeparableResidualEnvelope) = size(envelope.weights, 2)
-n_observations(envelope::BlockSeparableResidualEnvelope) =
-    envelope.n_blocks * size(envelope.weights, 2)
-n_observations(envelope::GroupedResidualEnvelope) = size(envelope.groups, 2)
 
 function observation_residual_bound(envelope::SeparableResidualEnvelope,
         observation::Integer)
@@ -600,30 +453,6 @@ function observation_residual_bound(envelope::SeparableResidualEnvelope,
     return result
 end
 
-function observation_residual_bound(envelope::BlockSeparableResidualEnvelope,
-        observation::Integer)
-    local_count = size(envelope.weights, 2)
-    block0, local0 = divrem(observation - 1, local_count)
-    block = block0 + 1
-    local_index = local0 + 1
-    1 <= block <= envelope.n_blocks || throw(BoundsError(
-        1:n_observations(envelope), observation))
-    result = 0.0
-    @inbounds for component in envelope.block_components[block]
-        result += envelope.scales[component] *
-            envelope.weights[component, local_index]
-    end
-    return result
-end
-
-function observation_residual_bound(envelope::GroupedResidualEnvelope,
-        observation::Integer)
-    result = 0.0
-    @inbounds for partition in axes(envelope.groups, 1)
-        result += envelope.scales[envelope.groups[partition, observation]]
-    end
-    return result
-end
 
 """Install a sampled residual in `gradient` and return its complete event rate."""
 function subsampling_candidate_rate!(oracle, state, gradient, residual,
@@ -660,7 +489,6 @@ subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
 
 """Internal pre-gradient hook for tightening a sampled residual bound."""
 subsampling_residual_subset_bound(oracle, state, flow, D, M, subset, scale) = M
-needs_subsampling_residual_gradient(oracle) = false
 subsampling_residual_subset_bound(oracle, state, gradient, flow,
         D, M, subset, scale) = subsampling_residual_subset_bound(
     oracle, state, flow, D, M, subset, scale)
@@ -727,8 +555,6 @@ subsampling_subset_bound(oracle::WithResidualStats, state, gradient, flow,
 subsampling_residual_subset_bound(oracle::WithResidualStats, state, flow,
         D, M, subset, scale) = subsampling_residual_subset_bound(
     oracle.f, state, flow, D, M, subset, scale)
-needs_subsampling_residual_gradient(oracle::WithResidualStats) =
-    needs_subsampling_residual_gradient(oracle.f)
 subsampling_residual_subset_bound(oracle::WithResidualStats, state, gradient,
         flow, D, M, subset, scale) = subsampling_residual_subset_bound(
     oracle.f, state, gradient, flow, D, M, subset, scale)

@@ -57,14 +57,6 @@ end
 
 _draw_distinguished(rng, envelope::SeparableResidualEnvelope, component) =
     rand(rng, envelope.alias_tables[component])
-function _draw_distinguished(rng, envelope::BlockSeparableResidualEnvelope,
-        component)
-    local_index = rand(rng, envelope.alias_tables[component])
-    return (envelope.component_blocks[component] - 1) *
-        size(envelope.weights, 2) + local_index
-end
-_draw_distinguished(rng, envelope::GroupedResidualEnvelope, component) =
-    rand(rng, envelope.members[component])
 
 function _draw_base_subset!(rng, cv::SubsampledControlVariate,
         ::UniformSubsamplingDesign)
@@ -73,23 +65,6 @@ function _draw_base_subset!(rng, cv::SubsampledControlVariate,
         rng, cv.subset, N, cv.sampling_map)
 end
 
-function _draw_base_subset!(rng, cv::SubsampledControlVariate,
-        design::BalancedStratifiedSubsamplingDesign)
-    offset = 0
-    destination = 1
-    for _ in 1:design.n_strata
-        selected = @view cv.subset[
-            destination:(destination + design.per_stratum - 1)]
-        _draw_uniform_without_replacement!(rng, selected,
-            design.stratum_size, cv.sampling_map)
-        @inbounds for j in eachindex(selected)
-            selected[j] += offset
-        end
-        destination += design.per_stratum
-        offset += design.stratum_size
-    end
-    return cv.subset
-end
 
 function _draw_base_subset_conditional!(rng, cv::SubsampledControlVariate,
         ::UniformSubsamplingDesign, distinguished::Int)
@@ -102,42 +77,6 @@ function _draw_base_subset_conditional!(rng, cv::SubsampledControlVariate,
     return cv.subset
 end
 
-function _draw_base_subset_conditional!(rng, cv::SubsampledControlVariate,
-        design::BalancedStratifiedSubsamplingDesign, distinguished::Int)
-    distinguished_stratum, local0 = divrem(
-        distinguished - 1, design.stratum_size)
-    distinguished_stratum += 1
-    distinguished_local = local0 + 1
-    destination = 1
-    for stratum in 1:design.n_strata
-        offset = (stratum - 1) * design.stratum_size
-        if stratum == distinguished_stratum
-            cv.subset[destination] = distinguished
-            destination += 1
-            count = design.per_stratum - 1
-            if count > 0
-                selected = @view cv.subset[destination:(destination + count - 1)]
-                _draw_uniform_without_replacement!(rng, selected,
-                    design.stratum_size, cv.sampling_map;
-                    excluded=distinguished_local)
-                @inbounds for j in eachindex(selected)
-                    selected[j] += offset
-                end
-                destination += count
-            end
-        else
-            selected = @view cv.subset[
-                destination:(destination + design.per_stratum - 1)]
-            _draw_uniform_without_replacement!(rng, selected,
-                design.stratum_size, cv.sampling_map)
-            @inbounds for j in eachindex(selected)
-                selected[j] += offset
-            end
-            destination += design.per_stratum
-        end
-    end
-    return cv.subset
-end
 
 """
     draw_subset!(rng, cv, D, B) -> M_S
@@ -187,11 +126,6 @@ end
     return _uniform_subset_probability(n_observations(cv.envelope), cv.m)
 end
 
-@inline function _base_subset_probability(cv::SubsampledControlVariate,
-        design::BalancedStratifiedSubsamplingDesign)
-    return _uniform_subset_probability(
-        design.stratum_size, design.per_stratum)^design.n_strata
-end
 
 @inline function _selected_subset_probability(cv::SubsampledControlVariate,
         D::Real, B::Real, selected_bound::Real)
@@ -258,9 +192,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     selected_probability = _selected_subset_probability(cv, D, B, M_subset)
     _inc_counter_subset_draw_seconds(stats,
         (time_ns() - _subset_t0) * 1.0e-9)
-    if needs_subsampling_residual_gradient(cv.residual_oracle)
-        deterministic_gradient!(cache.∇ϕx, cv, candidate, flow)
-    end
     _refine_t0 = time_ns()
     _inc_counter_selected_subset_bound_evaluations(stats)
     residual_subset_bound = subsampling_residual_subset_bound(
@@ -547,8 +478,6 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
         τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
         effective_horizon, horizon_event = _effective_grid_horizon(
             cv, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
-        prepare_residual_horizon!(
-            cv.envelope, state, flow, effective_horizon)
         cumulative_exp = Random.randexp(rng)
         modes = _grid_bound_modes(alg, state, flow, provider, stats)
         n_cells_bounded = 0
