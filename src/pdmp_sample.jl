@@ -253,158 +253,6 @@ end
     return nothing
 end
 
-# Optional sidecar observability for guarded diagnostics. It is disabled by
-# default and never participates in sampling decisions.
-const _progress_last_write = Ref(0.0)
-const _progress_start_time = Ref(0.0)
-const _progress_anchor_boundaries = Ref(0)
-const _progress_physical_horizons = Ref(0)
-
-@inline _progress_has_counter(c::AbstractStatisticCounter, ::Type{T}) where {T} =
-    c isa T
-@inline _progress_has_counter(c::MultiCounter, ::Type{T}) where {T} =
-    any(x -> _progress_has_counter(x, T), c.counters)
-@inline function _progress_counter_value(stats::AbstractStatisticCounter,
-        ::Type{T}, getter) where {T}
-    _progress_has_counter(stats, T) ? string(getter(stats)) : "unavailable"
-end
-
-function _progress_rss_kb()
-    path = "/proc/self/status"
-    isfile(path) || return NaN
-    for line in eachline(path)
-        startswith(line, "VmRSS:") || continue
-        fields = split(strip(line))
-        length(fields) >= 2 || return NaN
-        return try parse(Float64, fields[2]) catch; NaN end
-    end
-    NaN
-end
-
-function _progress_sidecar_clock(alg)
-    if alg isa AggregateStickyLoopState
-        return alg.clock
-    elseif alg isa AggregateSticky
-        return alg.clock
-    end
-    return nothing
-end
-
-function _write_progress_sidecar!(phase::Symbol, state::AbstractPDMPState,
-        stats::AbstractStatisticCounter; force::Bool=false, flow=nothing, alg=nothing)
-    path = get(ENV, "PDMPSAMPLERS_PROGRESS_PATH", "")
-    isempty(path) && return nothing
-    now = time()
-    interval = try parse(Float64, get(ENV, "PDMPSAMPLERS_PROGRESS_INTERVAL", "2")) catch; 2.0 end
-    !force && now - _progress_last_write[] < interval && return nothing
-    _progress_last_write[] = now
-    events = _get_counter_reflections_events(stats) +
-        _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
-    clock = _progress_sidecar_clock(alg)
-    clock_type = isnothing(clock) ? "missing" : string(typeof(clock))
-    provider_type = if isnothing(clock) || !hasproperty(clock, :slab_provider)
-        "missing"
-    else
-        string(typeof(getproperty(clock, :slab_provider)))
-    end
-    dynamics_type = isnothing(flow) ? "missing" : string(typeof(flow))
-    metric_scale_min, metric_scale_max = if isnothing(flow)
-        (NaN, NaN)
-    else
-        try _metric_scale_extrema(flow) catch; (NaN, NaN) end
-    end
-    metric_generation = if isnothing(flow) || !hasproperty(flow, :metric) ||
-            !hasproperty(getproperty(flow, :metric), :generation)
-        "missing"
-    else
-        string(getproperty(getproperty(flow, :metric), :generation))
-    end
-    clock_diag = if !isnothing(clock)
-        try thinning_diagnostics(clock) catch; nothing end
-    else
-        nothing
-    end
-    diag_value(name, default="missing") = isnothing(clock_diag) ? default :
-        (hasproperty(clock_diag, name) ? string(getproperty(clock_diag, name)) : default)
-    phase_status = endswith(string(phase), "_end") ? "complete" : "running"
-    lines = (
-        "timestamp=" * string(now),
-        "pid=" * string(getpid()),
-        "phase=" * string(phase),
-        "status=" * phase_status,
-        "physical_pdmp_time=" * string(Float64(state.t[])),
-        "elapsed_wall_seconds=" * string(now - _progress_start_time[]),
-        "reflections=" * _progress_counter_value(stats, BasicEventCounter,
-            _get_counter_reflections_events),
-        "gradient_calls=" * _progress_counter_value(stats, GradientCallCounter,
-            _get_counter_∇f_calls),
-        "full_gradient_calls=" * _progress_counter_value(stats,
-            GradientCallCounter, _get_counter_full_gradient_calls),
-        "grid_horizon_hits=" * _progress_counter_value(stats,
-            GridThinningCounter, _get_counter_grid_horizon_hits),
-        "anchor_selection_boundaries=" * string(_progress_anchor_boundaries[]),
-        "physical_horizon_events=" * string(_progress_physical_horizons[]),
-        "adaptation_updates=" * _progress_counter_value(stats,
-            RunSummaryCounter, _get_counter_adaptation_updates),
-        "dynamics_adaptation_resets=" * _progress_counter_value(stats,
-            GridThinningCounter,
-            _get_counter_grid_resets_from_dynamics_adaptation),
-        "refreshes=" * _progress_counter_value(stats, BasicEventCounter,
-            _get_counter_refreshment_events),
-        "sticky_events=" * _progress_counter_value(stats, BasicEventCounter,
-            _get_counter_sticky_events),
-        "freezes=" * _progress_counter_value(stats, BasicEventCounter,
-            _get_counter_sticky_freezes),
-        "unfreezes=" * _progress_counter_value(stats, BasicEventCounter,
-            _get_counter_sticky_unfreezes),
-        "aggregate_clock_calls=" * string(_progress_aggregate_clock_calls[]),
-        "zero_time_events=" * string(_progress_aggregate_clock_zero_delays[]),
-        "near_zero_event_delays=" * string(_progress_aggregate_clock_near_zero_delays[]),
-        "minimum_positive_clock_delay=" * string(_progress_aggregate_clock_min_delay[]),
-        "events=" * string(events),
-        "rss_kb=" * string(_progress_rss_kb()),
-        "pdmpsamplers_path=" * (try string(pathof(@__MODULE__)) catch; "unavailable" end),
-        "concrete_dynamics_type=" * dynamics_type,
-        "metric_scale_min=" * string(metric_scale_min),
-        "metric_scale_max=" * string(metric_scale_max),
-        "metric_generation=" * metric_generation,
-        "slab_provider_type=" * provider_type,
-        "aggregate_clock_type=" * clock_type,
-        "aggregate_fallback_calls=" * diag_value(:fallback_calls, "0"),
-        "aggregate_generic_fallbacks=" * diag_value(:fallbacks, "0"),
-        "aggregate_point_rate_evaluations=" * diag_value(:point_rate_evaluations, "0"),
-        "aggregate_quadrature_evaluations=" * diag_value(:quadrature_evaluations, "0"),
-        "aggregate_cumulative_hazard_evaluations=" * diag_value(:cumulative_hazard_evaluations, "0"),
-        "aggregate_root_iterations=" * diag_value(:root_iterations, "0"),
-        "aggregate_frozen_coordinates=" * diag_value(:frozen_coordinates, "missing"),
-        "aggregate_stickable_coordinates=" * diag_value(:stickable_coordinates, "missing"),
-        "aggregate_state_movement_ns=" * diag_value(:state_movement_ns, "0"),
-        "aggregate_boundary_weight_ns=" * diag_value(:boundary_weight_ns, "0"),
-        "aggregate_quadrature_ns=" * diag_value(:quadrature_ns, "0"),
-        "aggregate_root_inversion_ns=" * diag_value(:root_inversion_ns, "0"),
-        "aggregate_allocations=" * diag_value(:allocations, "0"),
-    )
-    mkpath(dirname(path))
-    open(path, "a") do io
-        for line in lines
-            println(io, line)
-        end
-    end
-    nothing
-end
-
-function _reset_progress_sidecar_counters!()
-    _progress_last_write[] = 0.0
-    _progress_start_time[] = time()
-    _progress_aggregate_clock_calls[] = 0
-    _progress_aggregate_clock_zero_delays[] = 0
-    _progress_aggregate_clock_near_zero_delays[] = 0
-    _progress_aggregate_clock_min_delay[] = Inf
-    _progress_anchor_boundaries[] = 0
-    _progress_physical_horizons[] = 0
-    nothing
-end
-
 _copy_flow(flow::ContinuousDynamics) = flow
 _copy_flow(flow::MutableBoomerang) = copy(flow)
 _copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metric), _copy_flow(pd.dynamics))
@@ -568,7 +416,6 @@ function _run_phase!(
     adaptation_grad=model_.grad,
 ) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
-    _write_progress_sidecar!(phase, state, stats; force=true, flow=flow, alg=alg_)
     begin_trace_phase!(trace_manager, state, flow, phase)
     if phase === :main && !(get_main_trace(trace_manager) isa StreamingPDMPTrace)
         record_event!(trace_manager, state, flow, nothing, phase)
@@ -625,9 +472,6 @@ function _run_phase!(
             trace_manager, boundary_policy, phase,
             min(criterion_horizon, adapter_horizon),
             adapter_owns_horizon ? :anchor_selection_boundary : :horizon_hit)
-        event_type === :anchor_selection_boundary &&
-            (_progress_anchor_boundaries[] += 1)
-        event_type === :horizon_hit && (_progress_physical_horizons[] += 1)
         step_observer === nothing || step_observer(:after_step, phase, state,
             criterion_horizon, adapter_horizon, event_type, stats)
         event_type === :anchor_selection_boundary ||
@@ -652,7 +496,6 @@ function _run_phase!(
 
         check_health!(health, stats)
         _update_progress!(progress, prg, tstop, T, progress_stops, state)
-        _write_progress_sidecar!(phase, state, stats; flow=flow, alg=alg_)
     end
 end
 
@@ -840,7 +683,6 @@ function _pdmp_sample_single(
     trace_storage::Union{Nothing,StreamingTraceStorage}=nothing,
 ) where {FL<:ContinuousDynamics}
 
-    _reset_progress_sidecar_counters!()
     # TODO: it's possible to sample to have t_warmup < T...
     # we should always sample T + t_warmup!
 
@@ -918,7 +760,6 @@ function _pdmp_sample_single(
             progress_stops, boundary_policy, initialization_model, support_boundary_options;
             adaptation_grad=warmup_grad)
         finish_trace_phase!(trace_manager, state, flow, :warmup)
-        _write_progress_sidecar!(:warmup_end, state, stats; force=true, flow=flow, alg=phase_alg)
         _set_counter_warmup_phase_elapsed_time(
             stats, (time_ns() - warmup_phase_start) / 1e9)
     end
@@ -979,14 +820,11 @@ function _pdmp_sample_single(
     trace_done_ns = time_ns()
     _run_optional_hook!(_main_phase_profile_stop_hook[])
     profile_hook_done_ns = time_ns()
-    _write_progress_sidecar!(:main_end, state, stats; force=true, flow=flow, alg=phase_alg)
-    sidecar_done_ns = time_ns()
     if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
         println(stderr, "OMRF_PROFILE main_loop_seconds=",
             (main_loop_done_ns - main_phase_start) / 1e9,
             " trace_finish_seconds=", (trace_done_ns - main_loop_done_ns) / 1e9,
-            " profile_hook_seconds=", (profile_hook_done_ns - trace_done_ns) / 1e9,
-            " sidecar_seconds=", (sidecar_done_ns - profile_hook_done_ns) / 1e9)
+            " profile_hook_seconds=", (profile_hook_done_ns - trace_done_ns) / 1e9)
     end
     _set_counter_main_phase_elapsed_time(stats, (time_ns() - main_phase_start) / 1e9)
     _set_counter_main_phase_allocated_bytes(
