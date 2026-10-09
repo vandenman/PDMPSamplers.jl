@@ -8,19 +8,19 @@ of clocks below).
 
 ## Support matrix
 
-The labels below distinguish a certified accelerated path from the exact
-`SummedRateClock` fallback. "Experimental" means the API is intentionally
-unexported even though it is covered by correctness tests.
+"Experimental" marks dynamics whose release uses the boundary-proposal law
+(below). That law is exact and covered by correctness tests, but it is less
+exercised than the stored-velocity law, which all other dynamics use.
 
 | Dynamics | Aggregate sticky support | Release velocity |
 | --- | --- | --- |
 | `ZigZag` | supported | stored velocity |
 | `BouncyParticle` | supported | stored velocity |
 | `Boomerang`, `MutableBoomerang`, and `AdaptiveBoomerang` with a diagonal covariance | supported | stored velocity |
-| `Boomerang`-family dynamics with a dense or low-rank covariance | supported | boundary proposal |
+| `Boomerang`-family dynamics with a dense or low-rank covariance | experimental | boundary proposal |
 | Identity- or diagonal-preconditioned `ZigZag` and `BouncyParticle` | supported | stored velocity |
 | Identity- or diagonal-preconditioned Boomerang-family dynamics | supported | as the underlying Boomerang |
-| Dense-preconditioned `ZigZag` and `BouncyParticle` | supported | boundary proposal |
+| Dense-preconditioned `ZigZag` and `BouncyParticle` | experimental | boundary proposal |
 
 Two release laws are used:
 
