@@ -339,11 +339,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         G = compute_gradient!(candidate, cv, flow, cache)
         deterministic_actual = λ(candidate, G, flow)
     end
-    if _bound_violated(deterministic_actual, D)
-        _record_subsampling_bound_violation!(:deterministic,
-            deterministic_actual, D, τ, violation_policy, candidate, flow, cv,
-            deferred_gradient ? nothing : G, provider)
-    end
     if _subsampling_bound_violation(
             violation_policy, stats, deterministic_actual, D, :deterministic)
         return nothing
@@ -393,9 +388,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
                     final_candidate_gradient=copy(G),
                     actual_rate=float(actual)))
         end
-        _record_subsampling_bound_violation!(:subset, actual,
-            tight_subset_bound, τ, violation_policy, candidate, flow, cv,
-            G, provider)
     end
     if _subsampling_bound_violation(
             violation_policy, stats, actual, tight_subset_bound, :subset)
@@ -479,10 +471,6 @@ function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
     actual = λ(candidate, gradient, flow)
     _inc_counter_residual_oracle_evaluations(stats)
     _inc_counter_grid_acceptance_tests(stats)
-    if _bound_violated(actual, cap)
-        _record_subsampling_bound_violation!(:subset, actual, cap,
-            τ, violation_policy, candidate, flow, cv, gradient, provider)
-    end
     _subsampling_bound_violation(violation_policy, stats, actual, cap,
         :subset) && return nothing
     _final_t0 = time_ns()
@@ -572,114 +560,6 @@ function _subsampling_bound_violation(alg::GridAdaptiveState, stats, actual, bou
         "; shrinking the deterministic grid cannot repair a residual envelope"))
     alg.bound_violation === :shrink && return true
     throw(ErrorException(message * "; the invalid proposal was discarded"))
-end
-
-# Research diagnostic hook.  The ordinary path pays only the existing failed
-# comparison; snapshots are allocated solely after a violation has occurred.
-const _LAST_SUBSAMPLING_BOUND_VIOLATION = Ref{Any}(nothing)
-
-clear_subsampling_bound_violation_diagnostic!() =
-    (_LAST_SUBSAMPLING_BOUND_VIOLATION[] = nothing)
-last_subsampling_bound_violation_diagnostic() =
-    _LAST_SUBSAMPLING_BOUND_VIOLATION[]
-
-function _record_subsampling_bound_violation!(kind, actual, bound, tau,
-        alg, candidate, flow, cv, gradient=nothing, provider=nothing)
-    grid = alg.pcb.t_grid
-    cell = clamp(searchsortedlast(grid, tau), 1, length(grid) - 1)
-    contributions = gradient === nothing ? Float64[] :
-        max.(0.0, candidate.ξ.θ .* gradient)
-    coordinate = isempty(contributions) ? 0 : argmax(contributions)
-    metric = hasproperty(flow, :metric) && hasproperty(flow.metric, :scale) ?
-        copy(flow.metric.scale) : Float64[]
-    free = hasproperty(candidate, :free) ? copy(candidate.free) : BitVector()
-    anchor = copy(cv.anchor)
-    position = copy(candidate.ξ.x)
-    rate_grid = Float64[]
-    derivative_grid = Float64[]
-    finite_difference_derivative_grid = Float64[]
-    diagnostic_times = Float64[]
-    captured = _PENDING_SUBSAMPLING_FAILURE_FIXTURE[]
-    if captured === nothing && provider !== nothing && flow isa Union{AnyBoomerang,
-            PreconditionedDynamics{<:AbstractPreconditioner,<:AnyBoomerang}}
-        # Research-only failure path: independently replay the complete cell.
-        # The ordinary event path never enters this allocation-heavy block.
-        diagnostic_times = collect(range(grid[cell], grid[cell + 1], length=401))
-        rate_grid = similar(diagnostic_times)
-        derivative_grid = similar(diagnostic_times)
-        finite_difference_derivative_grid = similar(diagnostic_times)
-        for (k, t) in pairs(diagnostic_times)
-            state_t = copy(candidate)
-            move_forward_time!(state_t, t - tau, flow)
-            rate_grid[k], derivative_grid[k] =
-                rate_and_derivative(state_t, flow, provider)
-            eps_t = min(1.0e-5,
-                max(1.0e-8, 0.2 * min(t - grid[cell], grid[cell + 1] - t)))
-            if t == grid[cell]
-                left = copy(state_t); right = copy(state_t)
-                move_forward_time!(right, eps_t, flow)
-                q_left, _ = rate_and_derivative(left, flow, provider)
-                q_right, _ = rate_and_derivative(right, flow, provider)
-                finite_difference_derivative_grid[k] = (q_right - q_left) / eps_t
-            elseif t == grid[cell + 1]
-                left = copy(state_t); right = copy(state_t)
-                move_forward_time!(left, -eps_t, flow)
-                q_left, _ = rate_and_derivative(left, flow, provider)
-                q_right, _ = rate_and_derivative(right, flow, provider)
-                finite_difference_derivative_grid[k] = (q_right - q_left) / eps_t
-            else
-                left = copy(state_t); right = copy(state_t)
-                move_forward_time!(left, -eps_t, flow)
-                move_forward_time!(right, eps_t, flow)
-                q_left, _ = rate_and_derivative(left, flow, provider)
-                q_right, _ = rate_and_derivative(right, flow, provider)
-                finite_difference_derivative_grid[k] =
-                    (q_right - q_left) / (2eps_t)
-            end
-        end
-    end
-    resolved_flow = _underlying_flow(flow)
-    reference_mean = resolved_flow isa AnyBoomerang ? copy(resolved_flow.μ) : Float64[]
-    reference_precision = resolved_flow isa AnyBoomerang ? Matrix(resolved_flow.Γ) :
-        Matrix{Float64}(undef, 0, 0)
-    base = (
-        stage=kind,
-        physical_time=candidate.t[],
-        proposal_time=float(tau),
-        cell_left=grid[cell],
-        cell_right=grid[cell + 1],
-        coordinate=coordinate,
-        subset=copy(cv.subset),
-        actual=float(actual),
-        bound=float(bound),
-        absolute_excess=float(actual - bound),
-        relative_excess=float(actual / bound - 1),
-        anchor_identity=objectid(cv.anchor),
-        anchor_distance=norm(position - anchor),
-        position=position,
-        velocity=copy(candidate.ξ.θ),
-        free=free,
-        metric=metric,
-        anchor=anchor,
-        coordinate_contributions=contributions,
-        deterministic_gradient_provider_type=string(typeof(cv.deterministic_gradient!)),
-        deterministic_hvp_provider_type=string(typeof(cv.deterministic_hvp!)),
-        rate_derivative_provider_type=string(typeof(provider)),
-        bound_strategy=string(alg.bound),
-        curvature_bound=alg.curvature_bound isa Real ? float(alg.curvature_bound) : NaN,
-        resolved_flow_type=string(typeof(flow)),
-        resolved_inner_flow_type=string(typeof(resolved_flow)),
-        reference_mean=reference_mean,
-        reference_precision=reference_precision,
-        diagnostic_times=diagnostic_times,
-        signed_rate=rate_grid,
-        analytic_rate_derivative=derivative_grid,
-        finite_difference_rate_derivative=finite_difference_derivative_grid,
-        recorded_cell_roof=alg.pcb.Λ_vals[cell])
-    _LAST_SUBSAMPLING_BOUND_VIOLATION[] = captured === nothing ? base :
-        merge(base, (immutable_candidate=captured,))
-    _PENDING_SUBSAMPLING_FAILURE_FIXTURE[] = nothing
-    return nothing
 end
 
 @inline function _extend_subsampling_bound_to_budget!(cv::SubsampledControlVariate,
@@ -787,11 +667,6 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
                 screening_residual_bound(cv.envelope, state, flow, τ_proposal)
             _inc_counter_pointwise_screen_seconds(stats,
                 (time_ns() - _screen_t0) * 1.0e-9)
-            if _bound_violated(D + B, bar_M)
-                _record_subsampling_bound_violation!(:aggregate,
-                    D + B, bar_M, τ_proposal, alg, state, flow, cv,
-                    nothing, provider)
-            end
             if _subsampling_bound_violation(alg, stats, D + B, bar_M, :aggregate)
                 _shrink_grid_after_bound_violation!(alg, stats)
                 break
