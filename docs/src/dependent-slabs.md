@@ -12,15 +12,29 @@ The labels below distinguish a certified accelerated path from the exact
 `SummedRateClock` fallback. "Experimental" means the API is intentionally
 unexported even though it is covered by correctness tests.
 
-| Dynamics | Aggregate sticky support | Notes |
+| Dynamics | Aggregate sticky support | Release velocity |
 | --- | --- | --- |
-| `ZigZag` | supported | Coordinate boundary velocities use the ZigZag law. |
-| `BouncyParticle` | supported | Gaussian boundary velocities use the reference velocity marginal. |
-| `Boomerang`, `MutableBoomerang`, and `AdaptiveBoomerang` | supported | Dense, diagonal, and low-rank covariance representations use conditional Gaussian boundary velocities. |
-| Diagonal-preconditioned `ZigZag` | supported | Coordinate boundary velocities are scaled by the diagonal preconditioner. |
-| Dense-preconditioned `ZigZag` | supported | The dense coordinate-boundary law and stationarity behavior are tested. |
-| Preconditioned `BouncyParticle` | supported | Identity, diagonal, and dense preconditioners are supported. |
-| Preconditioned Boomerang-family dynamics | supported | Boundary velocities use the transformed Gaussian velocity covariance; residual clocks currently use exact fallback. |
+| `ZigZag` | supported | stored velocity |
+| `BouncyParticle` | supported | stored velocity |
+| `Boomerang`, `MutableBoomerang`, and `AdaptiveBoomerang` with a diagonal covariance | supported | stored velocity |
+| `Boomerang`-family dynamics with a dense or low-rank covariance | supported | boundary proposal |
+| Identity- or diagonal-preconditioned `ZigZag` and `BouncyParticle` | supported | stored velocity |
+| Identity- or diagonal-preconditioned Boomerang-family dynamics | supported | as the underlying Boomerang |
+| Dense-preconditioned `ZigZag` and `BouncyParticle` | supported | boundary proposal |
+
+Two release laws are used:
+
+- **Stored velocity.** When a coordinate sticks at zero, its velocity is
+  stored, and it is released with that same velocity. The release rate of a
+  frozen coordinate is proportional to the absolute value of its stored
+  velocity.
+- **Boundary proposal.** For dynamics with correlated velocities, a frozen
+  coordinate is released with a velocity drawn from the conditional boundary
+  law of the flow. Its release rate uses the corresponding expected speed.
+
+For preconditioned Boomerang-family dynamics, log-linear Gaussian scale slabs
+use `HarmonicLogLinearAggregateClock`; the other residual clocks use the exact
+fallback.
 
 The supported aggregate clocks are:
 
