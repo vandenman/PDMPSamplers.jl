@@ -141,15 +141,14 @@ end
         @test count(==(2), labels) / length(labels) ≈ 0.75 atol=0.012
     end
 
-    shared = GlobalLogscaleExchangeableGaussianSlab(
-        [1, 2], 3, 1.0, 0.2)
+    shared = ZeroMeanExchangeableGaussianSlab([1, 2], 1.0, 0.2)
     shared_state = StickyPDMPState(0.0,
         SkeletonPoint(zeros(3), zeros(3)),
         BitVector([false, false, true]), [1.0, 3.0, 0.0])
     shared_mask = BitVector([true, true, false])
     shared_flow = BouncyParticle(3, 0.0)
     shared_clock = default_aggregate_unstick_clock(shared, prior, shared_flow)
-    @test shared_clock isa PDMPSamplers.ChebyshevResidualAggregateClock
+    @test shared_clock isa PDMPSamplers.LinearGaussianAggregateClock
     λ1 = PDMPSamplers.rate(shared_clock, shared_flow, shared_state, 0.2,
         shared_mask)
     shared_state.stored_velocity[2] = 6.0

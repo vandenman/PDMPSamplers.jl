@@ -207,36 +207,13 @@ function sample_label(rng::Random.AbstractRNG, clock::SummedRateClock, flow::Con
     return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
 end
 
-_fallback_clock(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}) = clock.fallback
-_summed_fallback_clock(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}) = clock.fallback
-
-rate(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
-    rate(_fallback_clock(clock), flow, state, τ, can_stick)
-
-cumulative_hazard(clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
-    cumulative_hazard(_fallback_clock(clock), flow, state, t0, t1, can_stick)
-
-sample_time(rng::Random.AbstractRNG, clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
-    _sample_time_exact_fallback(rng, clock, flow, state, horizon, can_stick)
-
-sample_label(rng::Random.AbstractRNG, clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, can_stick::BitVector) =
-    sample_label(rng, _fallback_clock(clock), flow, state, can_stick)
-
-function _sample_time_exact_fallback(rng::Random.AbstractRNG, clock::Union{ChebyshevResidualAggregateClock,FourierResidualAggregateClock},
-                                     flow::ContinuousDynamics, state::StickyPDMPState, horizon::Real, can_stick::BitVector)
-    if !clock.allow_slow_fallback
-        throw(ArgumentError(
-            "$(nameof(typeof(clock))) has no certified residual sampler for provider " *
-            "$(nameof(typeof(clock.slab_provider))) and flow $(nameof(typeof(flow))). " *
-            "Use a provider/flow pair with a concrete certified method or construct the clock with allow_slow_fallback=true."
-        ))
-    end
-    clock.diagnostics.fallbacks += 1
-    clock.diagnostics.fallback_calls += 1
-    clock.diagnostics.last_fallback_provider = nameof(typeof(clock.slab_provider))
-    clock.diagnostics.last_fallback_dynamics = nameof(typeof(flow))
-    return sample_time(rng, clock.fallback, flow, state, horizon, can_stick)
+# A label at elapsed time τ: move a copy of the state forward, then sample.
+function sample_label(rng::Random.AbstractRNG, clock::AbstractAggregateUnstickClock, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector)
+    state_at = _clock_state_at(state, flow, τ)
+    return sample_label(rng, clock, flow, state_at, can_stick)
 end
+
+_summed_fallback_clock(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}) = clock.fallback
 
 rate(clock::Union{LinearGaussianAggregateClock,ExponentialSumAggregateClock}, flow::ContinuousDynamics, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
     rate(_summed_fallback_clock(clock), flow, state, τ, can_stick)

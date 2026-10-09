@@ -319,12 +319,6 @@ function _write_progress_sidecar!(phase::Symbol, state::AbstractPDMPState,
     else
         string(getproperty(getproperty(flow, :metric), :generation))
     end
-    capability = if isnothing(clock) || isnothing(flow)
-        "missing"
-    else
-        try string(residual_envelope_capability(clock, flow, max(Float64(state.t[]), 0.0) + 1.0))
-        catch; "unavailable" end
-    end
     clock_diag = if !isnothing(clock)
         try thinning_diagnostics(clock) catch; nothing end
     else
@@ -376,7 +370,6 @@ function _write_progress_sidecar!(phase::Symbol, state::AbstractPDMPState,
         "metric_generation=" * metric_generation,
         "slab_provider_type=" * provider_type,
         "aggregate_clock_type=" * clock_type,
-        "residual_envelope_capability=" * capability,
         "aggregate_fallback_calls=" * diag_value(:fallback_calls, "0"),
         "aggregate_generic_fallbacks=" * diag_value(:fallbacks, "0"),
         "aggregate_point_rate_evaluations=" * diag_value(:point_rate_evaluations, "0"),

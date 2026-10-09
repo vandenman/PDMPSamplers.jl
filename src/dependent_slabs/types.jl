@@ -47,22 +47,6 @@ linear-flow segment; state-dependent callback providers should use `NoSlabCache`
 abstract type AbstractSlabCacheStyle end
 
 """
-    ScalarLogscaleGaussianLineSegment
-
-Trajectory parameters used by the structured scalar residual clock for
-globally scaled exchangeable Gaussian slabs under linear flows.
-"""
-struct ScalarLogscaleGaussianLineSegment
-    a::Float64
-    b::Float64
-    s0::Float64
-    ell0::Float64
-    r::Float64
-    log_total_weight::Float64
-    horizon::Float64
-end
-
-"""
     NoSlabCache
 
 Cache trait for slab boundary providers whose active-face quantities cannot be

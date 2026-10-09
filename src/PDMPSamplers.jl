@@ -182,7 +182,6 @@ export
     CallbackGaussianSlab,
     ExchangeableGaussianSlab,
     ZeroMeanExchangeableGaussianSlab,
-    GlobalLogscaleExchangeableGaussianSlab,
     ArbitrarySlabBoundary,
     default_aggregate_unstick_clock,
     stickable_coordinates,

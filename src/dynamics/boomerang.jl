@@ -32,15 +32,10 @@ All Boomerang dynamics methods dispatch on this type.
 """
 const AnyBoomerang = Union{Boomerang, MutableBoomerang}
 
-default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
-                                model_prior::AbstractModelPrior,
-                                ::AnyBoomerang) =
-    FourierResidualAggregateClock(provider, model_prior; allow_slow_fallback=true)
-
-# Log-linear independent Gaussian slabs have harmonic log scales along every
-# Boomerang flight.  Route both independent and node-shared scale designs
-# through the certified Fourier clock; the generic three-argument fallback
-# would otherwise select ExponentialSumAggregateClock and then SummedRateClock.
+# Log-linear Gaussian scale slabs have harmonic log scales along every
+# Boomerang flight, so Boomerang-family flows use the certified harmonic clock;
+# the generic three-argument fallback would otherwise select
+# ExponentialSumAggregateClock and then SummedRateClock.
 default_aggregate_unstick_clock(provider::AbstractLogLinearIndependentGaussianSlab,
                                 model_prior::AbstractModelPrior,
                                 ::AnyBoomerang) =

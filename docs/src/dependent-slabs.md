@@ -3,8 +3,8 @@
 Dependent slab support is intended for sticky variable-selection samplers where the active coefficients have a joint Gaussian slab prior.
 Users should normally construct a model prior, a Gaussian slab prior, and an `AggregateSticky` strategy with a `GridThinningStrategy` inner clock.
 Choose the clock with `default_aggregate_unstick_clock(slab, model_prior, flow)`;
-the flow-aware form selects the Fourier residual implementation needed by
-Boomerang-family flows instead of the linear-flow Chebyshev clock.
+the flow-aware form selects the clock that matches the dynamics (see the table
+of clocks below).
 
 ## Support matrix
 
@@ -33,8 +33,7 @@ Two release laws are used:
   law of the flow. Its release rate uses the corresponding expected speed.
 
 For preconditioned Boomerang-family dynamics, log-linear Gaussian scale slabs
-use `HarmonicLogLinearAggregateClock`; the other residual clocks use the exact
-fallback.
+use `HarmonicLogLinearAggregateClock`; other slabs use the exact fallback.
 
 The supported aggregate clocks are:
 
@@ -43,18 +42,14 @@ The supported aggregate clocks are:
 | `SummedRateClock` | all supported dynamics/providers | Supported exact baseline; numerical integration is used for time-varying rates. |
 | `LinearGaussianAggregateClock` | linear dynamics with fixed-covariance Gaussian slabs | Accelerated; other supported dynamics use exact fallback. |
 | `ExponentialSumAggregateClock` | linear dynamics with log-linear independent Gaussian scales | Accelerated; other supported dynamics use exact fallback. |
-| `ChebyshevResidualAggregateClock` | `ZigZag`/`BouncyParticle` with global-logscale exchangeable slabs | Experimental certified finite-horizon envelope and exact analytic infinite-horizon sampler; all other combinations use exact fallback by default. |
-| `FourierResidualAggregateClock` | unpreconditioned Boomerang-family flows with fixed-covariance or global-logscale Gaussian slabs | Experimental certified acceleration on finite horizons. Infinite horizons, preconditioned flows, callback/state-dependent Gaussian slabs, and `ArbitrarySlabBoundary` use exact fallback. |
+| `HarmonicLogLinearAggregateClock` | Boomerang-family flows (also diagonally preconditioned) with log-linear Gaussian scale slabs | Certified piecewise-constant thinning bound on finite horizons; infinite horizons use the exact fallback. |
 
-Residual clocks default to `allow_slow_fallback=true`: every provider/dynamics
-combination supported by `SummedRateClock` therefore remains usable. Setting it
-to `false` is certified-only mode. A combination without a certified accelerated
-implementation then raises one intentional capability error naming the provider
-and dynamics; it never falls through to an internal dispatch error.
+Every accelerated clock falls back to the exact `SummedRateClock` for
+dynamics it has no specialized method for.
 
 The public, user-facing constructors are the prior and slab types such as `BernoulliModelPrior`, `BetaBernoulliModelPrior`, `ExchangeableModelSizePrior`,
 `DenseGaussianSlab`, `IndependentZeroMeanGaussianSlab`, `IndependentZeroMeanLogscaleGaussianSlab`, `ExchangeableGaussianSlab`,
-`ZeroMeanExchangeableGaussianSlab`, and `GlobalLogscaleExchangeableGaussianSlab`.
+`ZeroMeanExchangeableGaussianSlab`, and `LogLinearGaussianScaleSlab`.
 
 ## Complete example
 

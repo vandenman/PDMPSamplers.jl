@@ -252,49 +252,6 @@ function LogLinearGaussianScaleSlab(
         Vector{Int}(rowptr), Vector{Int}(colidx), Vector{Float64}(nzval))
 end
 
-"""
-    GlobalLogscaleExchangeableGaussianSlab(beta_indices, logscale_index, u0, v0; mean=0, logscale_offset=0)
-
-Exchangeable Gaussian slab with covariance
-`exp(2 * (logscale_offset + x[logscale_index])) * (u0 I + v0 11')`.
-This provider has structured scalar residual-clock support for linear flows.
-"""
-struct GlobalLogscaleExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
-    beta_indices::Vector{Int}
-    logscale_index::Int
-    mean::Float64
-    u::Float64
-    v::Float64
-    logscale_offset::Float64
-    function GlobalLogscaleExchangeableGaussianSlab(
-        beta_indices::AbstractVector{<:Integer},
-        logscale_index::Integer,
-        u0::Real,
-        v0::Real;
-        mean::Real=0.0,
-        logscale_offset::Real=0.0,
-    )
-        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
-        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-        logscale_index > 0 || throw(ArgumentError("logscale_index must be positive"))
-        Int(logscale_index) in Int.(beta_indices) &&
-            throw(ArgumentError("logscale_index must be disjoint from beta_indices"))
-        p = length(beta_indices)
-        u_f = Float64(u0)
-        v_f = Float64(v0)
-        mean_f = Float64(mean)
-        offset_f = Float64(logscale_offset)
-        isfinite(u_f) || throw(ArgumentError("u0 must be finite"))
-        isfinite(v_f) || throw(ArgumentError("v0 must be finite"))
-        isfinite(mean_f) || throw(ArgumentError("mean must be finite"))
-        isfinite(offset_f) || throw(ArgumentError("logscale_offset must be finite"))
-        u_f > 0 || throw(ArgumentError("u0 must be positive"))
-        u_f + p * v_f > 0 || throw(ArgumentError("u0 + p*v0 must be positive"))
-        new(Vector{Int}(beta_indices), Int(logscale_index), mean_f, u_f, v_f, offset_f)
-    end
-end
-
 Base.copy(provider::DenseGaussianSlab) = DenseGaussianSlab(copy(provider.mean), copy(provider.cov), copy(provider.beta_indices))
 Base.copy(provider::ExchangeableGaussianSlab) = ExchangeableGaussianSlab(copy(provider.beta_indices), provider.mean, provider.u, provider.v)
 Base.copy(provider::ZeroMeanExchangeableGaussianSlab) = ZeroMeanExchangeableGaussianSlab(copy(provider.beta_indices), provider.u, provider.v)
@@ -305,9 +262,6 @@ Base.copy(provider::LogLinearGaussianScaleSlab) =
     LogLinearGaussianScaleSlab(copy(provider.beta_indices), copy(provider.logscale_indices),
         copy(provider.log_base_scales), copy(provider.rowptr),
         copy(provider.colidx), copy(provider.nzval))
-Base.copy(provider::GlobalLogscaleExchangeableGaussianSlab) =
-    GlobalLogscaleExchangeableGaussianSlab(copy(provider.beta_indices), provider.logscale_index, provider.u, provider.v; mean=provider.mean, logscale_offset=provider.logscale_offset)
-
 """
     beta_indices(provider)
 
@@ -337,23 +291,11 @@ slab_cache_style(::AbstractExchangeableGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::IndependentZeroMeanGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::IndependentZeroMeanLogscaleGaussianSlab) = NoSlabCache()
 slab_cache_style(::LogLinearGaussianScaleSlab) = NoSlabCache()
-slab_cache_style(::GlobalLogscaleExchangeableGaussianSlab) = NoSlabCache()
 slab_cache_key(::DenseGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
 slab_cache_key(::AbstractExchangeableGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
 slab_cache_key(::IndependentZeroMeanGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
 slab_cache_key(::IndependentZeroMeanLogscaleGaussianSlab, ::AbstractVector, ::BitVector) = nothing
 slab_cache_key(::LogLinearGaussianScaleSlab, ::AbstractVector, ::BitVector) = nothing
-slab_cache_key(::GlobalLogscaleExchangeableGaussianSlab, ::AbstractVector, ::BitVector) = nothing
-
-"""
-    scalar_logscale_gaussian_line_segment(provider, model_prior, flow, state, can_stick, horizon)
-
-Return scalar segment parameters for structured globally scaled exchangeable
-Gaussian slabs. Methods are flow-specific and currently implemented with the
-aggregate sticky linear-flow code.
-"""
-function scalar_logscale_gaussian_line_segment end
-
 """
     gaussian_slab!(provider, mean_out, cov_out, x)
 
@@ -443,17 +385,6 @@ function gaussian_slab!(provider::LogLinearGaussianScaleSlab,
     fill!(cov_out, 0.0)
     @inbounds for j in 1:m
         cov_out[j, j] = exp(2 * _loglinear_log_scale(provider, x, j))
-    end
-    return nothing
-end
-
-function gaussian_slab!(provider::GlobalLogscaleExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
-    m = length(provider.beta_indices)
-    scale2 = exp(2 * (provider.logscale_offset + x[provider.logscale_index]))
-    fill!(mean_out, provider.mean)
-    fill!(cov_out, scale2 * provider.v)
-    @inbounds for i in 1:m
-        cov_out[i, i] = scale2 * (provider.u + provider.v)
     end
     return nothing
 end
@@ -722,33 +653,6 @@ function conditional_logdensity_zero(provider::LogLinearGaussianScaleSlab,
     return -0.5 * log2π - _loglinear_log_scale(provider, x, Int(j_beta))
 end
 
-function conditional_logdensity_zero(
-    provider::GlobalLogscaleExchangeableGaussianSlab,
-    x::AbstractVector,
-    active_beta::BitVector,
-    j_beta::Integer,
-)
-    indices = provider.beta_indices
-    1 <= j_beta <= length(indices) || throw(BoundsError(indices, j_beta))
-    length(active_beta) == length(indices) || throw(DimensionMismatch(
-        "active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
-    active_beta[j_beta] && throw(ArgumentError(
-        "conditional boundary density is defined for inactive coordinates; beta coordinate $j_beta is active"))
-
-    k = count(active_beta)
-    centered_sum = 0.0
-    @inbounds for j in eachindex(active_beta)
-        active_beta[j] && (centered_sum += x[indices[j]] - provider.mean)
-    end
-    denominator = provider.u + k * provider.v
-    conditional_mean = provider.mean + provider.v * centered_sum / denominator
-    base_variance = provider.u * (provider.u + (k + 1) * provider.v) /
-        denominator
-    log_scale = provider.logscale_offset + x[provider.logscale_index]
-    return _log_gaussian_zero_density(
-        0.5 * log(base_variance) + log_scale, conditional_mean)
-end
-
 """
     log_boundary_density_zero(provider, x, active_beta, j_beta)
 
@@ -976,41 +880,6 @@ function active_prior_grad!(provider::Union{
             out[indices[j]] = (x[indices[j]] - μ) * inv_u - common
         end
     end
-    return out
-end
-
-function active_prior_grad!(provider::GlobalLogscaleExchangeableGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
-    indices = beta_indices(provider)
-    length(out) == length(x) ||
-        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
-    length(active_beta) == length(indices) ||
-        throw(DimensionMismatch("active_beta length $(length(active_beta)) does not match beta dimension $(length(indices))"))
-    fill!(out, 0.0)
-    active_positions = _active_positions(active_beta, length(indices))
-    isempty(active_positions) && return out
-    full_required = max(maximum(indices), provider.logscale_index)
-    length(out) >= full_required ||
-        throw(DimensionMismatch("GlobalLogscaleExchangeableGaussianSlab active gradients require a full-state output of length at least $full_required"))
-    μ = provider.mean
-    k = length(active_positions)
-    scale_log = provider.logscale_offset + x[provider.logscale_index]
-    scale_inv2 = exp(-2scale_log)
-    denom = provider.u + k * provider.v
-    inv_base_diag = (provider.u + (k - 1) * provider.v) / (provider.u * denom)
-    inv_base_off = -provider.v / (provider.u * denom)
-    centered_sum = 0.0
-    @inbounds for j in active_positions
-        centered_sum += x[indices[j]] - μ
-    end
-    quad = 0.0
-    @inbounds for j in active_positions
-        centered = x[indices[j]] - μ
-        base_solved = inv_base_diag * centered + inv_base_off * (centered_sum - centered)
-        grad = scale_inv2 * base_solved
-        out[indices[j]] += grad
-        quad += centered * grad
-    end
-    out[provider.logscale_index] += k - quad
     return out
 end
 

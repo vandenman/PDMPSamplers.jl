@@ -615,15 +615,9 @@ end
 function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input, pd::PreconditionedDynamics)
     return ∂λ∂t(state, ∇U_xt, curvature_input, pd.dynamics)
 end
-function default_aggregate_unstick_clock(provider::GlobalLogscaleExchangeableGaussianSlab,
-                                         model_prior::AbstractModelPrior,
-                                         flow::PreconditionedDynamics)
-    return SummedRateClock(provider, model_prior)
-end
-
 # A diagonal preconditioner changes the invariant physical velocity law, but
 # movement is still delegated to the underlying Boomerang and hence remains
-# harmonic.  The certified Fourier clock uses the underlying Boomerang only
+# harmonic.  The certified harmonic clock uses the underlying Boomerang only
 # for those harmonic coefficients and the complete wrapper for boundary-clock
 # constants, so the metric is neither omitted nor applied twice.
 default_aggregate_unstick_clock(
