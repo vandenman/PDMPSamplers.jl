@@ -705,38 +705,12 @@ end
     return (n_cells_bounded, deterministic_area)::Tuple{Int,Float64}
 end
 
-const _omrf_dispatch_capture = Ref{Any}(nothing)
-const _omrf_extension_capture = Ref{Any}(nothing)
-const _omrf_event_fixture = Ref{Any}(nothing)
-const _omrf_dispatch_capture_enabled = Ref(false)
-const _omrf_event_fixture_enabled = Ref(false)
-const _omrf_budget_branch_capture_enabled = Ref(false)
-const _omrf_budget_branch_fixtures = Ref{Any}(Dict{Symbol,Any}())
-
 function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
     provider,
     model::PDMPModel{<:SubsampledControlVariate}, flow::ContinuousDynamics,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache,
     stats::AbstractStatisticCounter, max_horizon::Float64=Inf,
     include_refresh::Bool=true, max_horizon_event::Symbol=:horizon_hit)::GridEvent
-
-    if _omrf_event_fixture_enabled[] && _omrf_event_fixture[] === nothing
-        _omrf_event_fixture[] = deepcopy((rng=rng, model=model, flow=flow,
-            alg=alg, state=state, cache=cache, stats=stats,
-            max_horizon=max_horizon, include_refresh=include_refresh,
-            max_horizon_event=max_horizon_event))
-    end
-
-    if _omrf_dispatch_capture_enabled[] && _omrf_dispatch_capture[] === nothing
-        _omrf_dispatch_capture[] = (
-            signature=Tuple{typeof(rng), typeof(provider), typeof(model),
-                typeof(flow), typeof(alg), typeof(state), typeof(cache),
-                typeof(stats), Float64, Bool, Symbol},
-            provider=typeof(provider), counter=typeof(stats),
-            counter_tuple=stats isa MultiCounter ? typeof(stats.counters) : Nothing,
-            flow=typeof(flow), state=typeof(state), cache=typeof(cache),
-            grid_state=typeof(alg), curvature_bound=typeof(alg.curvature_bound))
-    end
 
     cv = model.grad
     default_return = alg.empty_gradient_meta
@@ -760,25 +734,10 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
             cv.envelope, state, flow, effective_horizon)
         cumulative_exp = Random.randexp(rng)
         modes = _grid_bound_modes(alg, state, flow, provider, stats)
-        if _omrf_dispatch_capture_enabled[] && _omrf_extension_capture[] === nothing
-            _omrf_extension_capture[] = Tuple{typeof(cv), typeof(alg),
-                typeof(state), typeof(flow), typeof(provider), typeof(modes),
-                typeof(stats), Float64, Float64, Int, Float64}
-        end
         n_cells_bounded = 0
         deterministic_area = 0.0
         _schedule_t0 = time_ns()
         _inc_counter_grid_schedule_builds(stats)
-        if _omrf_budget_branch_capture_enabled[]
-            fixtures = _omrf_budget_branch_fixtures[]
-            if !haskey(fixtures, :initial_extend)
-                fixtures[:initial_extend] = deepcopy((cv=cv, alg=alg,
-                    state=state, flow=flow, provider=provider, modes=modes,
-                    stats=stats, effective_horizon=effective_horizon,
-                    target_area=cumulative_exp, n_cells_bounded=0,
-                    deterministic_area=0.0))
-            end
-        end
         n_cells_bounded, deterministic_area =
             _extend_subsampling_bound_to_budget!(cv, alg, state, flow,
                 provider, modes, stats, effective_horizon, cumulative_exp,
@@ -878,21 +837,6 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
 
             # Every valid rejection consumes one further exponential budget.
             cumulative_exp += Random.randexp(rng)
-            if _omrf_budget_branch_capture_enabled[]
-                branch = total_area(alg.subsampling_bound) <= cumulative_exp &&
-                    n_cells_bounded < _grid_cell_count(alg.pcb.t_grid,
-                        length(alg.pcb.Λ_vals), effective_horizon) ?
-                    :extend_cell : :covered_prefix
-                fixtures = _omrf_budget_branch_fixtures[]
-                if !haskey(fixtures, branch)
-                    fixtures[branch] = deepcopy((cv=cv, alg=alg, state=state,
-                        flow=flow, provider=provider, modes=modes, stats=stats,
-                        effective_horizon=effective_horizon,
-                        target_area=cumulative_exp,
-                        n_cells_bounded=n_cells_bounded,
-                        deterministic_area=deterministic_area))
-                end
-            end
             # Avoid the no-op helper call when the already certified prefix
             # covers the newly consumed exponential budget. Keep the exact
             # entry comparisons of the helper's while loop.
