@@ -736,14 +736,7 @@ function _pdmp_sample_single(
         phase_alg, phase_cache, trace_manager, stats, health, :main,
         adapter, progress, prg, tstop, T_float, progress_stops,
         boundary_policy, original_model, support_boundary_options)
-    main_loop_done_ns = time_ns()
     finish_trace_phase!(trace_manager, state, flow, :main)
-    trace_done_ns = time_ns()
-    if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
-        println(stderr, "OMRF_PROFILE main_loop_seconds=",
-            (main_loop_done_ns - main_phase_start) / 1e9,
-            " trace_finish_seconds=", (trace_done_ns - main_loop_done_ns) / 1e9)
-    end
     _set_counter_main_phase_elapsed_time(stats, (time_ns() - main_phase_start) / 1e9)
     _set_counter_main_phase_allocated_bytes(
         stats, Float64(Base.gc_bytes() - main_phase_allocated_start))
