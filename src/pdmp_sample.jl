@@ -76,9 +76,6 @@ Provided criteria take precedence over time arguments.
 
 Warmup runs first with adaptation enabled and writes to the warmup trace.
 Main sampling runs second with adaptation disabled and writes to the main trace.
-`warmup_model` and `warmup_algorithm` optionally select a different exact
-sampler for warmup; the adapted dynamics and terminal warmup state are then
-carried into a freshly initialized main sampler.
 Criteria are initialized per phase, so mutable criteria (e.g. `WallTimeCriterion`, ESS counters)
 are phase-local. An exception is `TotalWallTimeCriterion`, whose timer starts once globally
 and is not re-initialized per phase.
@@ -93,8 +90,6 @@ function pdmp_sample(
     n_chains::Int=1, threaded::Bool=false,
     progress::Bool=true,
     adapter::AbstractAdapter=NoAdaptation(),
-    warmup_model::Union{Nothing,PDMPModel}=nothing,
-    warmup_algorithm::Union{Nothing,PoissonTimeStrategy}=nothing,
     seed::SeedSpec=nothing,
     support_boundary_options::SupportBoundaryOptions=SupportBoundaryOptions(),
     statistic_counter=StatisticCounter,
@@ -104,26 +99,19 @@ function pdmp_sample(
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
     _validate_seed_spec(seed, n_chains)
-    isnothing(warmup_algorithm) ||
-        requires_sticky_state(warmup_algorithm) == requires_sticky_state(alg) ||
-        throw(ArgumentError(
-            "warmup_algorithm and alg must agree on whether sticky state is required"))
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
     if isone(n_chains)
         rng = _make_initial_rng(seed, n_chains)
         trace, stats, installed, retained_initial, endpoint = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, model,
-            statistic_counter, warmup_model, warmup_algorithm;
-            initial_free, initial_stored_velocity, trace_storage)
+            statistic_counter; initial_free, initial_stored_velocity, trace_storage)
         return PDMPChains([trace], [stats], [installed], [retained_initial], [endpoint])
     end
     models = [copy(model) for _ in 1:n_chains]
-    warmup_models = isnothing(warmup_model) ? nothing :
-        [copy(warmup_model) for _ in 1:n_chains]
     return pdmp_sample(ξ₀, flow, models, alg, t₀, T, t_warmup;
         stop, warmup_stop, threaded, progress, adapter, seed,
-        support_boundary_options, statistic_counter, warmup_models,
-        warmup_algorithm, initial_free, initial_stored_velocity, trace_storage)
+        support_boundary_options, statistic_counter, initial_free,
+        initial_stored_velocity, trace_storage)
 end
 
 _make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
@@ -141,8 +129,6 @@ function pdmp_sample(
     threaded::Bool=false,
     progress::Bool=true,
     adapter::AbstractAdapter=NoAdaptation(),
-    warmup_models::Union{Nothing,AbstractVector{<:PDMPModel}}=nothing,
-    warmup_algorithm::Union{Nothing,PoissonTimeStrategy}=nothing,
     seed::SeedSpec=nothing,
     support_boundary_options::SupportBoundaryOptions=SupportBoundaryOptions(),
     statistic_counter=StatisticCounter,
@@ -152,21 +138,14 @@ function pdmp_sample(
 )
     n_chains = length(models)
     n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
-    isnothing(warmup_models) || length(warmup_models) == n_chains ||
-        throw(DimensionMismatch("warmup_models must have the same length as models"))
     _validate_seed_spec(seed, n_chains)
-    isnothing(warmup_algorithm) ||
-        requires_sticky_state(warmup_algorithm) == requires_sticky_state(alg) ||
-        throw(ArgumentError(
-            "warmup_algorithm and alg must agree on whether sticky state is required"))
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
 
     if isone(n_chains)
         rng = _make_initial_rng(seed, n_chains)
         trace, stats, installed, retained_initial, endpoint = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, models[1],
-            statistic_counter, isnothing(warmup_models) ? nothing : warmup_models[1],
-            warmup_algorithm; initial_free, initial_stored_velocity,
+            statistic_counter; initial_free, initial_stored_velocity,
             trace_storage)
         return PDMPChains([trace], [stats], [installed], [retained_initial], [endpoint])
     end
@@ -182,9 +161,7 @@ function pdmp_sample(
                 warmup_stop_i = _maybe_copy_criterion(warmup_stop)
                 _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
                     false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
-                    statistic_counter, isnothing(warmup_models) ? nothing : warmup_models[i],
-                    isnothing(warmup_algorithm) ? nothing : _copy_algorithm(warmup_algorithm);
-                    initial_free, initial_stored_velocity,
+                    statistic_counter; initial_free, initial_stored_velocity,
                     trace_storage=_chain_trace_storage(trace_storage, i))
             end
         end
@@ -199,9 +176,7 @@ function pdmp_sample(
             warmup_stop_i = _maybe_copy_criterion(warmup_stop)
             _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
                 false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
-                statistic_counter, isnothing(warmup_models) ? nothing : warmup_models[i],
-                isnothing(warmup_algorithm) ? nothing : _copy_algorithm(warmup_algorithm);
-                initial_free, initial_stored_velocity,
+                statistic_counter; initial_free, initial_stored_velocity,
                 trace_storage=_chain_trace_storage(trace_storage, i))
         end
     end
@@ -675,9 +650,7 @@ function _pdmp_sample_single(
     progress::Bool, adapter::AbstractAdapter,
     stop::Union{StoppingCriterion,Nothing}, warmup_stop::Union{StoppingCriterion,Nothing},
     support_boundary_options::SupportBoundaryOptions, original_model::PDMPModel,
-    statistic_counter,
-    warmup_model::Union{Nothing,PDMPModel}=nothing,
-    warmup_algorithm::Union{Nothing,PoissonTimeStrategy}=nothing;
+    statistic_counter;
     initial_free::Union{Nothing,AbstractVector{Bool}}=nothing,
     initial_stored_velocity::Union{Nothing,AbstractVector{<:Real}}=nothing,
     trace_storage::Union{Nothing,StreamingTraceStorage}=nothing,
@@ -709,13 +682,10 @@ function _pdmp_sample_single(
     t_start = time_ns()
     initialization_allocated_start = Base.gc_bytes()
 
-    initialization_model = isnothing(warmup_model) ? model : warmup_model
-    initialization_algorithm = isnothing(warmup_algorithm) ? alg : warmup_algorithm
     state, phase_model, phase_alg, phase_cache, stats = initialize_state(
-        rng, flow, initialization_model, initialization_algorithm, t₀, ξ₀;
+        rng, flow, model, alg, t₀, ξ₀;
         statistic_counter, initial_free, initial_stored_velocity)
     installed_initial_state = PDMPTerminalState(state, flow)
-    main_model = isnothing(warmup_model) ? phase_model : with_stats(model, stats)
 
     validate_state(state, flow, "at initialization")
 
@@ -725,11 +695,10 @@ function _pdmp_sample_single(
         TraceManager(state, flow, alg, t_warmup_abs, trace_storage)
     health = HealthMonitor()
     # Adapt through the statistics-wrapped gradient that actually drives the
-    # warmup phase.  This is still the full gradient for a separate full-data
-    # warmup, but for an ordinary subsampled warmup it is the authoritative
-    # live CV whose envelope was copied by `with_stats`.  Passing the
-    # unwrapped construction-time CV here lets anchor callbacks update shared
-    # providers while leaving the live phase envelope stale.
+    # warmup phase. For a subsampled warmup it is the authoritative live CV
+    # whose envelope was copied by `with_stats`. Passing the unwrapped
+    # construction-time CV here lets anchor callbacks update shared providers
+    # while leaving the live phase envelope stale.
     warmup_grad = phase_model.grad
     adapter = adapter isa NoAdaptation ? default_warmup_adapter(
         flow, warmup_grad, t_warmup, t₀;
@@ -757,7 +726,7 @@ function _pdmp_sample_single(
         warmup_phase_start = time_ns()
         _run_phase_for_policy!(rng, warmup_criterion, state, phase_model, flow, phase_alg, phase_cache,
             trace_manager, stats, health, :warmup, adapter, progress, prg, tstop, T_float,
-            progress_stops, boundary_policy, initialization_model, support_boundary_options;
+            progress_stops, boundary_policy, model, support_boundary_options;
             adaptation_grad=warmup_grad)
         finish_trace_phase!(trace_manager, state, flow, :warmup)
         _set_counter_warmup_phase_elapsed_time(
@@ -781,21 +750,7 @@ function _pdmp_sample_single(
         stats, (time_ns() - adapter_finish_start) / 1e9)
     main_sampler_initialization_start = time_ns()
     main_sampler_initialization_allocated_start = Base.gc_bytes()
-    switching_phase_sampler = !isnothing(warmup_model) || !isnothing(warmup_algorithm)
-    if !switching_phase_sampler
-        did_adapt && _reset_inner_grid!(phase_alg)
-    else
-        # The retained model was previously statistics-wrapped before the
-        # separate warmup model finished.  For mutable subsampling reference
-        # providers that copied the pre-warmup envelope, leaving that stale
-        # wrapper in place made the first retained events disagree with the
-        # authoritative oracle/anchor manager.  Reconstruct it only after all
-        # warmup-finalization callbacks have completed.
-        main_model = with_stats(model, stats)
-        phase_cache = add_gradient_to_cache(initialize_cache(
-            rng, flow, main_model.grad, alg, state.t[], state.ξ), state.ξ)
-        phase_alg = _to_internal(alg, rng, flow, main_model, state, phase_cache, stats)
-    end
+    did_adapt && _reset_inner_grid!(phase_alg)
     _set_counter_main_sampler_initialization_elapsed_time(
         stats, (time_ns() - main_sampler_initialization_start) / 1e9)
     _set_counter_main_sampler_initialization_allocated_bytes(stats,
@@ -811,7 +766,7 @@ function _pdmp_sample_single(
     main_phase_start = time_ns()
     main_phase_allocated_start = Base.gc_bytes()
     _run_optional_hook!(_main_phase_profile_start_hook[])
-    _run_phase_for_policy!(rng, stop_criterion, state, main_model, flow,
+    _run_phase_for_policy!(rng, stop_criterion, state, phase_model, flow,
         phase_alg, phase_cache, trace_manager, stats, health, :main,
         adapter, progress, prg, tstop, T_float, progress_stops,
         boundary_policy, original_model, support_boundary_options)
