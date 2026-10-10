@@ -35,7 +35,7 @@ _vp_clock_alloc(flow, state) = @allocated PDMPSamplers._boundary_proposal_clock_
         @test state.stored_velocity[1] == incoming
         @test state.ξ.θ[2] == before_other
 
-        if PDMPSamplers._underlying_flow(flow) isa PDMPSamplers.AnyBoomerang
+        if PDMPSamplers.underlying_flow(flow) isa PDMPSamplers.AnyBoomerang
             PDMPSamplers.move_forward_time!(state, 0.73, flow)
             @test iszero(state.ξ.x[1]) && iszero(state.ξ.θ[1])
             @test state.stored_velocity[1] == incoming

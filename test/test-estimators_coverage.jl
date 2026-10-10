@@ -372,12 +372,12 @@ end
         end
     end
 
-    @testset "_underlying_flow dispatch" begin
+    @testset "underlying_flow dispatch" begin
         zz = ZigZag(3)
-        @test PDMPSamplers._underlying_flow(zz) === zz
+        @test PDMPSamplers.underlying_flow(zz) === zz
 
         precond_zz = PDMPSamplers.PreconditionedDynamics(PDMPSamplers.IdentityPreconditioner(), zz)
-        @test PDMPSamplers._underlying_flow(precond_zz) === zz
+        @test PDMPSamplers.underlying_flow(precond_zz) === zz
     end
 
     @testset "Quantile domain errors" begin

@@ -153,7 +153,7 @@ Uses closed-form formulas for common transforms on linear dynamics (ZigZag/BPS) 
 """
 function Statistics.mean(trace::AbstractPDMPTrace, transforms::AbstractVector{<:ParameterTransform})
     flow = trace.flow
-    base = _underlying_flow(flow)
+    base = underlying_flow(flow)
 
     iter = trace
     next = iterate(iter)
@@ -201,7 +201,7 @@ function Statistics.var(trace::AbstractPDMPTrace, transforms::AbstractVector{<:P
     μf = Statistics.mean(trace, transforms)
 
     flow = trace.flow
-    base = _underlying_flow(flow)
+    base = underlying_flow(flow)
 
     iter = trace
     next = iterate(iter)

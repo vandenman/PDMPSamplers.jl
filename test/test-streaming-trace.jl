@@ -64,8 +64,8 @@
         before = (state.t[], copy(state.ξ.x), copy(state.ξ.θ),
             copy(state.free), copy(state.stored_velocity))
         PDMPSamplers._stream_record_full!(trace, state,
-            PDMPSamplers._STREAM_EVENT_REFRESH)
-        PDMPSamplers._flush_streaming_trace!(trace)
+            PDMPSamplers.STREAM_EVENT_REFRESH)
+        PDMPSamplers.flush_streaming_trace!(trace)
         after = (state.t[], copy(state.ξ.x), copy(state.ξ.θ),
             copy(state.free), copy(state.stored_velocity))
         @test before == after
@@ -101,9 +101,9 @@
         state.free[2] = true
         PDMPSamplers._record_streaming_event!(trace, state, flow, 2, :sticky)
         PDMPSamplers.finish_trace_phase!(trace, state, flow)
-        chunk = PDMPSamplers._load_streaming_chunk(only(trace.chunks))
-        @test chunk.kinds == [PDMPSamplers._STREAM_EVENT_FREEZE,
-            PDMPSamplers._STREAM_EVENT_RELEASE]
+        chunk = PDMPSamplers.load_streaming_chunk(only(trace.chunks))
+        @test chunk.kinds == [PDMPSamplers.STREAM_EVENT_FREEZE,
+            PDMPSamplers.STREAM_EVENT_RELEASE]
         @test chunk.coordinates == Int32[2, 2]
         @test size(chunk.full_effective_velocities, 2) == 0
     end
@@ -152,13 +152,13 @@
                 nothing, :reflect)
         end
         @test length(trace.chunks) == 1
-        @test PDMPSamplers._load_streaming_chunk(only(trace.chunks)).times ==
+        @test PDMPSamplers.load_streaming_chunk(only(trace.chunks)).times ==
             [0.1, 0.2]
         @test isempty(filter(path -> occursin(".tmp.", path),
             readdir(dirname(only(trace.chunks).path); join=true)))
         PDMPSamplers.finish_trace_phase!(trace, state, flow)
         terminal = PDMPSamplers.PDMPTerminalState(state, flow)
-        restored = PDMPSamplers._restore_streaming_trace(
+        restored = PDMPSamplers.restore_streaming_trace(
             [chunk.path for chunk in trace.chunks], flow, initial, terminal;
             physical_events=trace.physical_events,
             computational_boundaries=trace.computational_boundaries,
@@ -179,7 +179,7 @@
             push!(copied_paths, path)
         end
         rm(last(copied_paths))
-        @test_throws ArgumentError PDMPSamplers._restore_streaming_trace(
+        @test_throws ArgumentError PDMPSamplers.restore_streaming_trace(
             copied, length(copied_paths), flow, initial, terminal;
             physical_events=trace.physical_events,
             computational_boundaries=trace.computational_boundaries,
@@ -188,7 +188,7 @@
         open(last(copied_paths), "r+") do io
             truncate(io, max(1, filesize(last(copied_paths)) - 7))
         end
-        @test_throws EOFError PDMPSamplers._restore_streaming_trace(
+        @test_throws EOFError PDMPSamplers.restore_streaming_trace(
             copied, length(copied_paths), flow, initial, terminal;
             physical_events=trace.physical_events,
             computational_boundaries=trace.computational_boundaries,
@@ -233,7 +233,7 @@
         PDMPSamplers.finish_trace_phase!(trace, state, flow)
         terminal = PDMPSamplers.PDMPTerminalState(state, flow)
         @test length(trace.chunks) >= 2
-        restored = PDMPSamplers._restore_streaming_trace(trace.directory,
+        restored = PDMPSamplers.restore_streaming_trace(trace.directory,
             length(trace.chunks), flow, initial, terminal;
             physical_events=trace.physical_events,
             computational_boundaries=trace.computational_boundaries,

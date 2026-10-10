@@ -8,14 +8,14 @@ const SeedSpec = Union{
 
 function pdmp_sample(d::Integer, args...; seed::SeedSpec=nothing, kwargs...)
     n_chains = _infer_n_chains(args, kwargs)
-    x₀ = randn(_make_initial_rng(seed, n_chains), d)
+    x₀ = randn(make_initial_rng(seed, n_chains), d)
     return pdmp_sample(x₀, args...; seed, kwargs...)
 end
 
 pdmp_sample(x₀::AbstractVector, θ₀::AbstractVector, flow::ContinuousDynamics, args...; kwargs...) = pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; kwargs...)
 function pdmp_sample(x₀::AbstractVector, flow::ContinuousDynamics, args...; seed::SeedSpec=nothing, kwargs...)
     n_chains = _infer_n_chains(args, kwargs)
-    θ₀ = initialize_velocity(_make_initial_rng(seed, n_chains), flow, length(x₀))
+    θ₀ = initialize_velocity(make_initial_rng(seed, n_chains), flow, length(x₀))
     return pdmp_sample(SkeletonPoint(x₀, θ₀), flow, args...; seed, kwargs...)
 end
 
@@ -46,7 +46,14 @@ function _validate_seed_spec(rngs::AbstractVector{<:Random.AbstractRNG}, n_chain
     return nothing
 end
 
-function _make_initial_rng(seed::SeedSpec, n_chains::Int)
+"""
+    make_initial_rng(seed, n_chains::Int) -> AbstractRNG
+
+Return the random number generator `pdmp_sample` uses for the first chain
+given the same `seed` and `n_chains`, so callers can initialize a state with
+the draws the sampler would make. Part of the extension interface.
+"""
+function make_initial_rng(seed::SeedSpec, n_chains::Int)
     _validate_seed_spec(seed, n_chains)
     if seed isa Nothing
         return _make_rng(seed)
@@ -101,7 +108,7 @@ function pdmp_sample(
     _validate_seed_spec(seed, n_chains)
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
     if isone(n_chains)
-        rng = _make_initial_rng(seed, n_chains)
+        rng = make_initial_rng(seed, n_chains)
         trace, stats, installed, retained_initial, endpoint = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, model,
             statistic_counter; initial_free, initial_stored_velocity, trace_storage)
@@ -142,7 +149,7 @@ function pdmp_sample(
     support_boundary_options = _validate_support_boundary_options(support_boundary_options)
 
     if isone(n_chains)
-        rng = _make_initial_rng(seed, n_chains)
+        rng = make_initial_rng(seed, n_chains)
         trace, stats, installed, retained_initial, endpoint = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, models[1],
             statistic_counter; initial_free, initial_stored_velocity,
@@ -213,6 +220,13 @@ _copy_adapter(adapter::AbstractAdapter) = deepcopy(adapter)
 _adaptation_can_stick(::PoissonTimeStrategy) = nothing
 _adaptation_can_stick(alg::Union{Sticky,AggregateSticky}) = alg.can_stick
 
+"""
+    initialize_flow_state!(state, flow)
+
+Bring flow-specific parts of a freshly built `state` in line with `flow`
+(for example the dense preconditioned Zig-Zag velocity). Call it after
+constructing a state by hand. Part of the extension interface.
+"""
 initialize_flow_state!(::AbstractPDMPState, ::ContinuousDynamics) = nothing
 
 function Base.copy(model::PDMPModel)

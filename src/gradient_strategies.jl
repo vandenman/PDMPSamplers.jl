@@ -24,6 +24,14 @@ underestimate after proposals have been drawn.
 """
 deterministic_rate_cell_bound(provider, state::AbstractPDMPState,
     flow::ContinuousDynamics, left::Real, right::Real) = nothing
+
+"""
+    has_direct_deterministic_rate_cell_bound(provider) -> Bool
+
+Whether `provider` implements [`deterministic_rate_cell_bound`](@ref). A
+provider that does returns `true`, so GridThinning installs the direct cell
+certificate. Part of the extension interface.
+"""
 has_direct_deterministic_rate_cell_bound(provider) = false
 
 # Direct deterministic certificates belong to the gradient/target, not to the
@@ -162,15 +170,23 @@ end
 _stored_subsampling_anchor(anchor::Vector{Float64}) = anchor
 _stored_subsampling_anchor(anchor::AbstractVector) = collect(Float64, anchor)
 
-_trajectory_scale_anchor(::Any) = nothing
-_trajectory_scale_anchor(scales::TrajectoryComponentScales) = scales.anchor
-_trajectory_scale_anchor(scales::DampedHCVComponentScales) = scales.anchor
-_trajectory_scale_anchor(scales::CertifiedAffineComponentScales) =
-    _trajectory_scale_anchor(scales.callback)
-_trajectory_scale_anchor(envelope::AbstractResidualEnvelope) =
-    _trajectory_scale_anchor(envelope.component_scales!)
+"""
+    trajectory_scale_anchor(envelope_or_scales) -> Union{Nothing,Vector{Float64}}
+
+Return the anchor position that the component scales of a residual envelope
+are expanded around, or `nothing` if they have none. Subsampling providers
+extend it for their own component-scale callbacks. Part of the extension
+interface.
+"""
+trajectory_scale_anchor(::Any) = nothing
+trajectory_scale_anchor(scales::TrajectoryComponentScales) = scales.anchor
+trajectory_scale_anchor(scales::DampedHCVComponentScales) = scales.anchor
+trajectory_scale_anchor(scales::CertifiedAffineComponentScales) =
+    trajectory_scale_anchor(scales.callback)
+trajectory_scale_anchor(envelope::AbstractResidualEnvelope) =
+    trajectory_scale_anchor(envelope.component_scales!)
 function _subsampling_anchor_owner(envelope::AbstractResidualEnvelope, fallback)
-    trajectory_anchor = _trajectory_scale_anchor(envelope)
+    trajectory_anchor = trajectory_scale_anchor(envelope)
     return trajectory_anchor === nothing ? fallback : trajectory_anchor
 end
 
@@ -279,7 +295,7 @@ function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
     N = n_observations(envelope)
     1 <= m <= N || throw(ArgumentError("minibatch size m must lie in 1:N"))
     requested_anchor = collect(Float64, anchor)
-    trajectory_anchor = _trajectory_scale_anchor(envelope)
+    trajectory_anchor = trajectory_scale_anchor(envelope)
     if trajectory_anchor !== nothing
         trajectory_anchor == requested_anchor || throw(ArgumentError(
             "TrajectoryResidualEnvelope and SubsampledControlVariate anchors must match"))
@@ -293,7 +309,7 @@ function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
 end
 
 function _validate_subsampling_anchor(envelope::AbstractResidualEnvelope, anchor)
-    trajectory_anchor = _trajectory_scale_anchor(envelope)
+    trajectory_anchor = trajectory_scale_anchor(envelope)
     trajectory_anchor === nothing || trajectory_anchor == anchor || throw(ArgumentError(
         "subsampling residual envelope does not match the active anchor"))
     return nothing
@@ -310,6 +326,12 @@ end
 _validated_refreshed_envelope(cv::SubsampledControlVariate, value, requested) = throw(ArgumentError(
     "anchor-refresh provider must return an AbstractResidualEnvelope"))
 
+"""
+    refresh_anchor_owned!(cv::SubsampledControlVariate, anchor::Vector{Float64})
+
+Like `refresh_anchor!`, but `cv` keeps `anchor` itself instead of a copy, so
+the caller must not modify it afterwards. Part of the extension interface.
+"""
 function refresh_anchor_owned!(cv::SubsampledControlVariate,
         requested::Vector{Float64})
     callback = cv.refresh_anchor_callback!
@@ -352,6 +374,16 @@ function Base.copy(cv::SubsampledControlVariate)
         refresh_anchor_callback! = _copy_callable(cv.refresh_anchor_callback!))
 end
 
+"""
+    component_scales!(out, envelope, state, flow, t)
+    component_cell_scales!(out, envelope, state, flow, left, right)
+
+Write the residual scale of each envelope component into `out`: at elapsed
+time `t` along the trajectory from `state`, or as an upper bound over the
+closed cell `[left, right]`. The scales must be finite and nonnegative.
+Envelope types with their own representation extend these. Part of the
+extension interface.
+"""
 function component_scales!(out, envelope::AbstractResidualEnvelope, state, flow, t)
     envelope.component_scales!(out, state, flow, t)
     return _validate_component_scales(out, envelope.totals, "component")
@@ -368,7 +400,7 @@ end
 component_scales!(out, envelope::AbstractResidualEnvelope, state, t) =
     component_scales!(out, envelope, state, nothing, t)
 
-function component_cell_scales!(out, envelope::AbstractResidualEnvelope,
+@doc (@doc component_scales!) function component_cell_scales!(out, envelope::AbstractResidualEnvelope,
         state, flow, left, right)
     callback = envelope.component_cell_scales!
     if callback === nothing
@@ -410,6 +442,13 @@ end
 residual_affine_cell_bound(::AbstractResidualEnvelope, state, flow, left, right) =
     nothing
 
+"""
+    total_residual_bound(envelope, state, flow, t) -> Float64
+
+Return the total residual bound `B` at elapsed time `t`, the sum over
+components of scale times mass, and store the cumulative masses that
+[`draw_component`](@ref) samples from. Part of the extension interface.
+"""
 function total_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t)
     scales = component_scales!(envelope.scales, envelope, state, flow, t)
     cumulative = 0.0
@@ -423,13 +462,19 @@ end
 total_residual_bound(envelope::AbstractResidualEnvelope, state, t) =
     total_residual_bound(envelope, state, nothing, t)
 
-# Providers with a compact aggregate formula may specialize this hook to
-# avoid materializing all component masses for proposals rejected by the
-# pointwise aggregate screen. Before subset drawing they must then specialize
-# `prepare_residual_sampling!` to populate `scales` and `cumulative_masses`.
+"""
+    screening_residual_bound(envelope, state, flow, t) -> Float64
+    prepare_residual_sampling!(envelope, state, flow, t)
+
+`screening_residual_bound` returns the total residual bound used to screen a
+proposal; by default it is [`total_residual_bound`](@ref). Envelopes with a
+compact aggregate formula can return it without computing every component
+mass, and must then extend `prepare_residual_sampling!` to fill `scales` and
+`cumulative_masses` before a subset is drawn. Part of the extension interface.
+"""
 screening_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t) =
     total_residual_bound(envelope, state, flow, t)
-prepare_residual_sampling!(::AbstractResidualEnvelope, state, flow, t) = nothing
+@doc (@doc screening_residual_bound) prepare_residual_sampling!(::AbstractResidualEnvelope, state, flow, t) = nothing
 
 # Providers may return a generation token after pointwise screening and
 # consume it when candidate evaluation is for exactly that screened state.
@@ -441,9 +486,17 @@ residual_sampling_generation(envelope::AbstractResidualEnvelope, state) =
 reuse_screened_residual_sampling!(::AbstractResidualEnvelope, state, flow, t,
     ::Any) = false
 
+"""
+    n_observations(envelope) -> Int
+    observation_residual_bound(envelope, observation) -> Float64
+
+The number of observations `N` an envelope covers, and the residual bound of
+one observation under the current component scales. Part of the extension
+interface.
+"""
 n_observations(envelope::SeparableResidualEnvelope) = size(envelope.weights, 2)
 
-function observation_residual_bound(envelope::SeparableResidualEnvelope,
+@doc (@doc n_observations) function observation_residual_bound(envelope::SeparableResidualEnvelope,
         observation::Integer)
     result = 0.0
     @inbounds for component in axes(envelope.weights, 1)
@@ -461,9 +514,18 @@ function subsampling_candidate_rate!(oracle, state, gradient, residual,
     return λ(state, gradient, flow)
 end
 
-"""Internal observation hook for proposal-weighted subsampling diagnostics."""
+"""
+    record_subsampling_proposal!(oracle, D, B, subset_bound, deterministic_rate,
+        residual_rate, rate, accepted)
+    record_subsampling_mark_source!(oracle, residual_source::Bool)
+
+Observation hooks for subsampling diagnostics: called after each evaluated
+proposal, and after each subset draw with whether the subset came from the
+residual part of the mixture. They do nothing by default. Part of the
+extension interface.
+"""
 record_subsampling_proposal!(oracle, args...) = nothing
-record_subsampling_mark_source!(oracle, residual_source::Bool) = nothing
+@doc (@doc record_subsampling_proposal!) record_subsampling_mark_source!(oracle, residual_source::Bool) = nothing
 
 """Invalidate oracle workspaces before a newly selected subsampling mark."""
 begin_subsampling_mark!(oracle) = nothing
@@ -484,7 +546,7 @@ subsampling_deferred_candidate_rate(
 
 """Internal hook for cheaply tightening a sampled subset's event-rate bound."""
 subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
-    _signed_subset_bound(state, gradient, flow, D, M)
+    signed_subset_bound(state, gradient, flow, D, M)
 
 """Internal pre-gradient hook for tightening a sampled residual bound."""
 subsampling_residual_subset_bound(oracle, state, flow, D, M, subset, scale) = M
@@ -508,6 +570,13 @@ function subsampling_selected_residual!(oracle, out, state, subset, anchor)
     return out
 end
 
+"""
+    deterministic_gradient!(out, cv::SubsampledControlVariate, x)
+    deterministic_gradient!(out, cv::SubsampledControlVariate, state, flow)
+
+Write the deterministic part of the control-variate gradient (the anchor
+term, without any residual) into `out`. Part of the extension interface.
+"""
 deterministic_gradient!(out, cv::SubsampledControlVariate, x) = cv.deterministic_gradient!(out, x)
 function deterministic_gradient!(out, cv::SubsampledControlVariate, state, flow)
     deterministic_gradient!(out, cv, state.ξ.x)

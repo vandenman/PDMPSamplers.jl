@@ -53,8 +53,15 @@ function Statistics.cor(trace::AbstractPDMPTrace)
 end
 
 
-_underlying_flow(flow::ContinuousDynamics) = flow
-_underlying_flow(flow::PreconditionedDynamics) = flow.dynamics
+"""
+    underlying_flow(flow) -> ContinuousDynamics
+
+Return the dynamics that move the state: `flow.dynamics` for a
+`PreconditionedDynamics`, and `flow` itself otherwise. Part of the extension
+interface.
+"""
+underlying_flow(flow::ContinuousDynamics) = flow
+underlying_flow(flow::PreconditionedDynamics) = flow.dynamics
 
 """
     cdf(trace::AbstractPDMPTrace, q::Real; coordinate::Integer)
@@ -66,7 +73,7 @@ Returns the fraction of total trajectory time spent with `x_j(t) ≤ q`.
 """
 function cdf(trace::PDMPTrace, q::Real; coordinate::Integer)
     flow = trace.flow
-    base = _underlying_flow(flow)
+    base = underlying_flow(flow)
     j = coordinate
     n = length(trace)
     n < 2 && error("Cannot compute CDF on a trace with fewer than 2 events")
@@ -117,7 +124,7 @@ end
 
 function cdf(trace::StreamingPDMPTrace, q::Real; coordinate::Integer)
     total_below = Ref(0.0)
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     _foreach_streaming_segment(trace) do time0, time1, x0, x1,
             velocity0, velocity1, free
         elapsed = time1 - time0
@@ -137,7 +144,7 @@ end
 
 function _trace_coordinate_bounds(trace::PDMPTrace, j::Integer)
     lo, hi = Inf, -Inf
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     is_boom = base isa AnyBoomerang
 
     @inbounds for k in 1:length(trace)
@@ -157,7 +164,7 @@ end
 
 function _trace_coordinate_bounds(trace::FactorizedTrace, j::Integer)
     haskey(trace.bounds_cache, j) && return trace.bounds_cache[j]
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     if base isa AnyBoomerang
         bounds = _trace_coordinate_bounds(PDMPTrace(trace), j)
         trace.bounds_cache[j] = bounds
@@ -192,7 +199,7 @@ end
 
 function _trace_coordinate_bounds(trace::StreamingPDMPTrace, j::Integer)
     bounds = Ref((Inf, -Inf))
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     _foreach_streaming_segment(trace) do time0, time1, x0, x1,
             velocity0, velocity1, free
         lo, hi = bounds[]
@@ -412,7 +419,7 @@ end
 
 function Statistics.quantile(trace::AbstractPDMPTrace, p::AbstractVector{<:Real}; coordinate::Integer)
     all(x -> 0 < x < 1, p) || throw(DomainError(p, "All quantile probabilities must be in (0, 1)"))
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     if base isa AnyBoomerang
         return _quantile_boomerang_vector(trace, p, coordinate)
     end
@@ -443,7 +450,7 @@ Dispatches on the underlying flow type:
   The bracket `[lo, hi]` is the tightest possible range from `_trace_coordinate_bounds`.
 """
 function _quantile_scalar(trace::AbstractPDMPTrace, p::Real, coordinate::Integer)
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     if base isa AnyBoomerang
         lo, hi = _trace_coordinate_bounds(trace, coordinate)
         segments, total_time, μj = _precompute_boomerang_segments(trace, coordinate)
@@ -484,7 +491,7 @@ function _precompute_boomerang_segments(trace::FactorizedTrace, j::Integer)
 end
 
 function _precompute_boomerang_segments(trace::PDMPTrace, j::Integer)
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     μj = Float64(base.μ[j])
     n = length(trace)
     segments = Vector{Tuple{Float64, Float64, Float64, Bool}}(undef, n - 1)
@@ -516,7 +523,7 @@ function _cdf_boomerang_precomputed(
     μj::Float64,
     q::Float64,
 )
-    base = _underlying_flow(flow)
+    base = underlying_flow(flow)
     total_below = 0.0
     @inbounds for (x0j, θ0j, τ, free) in segments
         total_below += free ?
@@ -757,7 +764,7 @@ function ess(trace::StreamingPDMPTrace, means::AbstractVector,
             right <= left && (right = time1)
             end_x = copy(segment_x)
             end_velocity = copy(segment_velocity)
-            _stream_move!(end_x, end_velocity, free, right - left,
+            stream_move!(end_x, end_velocity, free, right - left,
                 trace.flow)
             _integrate_segment!(view(batch_integrals, batch, :),
                 Statistics.mean, trace.flow, segment_x, end_x,
@@ -778,8 +785,8 @@ function ess(trace::StreamingPDMPTrace, means::AbstractVector,
 end
 
 function _move_ess_point!(ξ::SkeletonPoint, τ::Real, flow::ContinuousDynamics, free)
-    if free !== nothing && _underlying_flow(flow) isa AnyBoomerang
-        move_forward_time!(ξ, τ, _underlying_flow(flow), free)
+    if free !== nothing && underlying_flow(flow) isa AnyBoomerang
+        move_forward_time!(ξ, τ, underlying_flow(flow), free)
     else
         move_forward_time!(ξ, τ, flow)
     end

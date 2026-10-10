@@ -196,6 +196,12 @@ function PDMPTrace(trace::FactorizedTrace)
     PDMPTrace(times, positions, velocities, trace.flow)
 end
 
+"""
+    compact(trace) -> AbstractPDMPTrace
+
+Return `trace` with its growable storage converted to plain matrices; traces
+that are already compact are returned as they are.
+"""
 function compact(trace::PDMPTrace{T, U, <:GrowableMatrix}) where {T, U}
     masks = trace.free_masks === nothing ? nothing : Matrix(trace.free_masks)
     PDMPTrace(trace.times, Matrix(trace.positions), Matrix(trace.velocities), trace.flow, masks)
@@ -322,12 +328,24 @@ StreamingOnlineSummaries(d::Integer, storage::StreamingTraceStorage) =
         storage.online_grid_spacing)
 
 const _STREAM_TRACE_MAGIC = UInt8[0x50, 0x44, 0x4d, 0x50, 0x54, 0x59, 0x50, 0x31]
-const _STREAM_EVENT_REFLECT_FULL = UInt8(1)
-const _STREAM_EVENT_REFLECT_COORD = UInt8(2)
-const _STREAM_EVENT_REFRESH = UInt8(3)
-const _STREAM_EVENT_FREEZE = UInt8(4)
-const _STREAM_EVENT_RELEASE = UInt8(5)
-const _STREAM_EVENT_DYNAMICS = UInt8(6)
+"""
+Event kinds stored in a streaming trace chunk, as returned in
+`load_streaming_chunk(chunk).kinds`:
+
+- `STREAM_EVENT_REFLECT_FULL`, `STREAM_EVENT_REFRESH` and
+  `STREAM_EVENT_DYNAMICS` replace every free velocity; the new effective
+  velocities are column `full_slots[event]` of `full_effective_velocities`.
+- `STREAM_EVENT_REFLECT_COORD`, `STREAM_EVENT_FREEZE` and
+  `STREAM_EVENT_RELEASE` change the one coordinate `coordinates[event]`.
+
+Part of the extension interface.
+"""
+const STREAM_EVENT_REFLECT_FULL = UInt8(1)
+@doc (@doc STREAM_EVENT_REFLECT_FULL) const STREAM_EVENT_REFLECT_COORD = UInt8(2)
+@doc (@doc STREAM_EVENT_REFLECT_FULL) const STREAM_EVENT_REFRESH = UInt8(3)
+@doc (@doc STREAM_EVENT_REFLECT_FULL) const STREAM_EVENT_FREEZE = UInt8(4)
+@doc (@doc STREAM_EVENT_REFLECT_FULL) const STREAM_EVENT_RELEASE = UInt8(5)
+@doc (@doc STREAM_EVENT_REFLECT_FULL) const STREAM_EVENT_DYNAMICS = UInt8(6)
 
 struct StreamingTraceChunk
     path::String
@@ -486,10 +504,17 @@ end
     return PDMPTerminalState(state, flow)
 end
 
-function _stream_move!(x, velocity, free, elapsed, flow)
+"""
+    stream_move!(x, velocity, free, elapsed, flow)
+
+Move position `x` and velocity `velocity` forward by `elapsed` time under
+`flow`, keeping the coordinates with `free[i] == false` fixed. Used to replay
+a streaming trace between its events. Part of the extension interface.
+"""
+function stream_move!(x, velocity, free, elapsed, flow)
     point = SkeletonPoint(x, velocity)
-    if _underlying_flow(flow) isa AnyBoomerang && free !== nothing
-        move_forward_time!(point, elapsed, _underlying_flow(flow), free)
+    if underlying_flow(flow) isa AnyBoomerang && free !== nothing
+        move_forward_time!(point, elapsed, underlying_flow(flow), free)
     else
         move_forward_time!(point, elapsed, flow)
     end
@@ -509,7 +534,7 @@ function _stream_observe_warmup!(trace::StreamingPDMPTrace,
         target = grid.times[grid.next_index]
         x = copy(grid.last_position)
         velocity = copy(grid.last_velocity)
-        _stream_move!(x, velocity, grid.last_free,
+        stream_move!(x, velocity, grid.last_free,
             target - grid.last_time, trace.flow)
         copyto!(view(grid.positions, :, grid.next_index), x)
         copyto!(view(grid.velocities, :, grid.next_index), velocity)
@@ -594,7 +619,7 @@ function _stream_accumulate_moments!(trace::StreamingPDMPTrace,
     if elapsed > 0
         _stream_add_interval_integrals!(moments.sum_x, moments.sum_x2, nothing,
             moments.last_position, moments.last_velocity, moments.last_free,
-            elapsed, _underlying_flow(trace.flow))
+            elapsed, underlying_flow(trace.flow))
         @inbounds for i in eachindex(moments.free_time)
             moments.last_free[i] && (moments.free_time[i] += elapsed)
         end
@@ -685,7 +710,7 @@ function _online_advance!(online::StreamingOnlineSummaries,
     x = online.scratch_x
     v = online.scratch_v
     free = moments.last_free
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     copyto!(x, moments.last_position)
     copyto!(v, moments.last_velocity)
     if !(base isa AnyBoomerang)
@@ -709,7 +734,7 @@ function _online_advance!(online::StreamingOnlineSummaries,
             online.cur_size += size * elapsed
             online.cur_size2 += size^2 * elapsed
             online.cur_time += elapsed
-            _stream_move!(x, v, free, elapsed, trace.flow)
+            stream_move!(x, v, free, elapsed, trace.flow)
             t = stop
         end
         boundary <= t1 || break
@@ -787,7 +812,14 @@ function _stream_chunk_path(trace::StreamingPDMPTrace, index::Integer)
     joinpath(trace.directory, "chunk_" * lpad(string(index), 8, '0') * ".bin")
 end
 
-function _flush_streaming_trace!(trace::StreamingPDMPTrace)
+"""
+    flush_streaming_trace!(trace::StreamingPDMPTrace)
+
+Write the buffered events of `trace` to a new chunk file. Call it before
+reading the chunks of a trace that is not yet finalized. Part of the
+extension interface.
+"""
+function flush_streaming_trace!(trace::StreamingPDMPTrace)
     buffer = trace.buffer
     n = buffer.n_events
     iszero(n) && return trace
@@ -827,7 +859,7 @@ end
 # buffer can be flushed without touching the sampler state or its RNG.
 function prepare_trace_storage_boundary!(trace::StreamingPDMPTrace)
     trace.buffer.n_events == length(trace.buffer.times) &&
-        _flush_streaming_trace!(trace)
+        flush_streaming_trace!(trace)
     return nothing
 end
 prepare_trace_storage_boundary!(::AbstractPDMPTrace) = nothing
@@ -916,7 +948,7 @@ function finish_trace_phase!(trace::StreamingPDMPTrace,
     _stream_accumulate_moments!(trace, state)
     _stream_observe_warmup!(trace, state)
     trace.terminal_state = _stream_terminal_state(state, flow)
-    _flush_streaming_trace!(trace)
+    flush_streaming_trace!(trace)
     trace.online === nothing ||
         _online_finish!(trace.online, state, trace.directory)
     trace.finalized = true
@@ -933,20 +965,20 @@ function _record_streaming_event!(trace::StreamingPDMPTrace,
         trace.computational_boundaries += 1
         return nothing
     elseif event_type === :refresh
-        return _stream_record_full!(trace, state, _STREAM_EVENT_REFRESH)
+        return _stream_record_full!(trace, state, STREAM_EVENT_REFRESH)
     elseif event_type === :dynamics_adaptation
-        return _stream_record_full!(trace, state, _STREAM_EVENT_DYNAMICS)
+        return _stream_record_full!(trace, state, STREAM_EVENT_DYNAMICS)
     elseif event_type === :sticky
         coordinate = Int(args)
         kind = state isa StickyPDMPState && state.free[coordinate] ?
-            _STREAM_EVENT_RELEASE : _STREAM_EVENT_FREEZE
+            STREAM_EVENT_RELEASE : STREAM_EVENT_FREEZE
         return _stream_record_coordinate!(trace, state, kind, coordinate)
     elseif event_type === :reflect
         if args isa Integer
             return _stream_record_coordinate!(trace, state,
-                _STREAM_EVENT_REFLECT_COORD, args)
+                STREAM_EVENT_REFLECT_COORD, args)
         end
-        return _stream_record_full!(trace, state, _STREAM_EVENT_REFLECT_FULL)
+        return _stream_record_full!(trace, state, STREAM_EVENT_REFLECT_FULL)
     elseif event_type === :initial
         return begin_trace_phase!(trace, state, flow)
     end
@@ -954,7 +986,7 @@ function _record_streaming_event!(trace::StreamingPDMPTrace,
 end
 
 function streaming_trace_manifest(trace::StreamingPDMPTrace)
-    trace.finalized || _flush_streaming_trace!(trace)
+    trace.finalized || flush_streaming_trace!(trace)
     return (format="pdmpsamplers_typed_stream_v1",
         directory=trace.directory,
         chunk_count=length(trace.chunks),
@@ -1039,7 +1071,7 @@ function _restore_streaming_moments!(trace::StreamingPDMPTrace)
     moments = StreamingRawMoments(0.0, zeros(d), zeros(d), zeros(d),
         initial.t, copy(initial.position), copy(initial.physical_velocity),
         copy(initial.free))
-    base = _underlying_flow(trace.flow)
+    base = underlying_flow(trace.flow)
     _foreach_streaming_segment(trace) do time0, time1, x0, x1,
             velocity0, velocity1, free
         elapsed = time1 - time0
@@ -1087,7 +1119,19 @@ function _restore_streaming_moments!(trace::StreamingPDMPTrace)
     return trace
 end
 
-function _restore_streaming_trace(chunk_paths::AbstractVector,
+"""
+    restore_streaming_trace(directory, chunk_count, flow, initial_state,
+        terminal_state; physical_events, computational_boundaries,
+        buffer_maximum)
+    restore_streaming_trace(chunk_paths, flow, initial_state, terminal_state;
+        physical_events, computational_boundaries, buffer_maximum)
+
+Rebuild a finalized `StreamingPDMPTrace` from chunk files written by an
+earlier run, given its `PDMPTerminalState`s at the start and end and the
+counts recorded with it. The chunks must be `chunk_00000001.bin` and onward
+in one directory. Part of the extension interface.
+"""
+function restore_streaming_trace(chunk_paths::AbstractVector,
         flow::ContinuousDynamics, initial_state, terminal_state;
         physical_events::Integer, computational_boundaries::Integer,
         buffer_maximum::Integer)
@@ -1101,13 +1145,13 @@ function _restore_streaming_trace(chunk_paths::AbstractVector,
         all(abspath.(paths) .== abspath.(expected)) || throw(ArgumentError(
             "streaming chunks are not one contiguous index"))
     end
-    return _restore_streaming_trace(isempty(paths) ? "" :
+    return restore_streaming_trace(isempty(paths) ? "" :
         dirname(first(paths)), length(paths), flow, initial_state,
         terminal_state; physical_events, computational_boundaries,
         buffer_maximum)
 end
 
-function _restore_streaming_trace(directory::AbstractString,
+function restore_streaming_trace(directory::AbstractString,
         chunk_count::Integer, flow::ContinuousDynamics, initial_state,
         terminal_state; physical_events::Integer,
         computational_boundaries::Integer, buffer_maximum::Integer)
@@ -1138,7 +1182,16 @@ function _restore_streaming_trace(directory::AbstractString,
     return _restore_streaming_moments!(trace)
 end
 
-function _load_streaming_chunk(chunk::StreamingTraceChunk)
+"""
+    load_streaming_chunk(chunk::StreamingTraceChunk) -> LoadedStreamingChunk
+
+Read one chunk of a streaming trace (an element of `trace.chunks`). The
+result holds per-event vectors `times`, `kinds` (see
+[`STREAM_EVENT_REFLECT_FULL`](@ref)), `coordinates`, `positions`,
+`velocities`, `stored_velocities` and `full_slots`, and the matrix
+`full_effective_velocities`. Part of the extension interface.
+"""
+function load_streaming_chunk(chunk::StreamingTraceChunk)
     open(chunk.path, "r") do io
         magic = Vector{UInt8}(undef, length(_STREAM_TRACE_MAGIC))
         read!(io, magic)
@@ -1176,7 +1229,16 @@ mutable struct StreamingTraceCursor
     terminal_returned::Bool
 end
 
-function _stream_cursor(trace::StreamingPDMPTrace)
+"""
+    stream_cursor(trace::StreamingPDMPTrace) -> StreamingTraceCursor
+
+Return a cursor at the initial state of `trace`, with fields `x`, `velocity`,
+`stored_velocity` and `free`. Replay the trace by loading each chunk with
+[`load_streaming_chunk`](@ref), moving the cursor to each event time with
+[`stream_move!`](@ref) and applying the event with
+[`stream_apply_event!`](@ref). Part of the extension interface.
+"""
+function stream_cursor(trace::StreamingPDMPTrace)
     initial = trace.initial_state
     initial === nothing && error("streaming trace has no initial state")
     return StreamingTraceCursor(copy(initial.position),
@@ -1187,18 +1249,24 @@ end
 function _stream_next_chunk!(cursor::StreamingTraceCursor,
         trace::StreamingPDMPTrace)
     cursor.chunk_index > length(trace.chunks) && return false
-    cursor.chunk = _load_streaming_chunk(trace.chunks[cursor.chunk_index])
+    cursor.chunk = load_streaming_chunk(trace.chunks[cursor.chunk_index])
     cursor.chunk_index += 1
     cursor.event_index = 0
     return true
 end
 
-function _stream_apply_event!(cursor::StreamingTraceCursor,
+"""
+    stream_apply_event!(cursor, chunk::LoadedStreamingChunk, event::Int)
+
+Apply event number `event` of a loaded chunk to `cursor`, which must already
+be at the event time. Part of the extension interface.
+"""
+function stream_apply_event!(cursor::StreamingTraceCursor,
         chunk::LoadedStreamingChunk, event::Int)
     kind = chunk.kinds[event]
     coordinate = Int(chunk.coordinates[event])
-    if kind in (_STREAM_EVENT_REFLECT_FULL, _STREAM_EVENT_REFRESH,
-            _STREAM_EVENT_DYNAMICS)
+    if kind in (STREAM_EVENT_REFLECT_FULL, STREAM_EVENT_REFRESH,
+            STREAM_EVENT_DYNAMICS)
         effective = view(chunk.full_effective_velocities, :,
             Int(chunk.full_slots[event]))
         @inbounds for i in eachindex(cursor.velocity)
@@ -1210,13 +1278,13 @@ function _stream_apply_event!(cursor::StreamingTraceCursor,
                 cursor.stored_velocity[i] = effective[i]
             end
         end
-    elseif kind in (_STREAM_EVENT_REFLECT_COORD, _STREAM_EVENT_FREEZE,
-            _STREAM_EVENT_RELEASE)
+    elseif kind in (STREAM_EVENT_REFLECT_COORD, STREAM_EVENT_FREEZE,
+            STREAM_EVENT_RELEASE)
         cursor.x[coordinate] = chunk.positions[event]
         cursor.velocity[coordinate] = chunk.velocities[event]
         cursor.stored_velocity[coordinate] = chunk.stored_velocities[event]
-        kind === _STREAM_EVENT_FREEZE && (cursor.free[coordinate] = false)
-        kind === _STREAM_EVENT_RELEASE && (cursor.free[coordinate] = true)
+        kind === STREAM_EVENT_FREEZE && (cursor.free[coordinate] = false)
+        kind === STREAM_EVENT_RELEASE && (cursor.free[coordinate] = true)
     else
         throw(ArgumentError("unknown streaming trace event kind $kind"))
     end
@@ -1232,8 +1300,8 @@ const _STREAM_NOT_STORED_MESSAGE =
 
 function Base.iterate(trace::StreamingPDMPTrace)
     trace.write_events || throw(ArgumentError(_STREAM_NOT_STORED_MESSAGE))
-    trace.finalized || _flush_streaming_trace!(trace)
-    cursor = _stream_cursor(trace)
+    trace.finalized || flush_streaming_trace!(trace)
+    cursor = stream_cursor(trace)
     initial = trace.initial_state
     return initial.t => copy(cursor.x),
         (initial.t, cursor.x, cursor.velocity, cursor)
@@ -1251,8 +1319,8 @@ function Base.iterate(trace::StreamingPDMPTrace, iteration_state)
         event = cursor.event_index
         chunk = cursor.chunk
         event_time = chunk.times[event]
-        _stream_move!(x, velocity, cursor.free, event_time - time, trace.flow)
-        _stream_apply_event!(cursor, chunk, event)
+        stream_move!(x, velocity, cursor.free, event_time - time, trace.flow)
+        stream_apply_event!(cursor, chunk, event)
         return event_time => copy(x),
             (event_time, x, velocity, cursor)
     end
@@ -1260,7 +1328,7 @@ function Base.iterate(trace::StreamingPDMPTrace, iteration_state)
     if !cursor.terminal_returned && terminal !== nothing && terminal.t >= time
         cursor.terminal_returned = true
         if terminal.t > time
-            _stream_move!(x, velocity, cursor.free,
+            stream_move!(x, velocity, cursor.free,
                 terminal.t - time, trace.flow)
         end
         # Compare the independently replayed state before applying the saved
@@ -1305,7 +1373,7 @@ first_event_time(trace::StreamingPDMPTrace) = trace.initial_state.t
 last_event_time(trace::StreamingPDMPTrace) = trace.terminal_state === nothing ?
     trace.moments.last_time : trace.terminal_state.t
 event_times(trace::StreamingPDMPTrace) = vcat(trace.initial_state.t,
-    (chunk.times for chunk in (_load_streaming_chunk(c) for c in trace.chunks))...,
+    (chunk.times for chunk in (load_streaming_chunk(c) for c in trace.chunks))...,
     trace.terminal_state.t)
 
 function streaming_time_uniform_states(trace::StreamingPDMPTrace,
@@ -1377,7 +1445,7 @@ function streaming_dense_time_uniform_states(trace::StreamingPDMPTrace,
         end
         copyto!(scratch_x, current_x)
         copyto!(scratch_velocity, current_velocity)
-        _stream_move!(scratch_x, scratch_velocity, current_free,
+        stream_move!(scratch_x, scratch_velocity, current_free,
             target - current_time, trace.flow)
         copyto!(view(positions, :, column), scratch_x)
     end
@@ -1486,8 +1554,8 @@ end
 
 function _streaming_factorized_adaptation_moment(
         trace::StreamingPDMPTrace, means::Union{Nothing,AbstractVector})
-    trace.finalized || _flush_streaming_trace!(trace)
-    cursor = _stream_cursor(trace)
+    trace.finalized || flush_streaming_trace!(trace)
+    cursor = stream_cursor(trace)
     d = length(cursor.x)
     integral = zeros(d)
     last_x = zeros(d)
@@ -1498,12 +1566,12 @@ function _streaming_factorized_adaptation_moment(
     end_time = NaN
     first_event = true
     for chunk_meta in trace.chunks
-        chunk = _load_streaming_chunk(chunk_meta)
+        chunk = load_streaming_chunk(chunk_meta)
         @inbounds for event in eachindex(chunk.times)
             event_time = chunk.times[event]
-            _stream_move!(cursor.x, cursor.velocity, cursor.free,
+            stream_move!(cursor.x, cursor.velocity, cursor.free,
                 event_time - cursor_time, trace.flow)
-            _stream_apply_event!(cursor, chunk, event)
+            stream_apply_event!(cursor, chunk, event)
             cursor_time = event_time
             if first_event
                 copyto!(last_x, cursor.x)
@@ -1516,8 +1584,8 @@ function _streaming_factorized_adaptation_moment(
             end
             kind = chunk.kinds[event]
             coordinate = Int(chunk.coordinates[event])
-            touched = kind in (_STREAM_EVENT_REFLECT_FULL,
-                _STREAM_EVENT_REFRESH, _STREAM_EVENT_DYNAMICS) ? (1:d) :
+            touched = kind in (STREAM_EVENT_REFLECT_FULL,
+                STREAM_EVENT_REFRESH, STREAM_EVENT_DYNAMICS) ? (1:d) :
                 (coordinate:coordinate)
             for j in touched
                 elapsed = event_time - last_time[j]
@@ -1750,6 +1818,12 @@ function _build_trace_manager(::Type{TT}, state::AbstractPDMPState, flow::Contin
     TraceManager(main_trace, warmup_trace, float(t_warmup))
 end
 
+"""
+    get_warmup_trace(manager::TraceManager)
+
+The warmup-phase trace of a running sampler, for adapters and observers
+that need the events recorded so far. Part of the extension interface.
+"""
 get_warmup_trace(mgr::TraceManager) = mgr.warmup_trace
 get_main_trace(mgr::TraceManager)   = mgr.main_trace
 

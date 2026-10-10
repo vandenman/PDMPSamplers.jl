@@ -230,11 +230,19 @@ end
 
 _validate_grid_model(::ContinuousDynamics, ::PDMPModel) = nothing
 
-_validate_subsampling_grid_envelope(::ContinuousDynamics, ::AbstractResidualEnvelope) = nothing
-_validate_subsampling_grid_envelope(flow::PreconditionedDynamics,
+"""
+    validate_subsampling_grid_envelope(flow, envelope)
+
+Throw an `ArgumentError` if `envelope` cannot certify GridThinning cells for
+`flow`; return `nothing` otherwise. Called when a subsampled model is set up
+for GridThinning. Envelope types extend it to state their requirements. Part
+of the extension interface.
+"""
+validate_subsampling_grid_envelope(::ContinuousDynamics, ::AbstractResidualEnvelope) = nothing
+validate_subsampling_grid_envelope(flow::PreconditionedDynamics,
         envelope::AbstractResidualEnvelope) =
-    _validate_subsampling_grid_envelope(flow.dynamics, envelope)
-function _validate_subsampling_grid_envelope(::AnyBoomerang,
+    validate_subsampling_grid_envelope(flow.dynamics, envelope)
+function validate_subsampling_grid_envelope(::AnyBoomerang,
         envelope::AbstractResidualEnvelope)
     envelope.component_cell_scales! === nothing && throw(ArgumentError(
         "SubsampledControlVariate GridThinning requires an explicit certified " *
@@ -244,7 +252,7 @@ end
 
 _validate_grid_model(flow::ContinuousDynamics,
     model::PDMPModel{<:SubsampledControlVariate}) =
-        _validate_subsampling_grid_envelope(flow, model.grad.envelope)
+        validate_subsampling_grid_envelope(flow, model.grad.envelope)
 
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     _validate_grid_model(flow, model)

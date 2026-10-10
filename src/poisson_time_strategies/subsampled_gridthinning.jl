@@ -47,7 +47,14 @@ function _draw_uniform_without_replacement_range!(rng::Random.AbstractRNG,
     return out
 end
 
-function _draw_component(rng::Random.AbstractRNG, envelope::AbstractResidualEnvelope, B::Real)
+"""
+    draw_component(rng, envelope, B) -> Int
+
+Draw a residual component with probability proportional to its mass, given
+the total residual bound `B`. Envelopes that keep their own component masses
+extend it. Part of the extension interface.
+"""
+function draw_component(rng::Random.AbstractRNG, envelope::AbstractResidualEnvelope, B::Real)
     u = rand(rng) * B
     cumulative = envelope.cumulative_masses
     component = min(searchsortedlast(cumulative, u) + 1,
@@ -55,10 +62,22 @@ function _draw_component(rng::Random.AbstractRNG, envelope::AbstractResidualEnve
     return component
 end
 
-_draw_distinguished(rng, envelope::SeparableResidualEnvelope, component) =
+"""
+    draw_distinguished(rng, envelope, component) -> Int
+
+Draw the observation that a residual-sourced subset must contain, given the
+component drawn by [`draw_component`](@ref). Part of the extension interface.
+"""
+draw_distinguished(rng, envelope::SeparableResidualEnvelope, component) =
     rand(rng, envelope.alias_tables[component])
 
-function _draw_base_subset!(rng, cv::SubsampledControlVariate,
+"""
+    draw_base_subset!(rng, cv::SubsampledControlVariate, design)
+
+Draw `cv.subset` from the base subsampling design, without a distinguished
+observation. Part of the extension interface.
+"""
+function draw_base_subset!(rng, cv::SubsampledControlVariate,
         ::UniformSubsamplingDesign)
     N = n_observations(cv.envelope)
     return _draw_uniform_without_replacement!(
@@ -97,10 +116,10 @@ function draw_subset!(rng::Random.AbstractRNG, cv::SubsampledControlVariate,
     residual_source = !(iszero(B) ||
         (!iszero(D) && rand(rng) * total <= D))
     if !residual_source
-        _draw_base_subset!(rng, cv, cv.subset_design)
+        draw_base_subset!(rng, cv, cv.subset_design)
     else
-        component = _draw_component(rng, envelope, B)
-        distinguished = _draw_distinguished(rng, envelope, component)
+        component = draw_component(rng, envelope, B)
+        distinguished = draw_distinguished(rng, envelope, component)
         _draw_base_subset_conditional!(
             rng, cv, cv.subset_design, distinguished)
     end
@@ -113,14 +132,22 @@ function draw_subset!(rng::Random.AbstractRNG, cv::SubsampledControlVariate,
     return D + _subsampling_scale(cv) * subset_weight
 end
 
-_signed_subset_bound(state, gradient, ::ContinuousDynamics, D, M) = M
-function _signed_subset_bound(state, gradient,
+"""
+    signed_subset_bound(state, gradient, flow, D, M) -> Float64
+
+Tighten the subset envelope `M` (deterministic part `D`) for flows whose
+event rate is the positive part of one inner product, BPS and Boomerang, by
+using the sign of the deterministic term at `state`. Other flows return `M`.
+Part of the extension interface.
+"""
+signed_subset_bound(state, gradient, ::ContinuousDynamics, D, M) = M
+function signed_subset_bound(state, gradient,
         ::Union{BouncyParticle,AnyBoomerang}, D, M)
     residual_bound = max(0.0, M - D)
     signed_deterministic = dot(state.ξ.θ, gradient)
     return max(0.0, signed_deterministic + residual_bound)
 end
-function _signed_subset_bound(state, gradient,
+function signed_subset_bound(state, gradient,
         flow::PreconditionedDynamics, D, M)
     dynamics = flow.dynamics
     if dynamics isa BouncyParticle || dynamics isa AnyBoomerang
@@ -253,17 +280,27 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     return SubsamplingCandidateResult(accepted, deterministic_actual, actual)
 end
 
-# Research-only marked joint roofs are supplied by an envelope that stores a
-# fixed partition and complete-mark cell caps. Ordinary envelopes retain the
-# existing deterministic/residual mixture unchanged.
-_joint_signed_group_enabled(::AbstractResidualEnvelope) = false
-_joint_signed_cell_mass!(cv, envelope::AbstractResidualEnvelope, state, flow,
+"""
+    joint_signed_group_enabled(envelope) -> Bool
+    joint_signed_cell_mass!(cv, envelope, state, flow, left, right)
+    joint_signed_active_mass!(envelope, state, t)
+    joint_signed_draw_mark!(rng, envelope, subset)
+
+Marked joint roofs. An envelope that stores a fixed partition of the
+observations, with cell caps for complete marks, returns `true` from
+`joint_signed_group_enabled` and implements the other three: the roof mass of
+the cell `[left, right]`, the mass active at time `t`, and drawing a mark into
+`subset`. Other envelopes keep the deterministic/residual mixture. Part of
+the extension interface.
+"""
+joint_signed_group_enabled(::AbstractResidualEnvelope) = false
+@doc (@doc joint_signed_group_enabled) joint_signed_cell_mass!(cv, envelope::AbstractResidualEnvelope, state, flow,
     left::Float64, right::Float64) = throw(MethodError(
-        _joint_signed_cell_mass!, (cv, envelope, state, flow, left, right)))
-_joint_signed_active_mass!(envelope::AbstractResidualEnvelope, state, t) =
-    throw(MethodError(_joint_signed_active_mass!, (envelope, state, t)))
-_joint_signed_draw_mark!(rng, envelope::AbstractResidualEnvelope, subset) =
-    throw(MethodError(_joint_signed_draw_mark!, (rng, envelope, subset)))
+        joint_signed_cell_mass!, (cv, envelope, state, flow, left, right)))
+@doc (@doc joint_signed_group_enabled) joint_signed_active_mass!(envelope::AbstractResidualEnvelope, state, t) =
+    throw(MethodError(joint_signed_active_mass!, (envelope, state, t)))
+@doc (@doc joint_signed_group_enabled) joint_signed_draw_mark!(rng, envelope::AbstractResidualEnvelope, subset) =
+    throw(MethodError(joint_signed_draw_mark!, (rng, envelope, subset)))
 
 function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
         cv::SubsampledControlVariate, flow::ContinuousDynamics,
@@ -283,7 +320,7 @@ function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
     _inc_counter_subset_draws(stats)
     _subset_t0 = time_ns()
     begin_subsampling_mark!(cv.residual_oracle)
-    cap = _joint_signed_draw_mark!(rng, cv.envelope, cv.subset)
+    cap = joint_signed_draw_mark!(rng, cv.envelope, cv.subset)
     # A ragged final joint mark changes the selected residual length. Keep
     # the Horvitz--Thompson multiplier and candidate diagnostics on m_b.
     cv.m = length(cv.subset)
@@ -341,13 +378,13 @@ function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
     cv::SubsampledControlVariate, alg::GridAdaptiveState, state::AbstractPDMPState,
     flow::ContinuousDynamics,
     effective_horizon::Float64, modes, first_cell::Int, last_cell::Int)
-    if _joint_signed_group_enabled(cv.envelope)
+    if joint_signed_group_enabled(cv.envelope)
         pcb = alg.pcb
         for j in first_cell:last_cell
             left = pcb.t_grid[j]
             left >= effective_horizon && break
             right = min(pcb.t_grid[j + 1], effective_horizon)
-            mass = _joint_signed_cell_mass!(cv, cv.envelope,
+            mass = joint_signed_cell_mass!(cv, cv.envelope,
                 state, flow, left, right)
             append_affine_segment!(combined, left, right, mass, 0.0)
         end
@@ -465,11 +502,11 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
 
             _inc_counter_subsampling_cell_roof_proposals(stats)
             _inc_counter_clock_candidates(stats)
-            joint = _joint_signed_group_enabled(cv.envelope)
+            joint = joint_signed_group_enabled(cv.envelope)
             D = joint ? 0.0 : pos(alg.pcb(τ_proposal))
             _inc_counter_pointwise_screen_evaluations(stats)
             _screen_t0 = time_ns()
-            B = joint ? _joint_signed_active_mass!(
+            B = joint ? joint_signed_active_mass!(
                 cv.envelope, state, τ_proposal) :
                 screening_residual_bound(cv.envelope, state, flow, τ_proposal)
             _inc_counter_pointwise_screen_seconds(stats,

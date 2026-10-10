@@ -133,7 +133,7 @@ function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow,
     update_dt = iszero(ad.no_updates_done) ? ad.initial_dt : ad.dt
     if phase === :warmup && (state.t[] - ad.last_update >= update_dt)
         trace = get_warmup_trace(trace_mgr)
-        _has_integrable_segment(trace) || return
+        has_integrable_segment(trace) || return
         mask = any(ad.can_stick) ? ad.can_stick : nothing
         update_preconditioner!(rng, flow, trace, state,
             iszero(ad.no_updates_done), ad.max_scale_expansion, mask)
@@ -143,14 +143,20 @@ function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow,
     end
 end
 
-_has_integrable_segment(::Nothing) = false
+"""
+    has_integrable_segment(trace) -> Bool
+
+Whether `trace` holds at least two physical events, so that it spans a
+nonzero time interval to integrate over. Part of the extension interface.
+"""
+has_integrable_segment(::Nothing) = false
 
 # Dense warmup traces establish their initial state at the first recorded
 # physical event. Preserve that lifecycle for streaming adaptation: the
 # sampler must have two physical records before a nonzero interval exists.
-_has_integrable_segment(trace::StreamingPDMPTrace) = trace.physical_events >= 2
+has_integrable_segment(trace::StreamingPDMPTrace) = trace.physical_events >= 2
 
-function _has_integrable_segment(trace)
+function has_integrable_segment(trace)
     first_event = iterate(trace)
     first_event === nothing && return false
     second_event = iterate(trace, first_event[2])
@@ -214,7 +220,7 @@ function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, f
     end
     if phase === :warmup && state.t[] - ad.last_update >= ad.update_dt
         trace = get_warmup_trace(trace_mgr)
-        if _has_integrable_segment(trace)
+        if has_integrable_segment(trace)
             ad.update_fn!(grad, trace)
             ad.last_update = state.t[]
         end
