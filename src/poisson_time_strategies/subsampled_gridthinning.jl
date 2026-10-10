@@ -137,11 +137,6 @@ struct SubsamplingCandidateResult
     actual::Float64
 end
 
-# No longer called by PDMPSamplers. Kept as an empty function only because
-# PDMPSamplersR (inst/julia/stan_subsampling_provider.jl) still adds methods to
-# it; remove it together with those methods.
-function subsampling_failure_context end
-
 """Evaluate one aggregate-accepted subsampling proposal without advancing the live state."""
 function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         cv::SubsampledControlVariate, flow::ContinuousDynamics,
