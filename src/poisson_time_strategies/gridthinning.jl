@@ -1,6 +1,6 @@
 
 """
-    GridThinningStrategy(; bound=:constant, kwargs...)
+    GridThinningStrategy(; bound=:value_quadratic, kwargs...)
 
 Adaptive GridThinning configuration.
 
@@ -13,9 +13,9 @@ step-size/truncation error even when the underlying gradients are exact.
 `use_fd_hvp` remains a compatibility alias for
 `curvature_backend=:finite_difference`.
 
-Preferred user-facing bounds are `:constant`, `:flat`, `:linear`, `:auto`,
-and `:value_quadratic`. Passing neither `bound` keyword keeps the historical
-constant GridThinning behavior used by downstream packages.
+`bound` is `:value_quadratic` (default) or `:constant`. `:value_quadratic`
+needs a `curvature_bound`; without one, the cells use the ordinary GridThinning
+construction.
 
 For `bound=:value_quadratic`, `curvature_bound` is a certified upper bound on
 the scalar rate curvature over each grid cell. If the cell width is `h`, the
@@ -40,10 +40,7 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     bound::Symbol
     curvature_bound
     bound_violation::Symbol
-    linear_area_threshold::Float64
-    linear_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
-    max_componentwise_affine_segments_per_cell::Int
     lazy_low_tightness_threshold::Float64
     lazy_max_low_tightness_rejections::Int
     lazy_max_rejections::Int
@@ -165,7 +162,7 @@ function _finish_warmup_curvature_bound!(bound::WarmupCurvatureBound)
     return bound
 end
 
-_normalize_grid_bound(::Nothing) = :constant
+_normalize_grid_bound(::Nothing) = :value_quadratic
 
 function _normalize_curvature_backend(curvature_backend, use_fd_hvp::Bool)
     if curvature_backend === nothing
@@ -180,29 +177,21 @@ function _normalize_curvature_backend(curvature_backend, use_fd_hvp::Bool)
 end
 
 function _normalize_grid_bound(bound::Symbol)
-    bound === :constant && return :constant
-    bound === :flat && return :flat
-    bound === :linear && return :linear
-    bound === :value_quadratic && return :value_quadratic
-    bound === :auto && return :auto
-    bound === :sticky_auto && return :sticky_auto
-    throw(ArgumentError("unknown GridThinning bound $(bound)"))
+    bound in (:constant, :value_quadratic) || throw(ArgumentError(
+        "GridThinning bound must be :value_quadratic or :constant; got $(bound)"))
+    return bound
 end
 
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
     safety_limit::Int=500, early_stop_threshold::Real=5.0, use_fd_hvp::Bool=false,
     curvature_backend=nothing, post_warmup_simplify::Bool=false,
-    lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing, linear_area_threshold::Real=0.95,
-    linear_min_area_gain::Real=0.0, max_rejections_before_tail_restart::Int=100, max_componentwise_affine_segments_per_cell::Int=64,
+    lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing,
+    max_rejections_before_tail_restart::Int=100,
     lazy_low_tightness_threshold::Real=0.1, lazy_max_low_tightness_rejections::Int=3,
     lazy_max_rejections::Int=0, allow_small_boomerang::Bool=false, warmup_tuning=nothing)
     bound_symbol = _normalize_grid_bound(bound)
-    if bound_symbol === :shared_node
-        curvature_bound isa Real && isfinite(curvature_bound) && curvature_bound >= 0 ||
-            throw(ArgumentError("bound=:shared_node requires a finite nonnegative numerical curvature_bound used as empirical inflation"))
-    end
     bound_violation_symbol = bound_violation === nothing ?
-        (bound_symbol === :constant ? :count : bound_symbol === :shared_node ? :throw : :shrink) : Symbol(bound_violation)
+        (bound_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
     lazy_low_tightness_threshold >= 0 ||
         throw(ArgumentError("lazy_low_tightness_threshold must be nonnegative"))
     lazy_max_low_tightness_rejections > 0 ||
@@ -215,9 +204,7 @@ function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺:
         Float64(early_stop_threshold), backend === :finite_difference, backend,
         post_warmup_simplify,
         lazy, bound_symbol, curvature_bound, bound_violation_symbol,
-        Float64(linear_area_threshold),
-        Float64(linear_min_area_gain),
-        max_rejections_before_tail_restart, max_componentwise_affine_segments_per_cell,
+        max_rejections_before_tail_restart,
         Float64(lazy_low_tightness_threshold), lazy_max_low_tightness_rejections,
         lazy_max_rejections, allow_small_boomerang, warmup_tuning)
 end
@@ -226,9 +213,7 @@ function Base.show(io::IO, strat::GridThinningStrategy)
     print(io, "GridThinningStrategy(")
     print(io, "N=", strat.N, ", N_min=", strat.N_min, ", t_max=", strat.t_max)
     print(io, ", bound=", strat.bound)
-    strat.bound in (:linear, :auto) && print(io, ", linear_area_threshold=", strat.linear_area_threshold,
-        ", linear_min_area_gain=", strat.linear_min_area_gain)
-    strat.bound in (:value_quadratic, :shared_node) && print(io, ", curvature_bound=", strat.curvature_bound)
+    strat.bound === :value_quadratic && print(io, ", curvature_bound=", strat.curvature_bound)
     print(io, ")")
 end
 
@@ -236,7 +221,7 @@ _default_early_stop(::ContinuousDynamics, est::Float64) = est
 _default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_stop(pd.dynamics, est)
 
 function _grid_min_cells(strat::GridThinningStrategy, flow::ContinuousDynamics, N_base::Int)
-    strat.bound in (:value_quadratic, :shared_node) && return strat.N_min
+    strat.bound === :value_quadratic && return strat.N_min
     if flow isa AnyBoomerang && strat.allow_small_boomerang
         return strat.N_min
     end
@@ -264,11 +249,7 @@ _validate_grid_model(flow::ContinuousDynamics,
 function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::ContinuousDynamics, model::PDMPModel, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter)
     _validate_grid_model(flow, model)
     T = typeof(strat.t_max)
-    0.0 <= strat.linear_area_threshold || throw(ArgumentError("linear_area_threshold must be nonnegative"))
-    0.0 <= strat.linear_min_area_gain || throw(ArgumentError("linear_min_area_gain must be nonnegative"))
     strat.max_rejections_before_tail_restart > 0 || throw(ArgumentError("max_rejections_before_tail_restart must be positive"))
-    strat.max_componentwise_affine_segments_per_cell > 0 ||
-        throw(ArgumentError("max_componentwise_affine_segments_per_cell must be positive"))
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
     N_base = strat.N
     N_min = _grid_min_cells(strat, flow, N_base)
@@ -361,7 +342,6 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     GridAdaptiveState(
         pcb,
         PiecewiseAffineBound(2N_max),
-        PiecewiseAffineBound(2N_max),
         Base.RefValue{Int}(N_base),
         Base.RefValue{Float64}(strat.t_max),
         strat.α⁺,
@@ -396,10 +376,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         strat.bound,
         strat.curvature_bound,
         strat.bound_violation,
-        strat.linear_area_threshold,
-        strat.linear_min_area_gain,
         strat.max_rejections_before_tail_restart,
-        strat.max_componentwise_affine_segments_per_cell,
         strat.lazy_low_tightness_threshold,
         strat.lazy_max_low_tightness_rejections,
         strat.lazy_max_rejections,
@@ -409,7 +386,6 @@ end
 
 struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q,B} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
-    affine_bound::PiecewiseAffineBound{Float64}
     subsampling_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
     t_max::Base.RefValue{Float64}
@@ -445,10 +421,7 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q,B} <: Poisso
     bound::Symbol
     curvature_bound::B
     bound_violation::Symbol
-    linear_area_threshold::Float64
-    linear_min_area_gain::Float64
     max_rejections_before_tail_restart::Int
-    max_componentwise_affine_segments_per_cell::Int
     lazy_low_tightness_threshold::Float64
     lazy_max_low_tightness_rejections::Int
     lazy_max_rejections::Int

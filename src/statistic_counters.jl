@@ -1060,32 +1060,6 @@ end
     get_float(componentwise_area_saved)
 end
 
-@inline _record_counter_componentwise_cell_diagnostics!(::AbstractStatisticCounter, args...) = nothing
-@inline _record_counter_componentwise_cell_diagnostics!(::Nothing, args...) = nothing
-
-@inline function _record_counter_componentwise_cell_diagnostics!(
-    c::ComponentwiseAffineCounter,
-    proposed_breakpoints,
-    segments,
-    zero_crossings,
-    area_saved,
-    area_saved_fraction,
-)
-    push!(c.componentwise_proposed_breakpoints_per_cell, Float64(proposed_breakpoints))
-    push!(c.componentwise_segments_per_cell, Float64(segments))
-    push!(c.componentwise_zero_crossings_per_cell, Float64(zero_crossings))
-    push!(c.componentwise_area_saved_per_cell, Float64(area_saved))
-    push!(c.componentwise_area_saved_fraction_per_cell, Float64(area_saved_fraction))
-    return nothing
-end
-
-@inline function _record_counter_componentwise_cell_diagnostics!(
-    m::MultiCounter,
-    args...,
-)
-    _apply_to_all(_record_counter_componentwise_cell_diagnostics!, m.counters, args...)
-    return nothing
-end
 
 @counter_struct mutable struct PhaseSummaryCounter <: AbstractStatisticCounter
     warmup_events::Int

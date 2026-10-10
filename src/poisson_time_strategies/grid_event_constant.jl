@@ -51,7 +51,7 @@ function _constant_bound_event_time(
                 signed_actual = flow isa BouncyParticle ? dot(∇ϕx, state_.ξ.θ) : NaN
                 throw(ErrorException(_grid_bound_violation_message(
                     alg, stats, state_, flow, τ_proposal, signed_actual, l_actual,
-                    λ_bound, cumulative_exp, λ_refresh, false)))
+                    λ_bound, cumulative_exp, λ_refresh)))
             elseif alg.bound_violation === :shrink
                 alg.constant_bound_rate[] = NaN
                 _shrink_grid_after_bound_violation!(alg, stats)

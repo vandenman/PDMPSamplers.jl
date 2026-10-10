@@ -42,11 +42,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
             cached_y0, cached_d0 = _get_rate_and_deriv_or_throw(
                 probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
                 t_valid=0.0, t_invalid=0.0)
-            cached_g0, cached_dg0 = if alg.bound === :linear
-                rate_and_derivative(state_, flow, grad_and_hvp, alg.cached_gradient)
-            else
-                (NaN, NaN)
-            end
+            cached_g0 = cached_dg0 = NaN
             alg.has_cached_gradient[] = false
             alg.has_cached_rate_derivative[] = false
             cached_gradient = nothing
@@ -79,11 +75,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         safety_limit = alg.safety_limit
         while safety_limit > 0
-            τ_reflection, lb_reflection = if modes.use_linear
-                propose_event_time(rng, alg.affine_bound, cumulative_exp)
-            else
-                propose_event_time(rng, pcb, cumulative_exp)
-            end
+            τ_reflection, lb_reflection = propose_event_time(rng, pcb, cumulative_exp)
 
             if τ_reflection >= effective_horizon
 
@@ -113,10 +105,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 signed_reflection = flow isa BouncyParticle ? dot(∇ϕx, state_.ξ.θ) : NaN
                 msg = _grid_bound_violation_message(
                     alg, stats, state_, flow, τ_reflection, signed_reflection, l_reflection,
-                    lb_reflection, cumulative_exp, λ_refresh, modes.use_linear)
-                if modes.use_linear
-                    _inc_counter_affine_bound_violations(stats)
-                end
+                    lb_reflection, cumulative_exp, λ_refresh)
                 if alg.bound_violation === :throw
                     throw(ErrorException(msg))
                 elseif alg.bound_violation === :shrink

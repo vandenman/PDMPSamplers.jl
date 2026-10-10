@@ -52,7 +52,7 @@ function _next_event_time_resolved_provider!(rng::Random.AbstractRNG,
             state, cache, stats, max_horizon, include_refresh,
             max_horizon_event, probe_failure_handler)
     end
-    if alg.bound in (:value_quadratic, :shared_node)
+    if alg.bound === :value_quadratic
         return _next_event_time_value_quadratic!(
             rng, model, flow, alg, state, cache, stats,
             max_horizon, include_refresh, max_horizon_event,
@@ -120,7 +120,6 @@ function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
         state, flow, alg.pcb.t_grid[1], alg.pcb.t_grid[2])) : 0.0
     use_direct && stats !== nothing && _inc_counter_grid_bound_seconds(
         stats, (time_ns() - direct_started) * 1.0e-9)
-    use_linear = !use_direct && _use_linear_bound(alg, state, flow, provider)
     # Subsampled GridThinning also reaches this dispatcher.  Its historical
     # value-quadratic path accidentally fell through to the endpoint-tangent
     # construction, which ignores `curvature_bound`.  Use the same signed-rate
@@ -130,12 +129,10 @@ function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
     use_value_quadratic = alg.bound === :value_quadratic &&
         _can_use_value_quadratic_grid(flow, alg.curvature_bound) &&
         _can_use_signed_grid_bound(alg, state, flow, provider)
-    use_single_pass_signed = !use_direct &&
-        (_use_signed_grid_bound(alg, state, flow, provider) || use_value_quadratic)
+    use_single_pass_signed = !use_direct && use_value_quadratic
     return (;
         use_direct,
         direct_first,
-        use_linear,
         use_single_pass_signed,
         use_constant_batched_signed=!use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, provider),
     )
@@ -177,27 +174,16 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
         _inc_counter_grid_points_evaluated(stats,
             max(0, n_cells_bounded - start_cell + 1))
     elseif modes.use_single_pass_signed
-        n_cells_bounded = construct_rate_bound_grid!(alg.affine_bound, pcb, state, flow, provider, alg.curvature_bound;
+        n_cells_bounded = construct_rate_bound_grid!(pcb, state, flow, provider, alg.curvature_bound;
             cached_gradient, early_stop_threshold=cumulative_exp, state_cache, stats, max_time=effective_horizon,
-            build_affine=modes.use_linear, linear_area_threshold=alg.linear_area_threshold, linear_min_area_gain=alg.linear_min_area_gain,
-            auto=_auto_policy(alg.bound), max_componentwise_affine_segments_per_cell=alg.max_componentwise_affine_segments_per_cell,
             rate_value_buf=alg.rate_value_buf, rate_derivative_buf=alg.rate_derivative_buf, probe_failure_handler, start_cell, initial_integral, append)
     else
         n_cells_bounded = construct_upper_bound_grad_and_hess!(pcb, state, flow, provider, false;
             cached_y0, cached_d0, early_stop_threshold=cumulative_exp, stats, state_cache, max_time=effective_horizon,
             probe_failure_handler, start_cell, initial_integral)
     end
-    if modes.use_linear && !modes.use_single_pass_signed
-        if alg.bound === :linear
-            construct_rate_grid!(pcb, state, flow, provider, n_cells_bounded; cached_g0, cached_dg0, state_cache, stats)
-            build_rate_linear_bound!(alg.affine_bound, pcb, n_cells_bounded, state, flow, alg.curvature_bound, stats;
-                linear_area_threshold=alg.linear_area_threshold, linear_min_area_gain=alg.linear_min_area_gain)
-        else
-            build_hybrid_affine_bound!(alg.affine_bound, pcb, n_cells_bounded, stats)
-        end
-    end
     _record_grid_schedule!(stats, alg)
-    built_area = _grid_built_area(pcb, alg.affine_bound, modes.use_linear)
+    built_area = _piecewise_constant_area(pcb)
     _record_budget_grid_build!(stats, n_cells_bounded, built_area, cumulative_exp, append)
     _inc_counter_grid_bound_seconds(stats, (time_ns() - _grid_t0) * 1.0e-9)
     return n_cells_bounded, built_area

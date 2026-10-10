@@ -9,46 +9,6 @@ _can_use_value_quadratic_grid(flow::ContinuousDynamics, curvature_bound) =
 _can_use_global_value_quadratic_grid(flow::ContinuousDynamics, curvature_bound) =
     _rate_aggregation(flow) in (:scalar, :componentwise) && curvature_bound !== nothing
 
-function _shared_node_cell_bound(
-    t_previous::Real,
-    y_previous::Real,
-    t_left::Real,
-    y_left::Real,
-    t_right::Real,
-    y_right::Real,
-    inflation::Real,
-)
-    T = float(promote_type(
-        typeof(t_previous), typeof(y_previous), typeof(t_left), typeof(y_left),
-        typeof(t_right), typeof(y_right), typeof(inflation)))
-    z = zero(T)
-    scale = max(T(inflation), z)
-    endpoint_max = max(T(y_left), T(y_right), z)
-    if !isfinite(t_previous) || !(t_previous < t_left < t_right)
-        return endpoint_max + scale * abs(T(y_right) - T(y_left))
-    end
-    t_prev = T(t_previous)
-    t_l = T(t_left)
-    t_r = T(t_right)
-    y_prev = T(y_previous)
-    y_l = T(y_left)
-    y_r = T(y_right)
-    slope_left = (y_l - y_prev) / (t_l - t_prev)
-    slope_right = (y_r - y_l) / (t_r - t_l)
-    quadratic = (slope_right - slope_left) / (t_r - t_prev)
-    linear = slope_left - quadratic * (t_prev + t_l)
-    predicted_max = endpoint_max
-    if quadratic < z
-        vertex = -linear / (2 * quadratic)
-        if t_left < vertex < t_right
-            constant = y_l - quadratic * t_l^2 - linear * t_l
-            predicted_max = max(predicted_max, quadratic * vertex^2 + linear * vertex + constant)
-        end
-    end
-    defect = abs(slope_right - slope_left) * (t_r - t_l)
-    return max(predicted_max, z) + scale * defect
-end
-
 @inline function _value_quadratic_cell_bound(y_left::Real, y_right::Real, cell_width::Real, residual_bound::Real)
     residual = max(Float64(residual_bound), 0.0) * Float64(cell_width)^2 / 8
     return max(Float64(y_left), Float64(y_right), 0.0) + residual
@@ -68,29 +28,6 @@ function _value_rate_at_state!(
     return rate
 end
 
-function _signed_rate_at_state!(
-    ::NoGridBoundaryProbe,
-    state::AbstractPDMPState,
-    grad_provider,
-    ::Float64,
-    ::Float64,
-)
-    return Float64(dot(grad_provider(state.ξ.x), state.ξ.θ))
-end
-
-function _signed_rate_at_state!(
-    probe::GridBoundaryProbeHandler,
-    state::AbstractPDMPState,
-    grad_provider,
-    t_valid::Float64,
-    t_invalid::Float64,
-)
-    try
-        return Float64(dot(grad_provider(state.ξ.x), state.ξ.θ))
-    catch err
-        _throw_grid_boundary_error(probe, state, err; t_valid, t_invalid)
-    end
-end
 
 _maybe_probe_warmup_curvature_bound!(args...) = nothing
 
@@ -131,7 +68,6 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
     )::GridEvent where {FL<:ContinuousDynamics}
 
-    shared_node = alg.bound === :shared_node
     _can_use_global_value_quadratic_grid(flow, alg.curvature_bound) ||
         return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 
@@ -152,20 +88,15 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
 
     if alg.has_cached_gradient[]
         _inc_counter_grid_cached_endpoint_reuses(stats)
-        y_left = shared_node ? Float64(dot(alg.cached_gradient, state_.ξ.θ)) :
-            pos(λ(state_, alg.cached_gradient, flow))
+        y_left = pos(λ(state_, alg.cached_gradient, flow))
         alg.has_cached_gradient[] = false
         alg.has_cached_rate_derivative[] = false
     else
         _inc_counter_grid_endpoint_evaluations(stats)
         _inc_counter_grid_endpoint_gradient_calls(stats)
-        y_left = shared_node ?
-            _signed_rate_at_state!(probe_failure_handler, state_, alg.grad_provider, 0.0, 0.0) :
-            _value_rate_at_state!(probe_failure_handler, state_, flow, alg.grad_provider, 0.0, 0.0)
+        y_left = _value_rate_at_state!(probe_failure_handler, state_, flow, alg.grad_provider, 0.0, 0.0)
     end
     t_left = 0.0
-    t_previous = NaN
-    y_previous = NaN
 
     cumulative_area = 0.0
     exp_target = Random.randexp(rng)
@@ -198,35 +129,19 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
         move_forward_time!(state_, Δt_cell, flow)
         _inc_counter_grid_endpoint_evaluations(stats)
         _inc_counter_grid_endpoint_gradient_calls(stats)
-        y_right = shared_node ?
-            _signed_rate_at_state!(probe_failure_handler, state_, alg.grad_provider, t_left, t_right) :
-            _value_rate_at_state!(probe_failure_handler, state_, flow, alg.grad_provider, t_left, t_right)
+        y_right = _value_rate_at_state!(probe_failure_handler, state_, flow, alg.grad_provider, t_left, t_right)
         _inc_counter_grid_points_evaluated(stats, 1)
 
-        residual_bound = if shared_node
-            alg.curvature_bound
-        else
-            value = _evaluate_curvature_bound(alg.curvature_bound, state, flow, t_left, t_right, stats)
-            value === nothing && return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-            _maybe_probe_warmup_curvature_bound!(
-                alg.curvature_bound, probe_failure_handler, state2_, state, flow,
-                alg.grad_provider, t_left, t_right, Float64(y_left), Float64(y_right), stats)
-            value
-        end
+        residual_bound = _evaluate_curvature_bound(alg.curvature_bound, state, flow, t_left, t_right, stats)
+        residual_bound === nothing && return _next_event_time_lazy!(rng, _grid_event_provider(model, flow, alg, stats), model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+        _maybe_probe_warmup_curvature_bound!(
+            alg.curvature_bound, probe_failure_handler, state2_, state, flow,
+            alg.grad_provider, t_left, t_right, Float64(y_left), Float64(y_right), stats)
 
-        if shared_node
-            _inc_counter_shared_node_cells(stats)
-            isfinite(t_previous) ? _inc_counter_shared_node_three_point_cells(stats) :
-                _inc_counter_shared_node_two_point_cells(stats)
-        end
-        Λ_cell = shared_node ?
-            _shared_node_cell_bound(t_previous, y_previous, t_left, y_left, t_right, y_right, residual_bound) :
-            _value_quadratic_cell_bound(y_left, y_right, Δt_cell, residual_bound)
+        Λ_cell = _value_quadratic_cell_bound(y_left, y_right, Δt_cell, residual_bound)
         area_cell = pos(Λ_cell) * Δt_cell
 
         if !ispositive(area_cell)
-            t_previous = t_left
-            y_previous = y_left
             t_left = t_right
             y_left = y_right
             if t_right >= effective_horizon
@@ -239,8 +154,6 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
 
         if cumulative_area + area_cell < exp_target
             cumulative_area += area_cell
-            t_previous = t_left
-            y_previous = y_left
             t_left = t_right
             y_left = y_right
             if t_right >= effective_horizon
@@ -255,8 +168,6 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
             lb_proposal = pos(Λ_cell)
             τ_proposal = t_left + (exp_target - cumulative_area) / lb_proposal
             if τ_proposal >= t_right || !isfinite(τ_proposal)
-                t_previous = t_left
-                y_previous = y_left
                 t_left = t_right
                 y_left = y_right
                 cumulative_area = 0.0
@@ -282,7 +193,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
                 state2_, state, flow, model, cache, t_left, τ_proposal, probe_failure_handler)
 
             l_actual = λ(state2_, ∇ϕx, flow)
-            signed_actual = shared_node ? Float64(dot(∇ϕx, state2_.ξ.θ)) : Float64(l_actual)
+            signed_actual = Float64(l_actual)
             _inc_counter_grid_acceptance_tests(stats)
             proposal_attempts += 1
 
@@ -297,7 +208,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
                 if alg.bound_violation === :throw
                     throw(ErrorException(_grid_bound_violation_message(
                         alg, stats, state2_, flow, τ_proposal, NaN, l_actual,
-                        lb_proposal, exp_target, λ_refresh, false)))
+                        lb_proposal, exp_target, λ_refresh)))
                 elseif alg.bound_violation === :shrink
                     _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                     alg.has_cached_gradient[] = false
@@ -342,8 +253,6 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
             end
 
             cumulative_area += lb_proposal * (τ_proposal - t_left)
-            t_previous = t_left
-            y_previous = y_left
             t_left = τ_proposal
             y_left = signed_actual
             Δt_tail = t_right - t_left
@@ -359,9 +268,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
                 end
                 break
             end
-            Λ_tail = shared_node ?
-                _shared_node_cell_bound(t_previous, y_previous, t_left, y_left, t_right, y_right, residual_bound) :
-                _value_quadratic_cell_bound(y_left, y_right, Δt_tail, residual_bound)
+            Λ_tail = _value_quadratic_cell_bound(y_left, y_right, Δt_tail, residual_bound)
             isfinite(Λ_tail) && (Λ_cell = min(Λ_cell, Λ_tail))
             exp_target += Random.randexp(rng)
         end
@@ -374,6 +281,5 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
     end
 
     _throw_grid_safety_limit_error(state, flow, model; t_invalid=effective_horizon,
-        message=shared_node ? "Safety limit reached in experimental shared-node Grid algorithm" :
-            "Safety limit reached in value-quadratic Grid algorithm")
+        message="Safety limit reached in value-quadratic Grid algorithm")
 end

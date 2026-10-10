@@ -1,5 +1,5 @@
 function _grid_bound_violation_message(alg, stats::AbstractStatisticCounter, state::AbstractPDMPState, flow::ContinuousDynamics,
-    τ::Real, signed_actual::Real, l_actual::Real, bound_actual::Real, cumulative_exp::Real, λ_refresh::Real, use_linear::Bool)
+    τ::Real, signed_actual::Real, l_actual::Real, bound_actual::Real, cumulative_exp::Real, λ_refresh::Real)
     ratio = bound_actual == 0 ? Inf : l_actual / bound_actual
     cell_index = if isempty(alg.pcb.t_grid)
         0
@@ -21,22 +21,6 @@ function _grid_bound_violation_message(alg, stats::AbstractStatisticCounter, sta
         d_right = alg.pcb.d_vals[cell_index + 1]
     end
 
-    segment_index = 0
-    seg_left = NaN
-    seg_right = NaN
-    seg_y_left = NaN
-    seg_slope = NaN
-    if use_linear && alg.affine_bound.n_segments > 0
-        segment_index = τ == alg.affine_bound.t_breaks[alg.affine_bound.n_segments + 1] ?
-            alg.affine_bound.n_segments :
-            clamp(searchsortedlast(@view(alg.affine_bound.t_breaks[1:(alg.affine_bound.n_segments + 1)]), τ),
-                  1, alg.affine_bound.n_segments)
-        seg_left = alg.affine_bound.t_breaks[segment_index]
-        seg_right = alg.affine_bound.t_breaks[segment_index + 1]
-        seg_y_left = alg.affine_bound.y_left[segment_index]
-        seg_slope = alg.affine_bound.slopes[segment_index]
-    end
-
     x = state.ξ.x
     v = state.ξ.θ
     return string(
@@ -54,11 +38,7 @@ function _grid_bound_violation_message(alg, stats::AbstractStatisticCounter, sta
         " refresh=", λ_refresh,
         " cumulative_hazard_before_tau=", cumulative_exp,
         " | cell_y=[", y_left, ", ", y_right, "]",
-        " cell_d=[", d_left, ", ", d_right, "]",
-        " | segment_index=", segment_index,
-        " segment=[", seg_left, ", ", seg_right, "]",
-        " segment_y_left=", seg_y_left,
-        " segment_slope=", seg_slope
+        " cell_d=[", d_left, ", ", d_right, "]"
     )
 end
 
@@ -81,9 +61,6 @@ function _piecewise_constant_area(pcb::PiecewiseConstantBound,
     end
     return area
 end
-
-_grid_built_area(pcb::PiecewiseConstantBound, bound::PiecewiseAffineBound, use_linear::Bool) =
-    use_linear ? total_area(bound) : _piecewise_constant_area(pcb)
 
 function _record_budget_grid_build!(stats::AbstractStatisticCounter, n_cells::Integer, built_area::Real,
     exponential_budget::Real, is_extension::Bool)

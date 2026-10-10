@@ -52,7 +52,7 @@ end
 
 function _dense_rate_bound_check(case::ThinningCase, model, state, alg, stats)
     hasproperty(alg, :pcb) || return nothing
-    alg.bound in (:flat, :linear, :auto) || return nothing
+    alg.bound === :value_quadratic || return nothing
     provider = PDMPSamplers._grid_event_provider(model, case.flow, alg, stats)
     modes = PDMPSamplers._grid_bound_modes(alg, state, case.flow, provider)
     PDMPSamplers._build_grid_bound_prefix!(alg.pcb, state, case.flow, provider, alg, stats, alg.state_cache, case.horizon, Inf, PDMPSamplers.NoGridBoundaryProbe(), modes)
@@ -62,9 +62,6 @@ function _dense_rate_bound_check(case::ThinningCase, model, state, alg, stats)
     for t in range(0.0, t_stop; length=11)
         t == t_stop && continue
         bound = max(alg.pcb(t), 0.0)
-        if hasproperty(alg, :affine_bound) && alg.affine_bound.n_segments > 0
-            bound = min(bound, max(alg.affine_bound(t), 0.0))
-        end
         @test case.rate(state, t) <= bound + 1e-8
     end
     return nothing
@@ -86,16 +83,12 @@ end
 
     @testset "GridThinningStrategy matrix" begin
         strategies = (
-            "flat exact" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:flat, curvature_bound=0.0, bound_violation=:throw),
-            "linear exact" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:linear, curvature_bound=0.0, bound_violation=:throw),
-            "auto exact" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:auto, curvature_bound=0.0, bound_violation=:throw),
+            "constant" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
+                lazy=false, bound=:constant, bound_violation=:throw),
             "value quadratic" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
                 lazy=false, bound=:value_quadratic, curvature_bound=0.0, bound_violation=:throw),
             "finite diff" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:linear, curvature_bound=0.0, curvature_backend=:finite_difference,
+                lazy=false, bound=:value_quadratic, curvature_bound=0.0, curvature_backend=:finite_difference,
                 bound_violation=:throw),
         )
         for (i, (name, strategy)) in enumerate(strategies)
@@ -107,7 +100,7 @@ end
 
         @testset "componentwise ZigZag" begin
             stats = _validate_strategy(zz_case, GridThinningStrategy(;
-                N=3, N_min=1, t_max=0.35, lazy=false, bound=:linear,
+                N=3, N_min=1, t_max=0.35, lazy=false, bound=:value_quadratic,
                 curvature_bound=0.0, bound_violation=:throw); seed=31_001)
             @test stats.grid_builds >= 1
         end

@@ -384,8 +384,7 @@ end
 function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
     cv::SubsampledControlVariate, alg::GridAdaptiveState, state::AbstractPDMPState,
     flow::ContinuousDynamics,
-    effective_horizon::Float64, modes, first_cell::Int, last_cell::Int,
-    first_deterministic_segment::Int)
+    effective_horizon::Float64, modes, first_cell::Int, last_cell::Int)
     if _joint_signed_group_enabled(cv.envelope)
         pcb = alg.pcb
         for j in first_cell:last_cell
@@ -398,24 +397,13 @@ function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
         end
         return combined
     end
-    if modes.use_linear
-        deterministic = alg.affine_bound
-        for j in first_deterministic_segment:deterministic.n_segments
-            left = deterministic.t_breaks[j]
-            left >= effective_horizon && break
-            right = min(deterministic.t_breaks[j + 1], effective_horizon)
-            _append_subsampling_segment!(combined, cv.envelope, state, flow,
-                left, right, deterministic.y_left[j], deterministic.slopes[j])
-        end
-    else
-        pcb = alg.pcb
-        for j in first_cell:last_cell
-            left = pcb.t_grid[j]
-            left >= effective_horizon && break
-            right = min(pcb.t_grid[j + 1], effective_horizon)
-            _append_subsampling_segment!(combined, cv.envelope, state, flow,
-                left, right, pos(pcb.Λ_vals[j]), zero(pcb.Λ_vals[j]))
-        end
+    pcb = alg.pcb
+    for j in first_cell:last_cell
+        left = pcb.t_grid[j]
+        left >= effective_horizon && break
+        right = min(pcb.t_grid[j + 1], effective_horizon)
+        _append_subsampling_segment!(combined, cv.envelope, state, flow,
+            left, right, pos(pcb.Λ_vals[j]), zero(pcb.Λ_vals[j]))
     end
     return combined
 end
@@ -441,14 +429,13 @@ end
     while total_area(combined) <= target_area && n_cells_bounded < n_horizon
         first_cell = n_cells_bounded + 1
         cell_horizon = min(alg.pcb.t_grid[first_cell + 1], effective_horizon)
-        first_segment = alg.affine_bound.n_segments + 1
         n_cells_bounded, deterministic_area = _build_grid_bound_prefix!(alg.pcb, state, flow,
             provider, alg, stats, alg.state_cache, cell_horizon, Inf,
             NoGridBoundaryProbe(), modes;
             start_cell=first_cell, initial_integral=deterministic_area,
             append=first_cell > 1)
         _append_subsampling_prefix!(combined, cv, alg, state, flow, effective_horizon,
-            modes, first_cell, n_cells_bounded, first_segment)
+            modes, first_cell, n_cells_bounded)
     end
     return (n_cells_bounded, deterministic_area)::Tuple{Int,Float64}
 end
@@ -468,7 +455,6 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
     while true
         _invalidate_cached_gradient!(alg)
         reset_affine_bound!(alg.subsampling_bound)
-        reset_affine_bound!(alg.affine_bound)
         Λ_vals::Vector{Float64} = alg.pcb.Λ_vals
         @inbounds for i in eachindex(Λ_vals)
             Λ_vals[i] = 0.0
@@ -524,8 +510,7 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
             _inc_counter_subsampling_cell_roof_proposals(stats)
             _inc_counter_clock_candidates(stats)
             joint = _joint_signed_group_enabled(cv.envelope)
-            D = joint ? 0.0 : modes.use_linear ?
-                pos(alg.affine_bound(τ_proposal)) : pos(alg.pcb(τ_proposal))
+            D = joint ? 0.0 : pos(alg.pcb(τ_proposal))
             _inc_counter_pointwise_screen_evaluations(stats)
             _screen_t0 = time_ns()
             B = joint ? _joint_signed_active_mass!(

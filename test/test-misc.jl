@@ -177,15 +177,6 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         @test PDMPSamplers._counter_struct_name(:(MyCounter{T})) === :MyCounter
         @test_throws ErrorException PDMPSamplers._counter_struct_name(1)
 
-        component = PDMPSamplers.ComponentwiseAffineCounter()
-        PDMPSamplers._record_counter_componentwise_cell_diagnostics!(
-            component, 3, 2, 1, 0.75, 0.25)
-        @test component.componentwise_proposed_breakpoints_per_cell == [3.0]
-        @test component.componentwise_segments_per_cell == [2.0]
-        @test component.componentwise_zero_crossings_per_cell == [1.0]
-        @test component.componentwise_area_saved_per_cell == [0.75]
-        @test component.componentwise_area_saved_fraction_per_cell == [0.25]
-        @test isnothing(PDMPSamplers._record_counter_componentwise_cell_diagnostics!(nothing, 1, 2, 3))
     end
 
     @testset "Gradient purpose counters" begin

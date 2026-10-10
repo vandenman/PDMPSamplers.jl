@@ -784,7 +784,7 @@ end
             trace, _ = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow),
                 GridThinningStrategy(N=8, t_max=1.5, lazy=false,
-                    bound=:linear, bound_violation=:throw), 0.0, 50.0;
+                    bound=:constant, bound_violation=:throw), 0.0, 50.0;
                 seed=774, progress=false)
             @test length(trace) > 2
         end

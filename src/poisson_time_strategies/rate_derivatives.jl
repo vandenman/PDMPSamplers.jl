@@ -1,8 +1,8 @@
 function rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state::AbstractPDMPState,
     flow::ContinuousDynamics, t_grid::AbstractVector, n_points::Integer)
     throw(ArgumentError(
-        "bound=:linear requires rate derivatives for $(typeof(flow)); " *
-        "use bound=:constant or implement rate_derivatives_for_grid!"))
+        "batched grid rate derivatives are not available for $(typeof(flow)); " *
+        "implement rate_derivatives_for_grid!"))
 end
 
 function _scalar_rate_derivatives_for_grid!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state::AbstractPDMPState,
