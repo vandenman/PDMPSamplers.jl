@@ -53,11 +53,6 @@ struct BoomerangAdaptationOptions
     initial_variance_floor_fraction::Float64
 end
 
-"""Resolve the research variance safeguard to hierarchical log-scale names."""
-boomerang_logscale_variance_floor_mask(names::AbstractVector) = BitVector(
-    name == "global_scale" || startswith(String(name), "node_scale.")
-    for name in names)
-
 function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
     sticky_min_free_time::Real=10.0,
     sticky_free_shrink_time::Real=50.0,

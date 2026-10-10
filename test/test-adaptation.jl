@@ -255,13 +255,6 @@
         @test all(flow.μ .== 0.0)
     end
 
-    @testset "Boomerang log-scale floor name resolution is exact" begin
-        names = ["thresholds_0.1", "global_scale", "node_scale.1",
-            "node_scale_extra", "interactions_0.1"]
-        @test PDMPSamplers.boomerang_logscale_variance_floor_mask(names) ==
-            BitVector([false, true, true, false, false])
-    end
-
     @testset "update_boomerang! fullrank with WelfordBoomerangStats" begin
         d = 4
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
