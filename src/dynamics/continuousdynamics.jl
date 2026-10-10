@@ -4,6 +4,12 @@ correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, ::
 rand_refresh_time(rng::Random.AbstractRNG, flow::ContinuousDynamics) = ispositive(refresh_rate(flow)) ? rand(rng, Exponential(inv(refresh_rate(flow)))) : oftype(refresh_rate(flow), Inf)
 rand_refresh_time(flow::ContinuousDynamics) = rand_refresh_time(Random.default_rng(), flow)
 
+"""
+    initialize_velocity([rng], flow, d) -> Vector{Float64}
+
+Draw an initial velocity of dimension `d` from the invariant velocity
+distribution of `flow`, as `pdmp_sample` does when none is given.
+"""
 initialize_velocity(flow::ContinuousDynamics, d::Integer) = initialize_velocity(Random.default_rng(), flow, d)
 
 # Component-wise bounds not applicable

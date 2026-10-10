@@ -71,25 +71,75 @@ function Distributions.var(d::BetaBernoulli)
 end
 
 """
-    BetaBernoulliKappa(a, b, mpdfs)
+    BetaBernoulliKappa(a, b, mpdfs[, can_stick])
 
 Callable struct for the sticky unfreezing rate κ under a BetaBernoulli
 inclusion prior with parameters `a` and `b`.
 
 `mpdfs[i]` is the marginal slab density at zero for coordinate `i`.
 
+`can_stick` identifies the coordinates governed by the Beta--Bernoulli model
+prior.  It defaults to every coordinate for backwards compatibility.  This
+mask matters when a target also contains always-active parameters: those
+parameters must not be counted as included model indicators.
+
 Called as `κ(i, x, γ, θ...)` where `γ` is the free/frozen indicator.
 """
-struct BetaBernoulliKappa{T<:AbstractVector{Float64}} <: Function
+struct BetaBernoulliKappa{T<:AbstractVector{Float64},U<:AbstractVector{Bool}} <: Function
     a::Float64
     b::Float64
     mpdfs::T
+    can_stick::U
+
+    function BetaBernoulliKappa(a::Float64, b::Float64, mpdfs::T,
+            can_stick::U) where {T<:AbstractVector{Float64},
+                                U<:AbstractVector{Bool}}
+        length(mpdfs) == length(can_stick) || throw(DimensionMismatch(
+            "mpdfs and can_stick must have the same length"))
+        new{T,U}(a, b, mpdfs, can_stick)
+    end
 end
 
+function BetaBernoulliKappa(a::Real, b::Real,
+        mpdfs::AbstractVector{<:Real}, can_stick::AbstractVector{Bool})
+    length(mpdfs) == length(can_stick) || throw(DimensionMismatch(
+        "mpdfs and can_stick must have the same length"))
+    return BetaBernoulliKappa(Float64(a), Float64(b),
+        Float64.(mpdfs), BitVector(can_stick))
+end
+
+BetaBernoulliKappa(a::Real, b::Real, mpdfs::AbstractVector{<:Real}) =
+    BetaBernoulliKappa(a, b, mpdfs, trues(length(mpdfs)))
+
 function (κ::BetaBernoulliKappa)(i::Integer, x, γ, args...)
-    k_free = sum(γ)
-    n_tot  = length(x)
-    denom  = κ.b + n_tot - k_free - 1
+    return _kappa_value(κ, _kappa_context(κ, x, γ), i, x, γ)
+end
+
+# The rate depends on the state only through the number of free stickable
+# coordinates. Count them once so that a schedule rebuild costs O(d), not
+# O(d) per stuck coordinate.
+function _kappa_context(κ::BetaBernoulliKappa, x, γ)
+    length(x) == length(κ.can_stick) || throw(DimensionMismatch(
+        "state and can_stick vectors must have the same length"))
+    length(γ) == length(κ.can_stick) || throw(DimensionMismatch(
+        "free-state and can_stick vectors must have the same length"))
+    k_free = 0
+    n_tot = 0
+    @inbounds for j in eachindex(κ.can_stick, γ)
+        if κ.can_stick[j]
+            n_tot += 1
+            k_free += γ[j]
+        end
+    end
+    return (k_free, n_tot)
+end
+
+function _kappa_value(κ::BetaBernoulliKappa, counts::Tuple{Int,Int},
+        i::Integer, args...)
+    κ.can_stick[i] || throw(ArgumentError(
+        "coordinate $i is not governed by this BetaBernoulliKappa"))
+    k_free, n_tot = counts
+    denom = κ.b + n_tot - k_free - 1
     if denom <= 0
         return Inf
     end

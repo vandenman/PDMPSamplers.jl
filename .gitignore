@@ -4,4 +4,7 @@ Manifest-v*.toml
 AGENTS.md
 playground
 *.so
-/benchmarks
+/benchmarks/results/
+/benchmarks/*.csv
+/benchmarks/*.tsv
+/dev/build/

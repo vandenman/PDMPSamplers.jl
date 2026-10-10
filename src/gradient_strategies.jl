@@ -5,6 +5,86 @@ _try_copy(x) = applicable(copy, x) ? copy(x) : x
 _copy_callable(f::Base.Fix1) = Base.Fix1(_copy_callable(f.f), _try_copy(f.x))
 _copy_callable(f::Base.Fix2) = Base.Fix2(_copy_callable(f.f), _try_copy(f.x))
 
+"""
+    set_active_set!(object, free::BitVector)
+
+Synchronize stateful gradients or targets with the active/free coordinates of
+a `StickyPDMPState`. The default method is a no-op.
+"""
+set_active_set!(object, free::BitVector) = nothing
+
+"""
+    deterministic_rate_cell_bound(provider, state, flow, left, right)
+
+Optional direct certificate for the deterministic event-rate contribution on
+the complete closed cell `[left,right]`.  Returning `nothing` retains the
+ordinary derivative/curvature grid construction.  Implementations must return
+a finite, nonnegative, outward-enclosing bound; the grid never repairs an
+underestimate after proposals have been drawn.
+"""
+deterministic_rate_cell_bound(provider, state::AbstractPDMPState,
+    flow::ContinuousDynamics, left::Real, right::Real) = nothing
+
+"""
+    has_direct_deterministic_rate_cell_bound(provider) -> Bool
+
+Whether `provider` implements [`deterministic_rate_cell_bound`](@ref). A
+provider that does returns `true`, so GridThinning installs the direct cell
+certificate. Part of the extension interface.
+"""
+has_direct_deterministic_rate_cell_bound(provider) = false
+
+# Direct deterministic certificates belong to the gradient/target, not to the
+# mechanism used to obtain rate derivatives.  Preserve that capability for
+# every grid provider so finite-difference, VHV, and HVP selection cannot
+# silently change which cell certificate is installed.
+deterministic_rate_cell_bound(provider::VHVProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::VHVProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::FiniteDiffVHV,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::FiniteDiffVHV) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::GradHVPProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::GradHVPProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::GradientOnlyProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.grad, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::GradientOnlyProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.grad)
+
+deterministic_rate_cell_bound(provider::GradientProvider,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        provider.gradient_strategy, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(provider::GradientProvider) =
+    has_direct_deterministic_rate_cell_bound(provider.gradient_strategy)
+
+function set_active_set!(f::Base.Fix1, free::BitVector)
+    set_active_set!(f.f, free)
+    set_active_set!(f.x, free)
+    return nothing
+end
+
+function set_active_set!(f::Base.Fix2, free::BitVector)
+    set_active_set!(f.f, free)
+    set_active_set!(f.x, free)
+    return nothing
+end
+
 # Concrete gradient strategies
 struct FullGradient{F} <: GlobalGradientStrategy
     f::F
@@ -12,39 +92,496 @@ end
 
 Base.copy(g::FullGradient) = FullGradient(_copy_callable(g.f))
 
-struct SubsampledGradient{F1, F2, F3, F4} <: GlobalGradientStrategy
-    f::F1
-    resample_indices!::F2
-    update_anchor!::F3
-    full::FullGradient{F4}
-    nsub::Int
-    no_anchor_updates::Int
-    use_full_gradient_for_reflections::Bool
-    resample_dt::Float64
+"""
+    SeparableResidualEnvelope(weights, component_scales!;
+                              component_cell_scales! = nothing,
+                              certified_affine = false)
+
+An additive residual-rate envelope with
+`b_i(t) = sum(weights[r, i] * c_r(t), r)`. `component_scales!` is called as
+`component_scales!(out, state, flow, t)`. An arbitrary pointwise callback must
+also provide `component_cell_scales!`, which certifies a bound over every closed
+grid cell. Set `certified_affine=true` only when every component scale is known
+to be affine in `t`; endpoint maxima are then a valid cell certificate and the
+same affine callback may be used by `ThinningStrategy` on linear trajectories.
+
+The resulting `b_i(t)` must dominate the observation's perturbation of the
+chosen dynamics' event rate. For BPS this is
+`abs(dot(v, r_i(x)))`; for ZigZag it is
+`sum(abs(v[j] * r_i(x)[j]), j)`, which is the bound needed by its
+coordinatewise flip rates.
+"""
+abstract type AbstractResidualEnvelope end
+
+
+struct SeparableResidualEnvelope{F,C} <: AbstractResidualEnvelope
+    weights::Matrix{Float64}
+    component_scales!::F
+    component_cell_scales!::C
+    totals::Vector{Float64}
+    alias_tables::Vector{Union{Nothing,AliasTables.AliasTable{UInt64,Int}}}
+    scales::Vector{Float64}
+    cell_scales::Vector{Float64}
+    cumulative_masses::Vector{Float64}
 end
 
-Base.copy(g::SubsampledGradient) = SubsampledGradient(
-    _copy_callable(g.f),
-    _copy_callable(g.resample_indices!),
-    _copy_callable(g.update_anchor!),
-    copy(g.full),
-    g.nsub,
-    g.no_anchor_updates,
-    g.use_full_gradient_for_reflections,
-    g.resample_dt,
-)
 
-# temporary backwards compatibility constructor for now
-# SubsampledGradient(f::F1, resample_indices!::F2, nsub::Int) where {F1, F2} =
-#     SubsampledGradient(f, resample_indices!, (trace) -> nothing, (args...) -> nothing, nsub, 0)
-SubsampledGradient(f::Function, resample_indices!::Function, nsub::Int) =
-    SubsampledGradient(f, resample_indices!, (trace) -> nothing, FullGradient((args...) -> nothing), nsub, 0, false, 0.0)
+"""Internal wrapper recording the caller's explicit affine certification."""
+struct CertifiedAffineComponentScales{F}
+    callback::F
+end
+(provider::CertifiedAffineComponentScales)(args...) = provider.callback(args...)
 
-SubsampledGradient(f::Function, resample_indices!::Function, update_anchor!::Function, full::Function,
-                   nsub::Int, no_anchor_updates::Int, use_full_gradient_for_reflections::Bool;
-                   resample_dt::Float64=0.0) =
-    SubsampledGradient(f, resample_indices!, update_anchor!, FullGradient(full), nsub, no_anchor_updates,
-                       use_full_gradient_for_reflections, resample_dt)
+function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
+        component_cell_scales! = nothing, certified_affine::Bool=false)
+    isempty(weights) && throw(ArgumentError("residual envelope weights must be nonempty"))
+    any(x -> !isfinite(x) || x < 0, weights) &&
+        throw(ArgumentError("residual envelope weights must be finite and nonnegative"))
+    stored_weights = Matrix{Float64}(weights)
+    totals = vec(sum(stored_weights; dims=2))
+    tables = Union{Nothing,AliasTables.AliasTable{UInt64,Int}}[
+        ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
+        for r in axes(stored_weights, 1)
+    ]
+    component_cell_scales! === nothing && !certified_affine && throw(ArgumentError(
+        "arbitrary residual-envelope component scales require an explicit certified " *
+        "component_cell_scales! callback; set certified_affine=true only for " *
+        "component scales that are affine in time"))
+    stored_scales = certified_affine ?
+        CertifiedAffineComponentScales(component_scales!) : component_scales!
+    return SeparableResidualEnvelope(stored_weights, stored_scales,
+        component_cell_scales!, totals,
+        tables, zeros(Float64, size(stored_weights, 1)),
+        zeros(Float64, size(stored_weights, 1)),
+        zeros(Float64, size(stored_weights, 1)))
+end
+
+
+struct TrajectoryComponentScales
+    anchor::Vector{Float64}
+    growth_rates::Vector{Float64}
+end
+
+struct DampedHCVComponentScales
+    anchor::Vector{Float64}
+    damping::Float64
+end
+
+_stored_subsampling_anchor(anchor::Vector{Float64}) = anchor
+_stored_subsampling_anchor(anchor::AbstractVector) = collect(Float64, anchor)
+
+"""
+    trajectory_scale_anchor(envelope_or_scales) -> Union{Nothing,Vector{Float64}}
+
+Return the anchor position that the component scales of a residual envelope
+are expanded around, or `nothing` if they have none. Subsampling providers
+extend it for their own component-scale callbacks. Part of the extension
+interface.
+"""
+trajectory_scale_anchor(::Any) = nothing
+trajectory_scale_anchor(scales::TrajectoryComponentScales) = scales.anchor
+trajectory_scale_anchor(scales::DampedHCVComponentScales) = scales.anchor
+trajectory_scale_anchor(scales::CertifiedAffineComponentScales) =
+    trajectory_scale_anchor(scales.callback)
+trajectory_scale_anchor(envelope::AbstractResidualEnvelope) =
+    trajectory_scale_anchor(envelope.component_scales!)
+function _subsampling_anchor_owner(envelope::AbstractResidualEnvelope, fallback)
+    trajectory_anchor = trajectory_scale_anchor(envelope)
+    return trajectory_anchor === nothing ? fallback : trajectory_anchor
+end
+
+"""
+    TrajectoryResidualEnvelope(weights, anchor; growth_rates=zeros(...))
+
+Construct a separable residual envelope whose likelihood-specific rows are
+combined with certified dynamics-specific trajectory geometry. A component
+with growth rate `g` is scaled by `V(t) * δ(t) * exp(g * δ(t))`, where `δ`
+dominates displacement from `anchor` and `V` is the appropriate dual event-rate
+velocity norm. This covers globally Lipschitz likelihoods (`g = 0`) and binned
+log-link likelihood bounds without embedding likelihood concepts in a flow.
+"""
+function TrajectoryResidualEnvelope(weights::AbstractMatrix,
+        anchor::AbstractVector; growth_rates=zeros(size(weights, 1)))
+    growth = collect(Float64, growth_rates)
+    length(growth) == size(weights, 1) || throw(DimensionMismatch(
+        "growth_rates must have one entry per envelope component"))
+    any(x -> !isfinite(x) || x < 0, growth) && throw(ArgumentError(
+        "growth_rates must be finite and nonnegative"))
+    scales = TrajectoryComponentScales(_stored_subsampling_anchor(anchor), growth)
+    return SeparableResidualEnvelope(weights, scales;
+        component_cell_scales! = scales)
+end
+
+"""
+    DampedHCVResidualEnvelope(first_order_weights, remainder_weights, anchor;
+                              damping=length(anchor))
+
+Construct the generic rank-two envelope for a damped analytic Hessian control
+variate. If `δ(t)` bounds displacement from the anchor, `V(t)` is the
+dynamics-specific dual velocity bound, and
+`α(t) = damping / (damping + δ(t)^2)`, the component scales are
+`V δ (1-α)` and `V δ^2 α`. The integration layer remains responsible for
+supplying nonnegative first-order and Taylor-remainder weights.
+"""
+function DampedHCVResidualEnvelope(first_order_weights::AbstractVector,
+        remainder_weights::AbstractVector, anchor::AbstractVector;
+        damping::Real=length(anchor))
+    length(first_order_weights) == length(remainder_weights) ||
+        throw(DimensionMismatch("HCV envelope weight vectors must have equal length"))
+    isfinite(damping) && damping > 0 || throw(ArgumentError(
+        "HCV damping must be finite and positive"))
+    weights = permutedims(hcat(first_order_weights, remainder_weights))
+    scales = DampedHCVComponentScales(
+        _stored_subsampling_anchor(anchor), Float64(damping))
+    return SeparableResidualEnvelope(weights, scales;
+        component_cell_scales! = scales)
+end
+
+"""
+    SubsampledControlVariate(deterministic_gradient!, residual_oracle, envelope,
+                         anchor, m; deterministic_hvp! = nothing,
+                         refresh_anchor! = nothing)
+
+Exact subsampling-minibatch gradient strategy for `GridThinningStrategy` and
+`ThinningStrategy`. The residual oracle is called as
+`oracle(out, x, subset, frozen_anchor)` and returns the unscaled sum of
+observation residual gradients for precisely `subset`. Julia owns the `N/m`
+scaling. The accepted stochastic gradient is retained in the event metadata
+and reused for reflection; it is not replaced by a full gradient. Anchors may
+only be changed through the optional `refresh_anchor!` callback. The callback
+receives the requested anchor and returns its complete prepared envelope;
+`refresh_anchor!` then atomically installs both. It must return the same
+concrete envelope type as the current envelope, so event-time dispatch remains
+type stable. Changing envelope `weights`
+requires reconstructing the envelope because `totals` and `alias_tables` are
+derived from them.
+"""
+abstract type AbstractSubsamplingDesign end
+struct UniformSubsamplingDesign <: AbstractSubsamplingDesign end
+
+
+mutable struct SubsampledControlVariate{F,O,E<:AbstractResidualEnvelope,H,R,D<:AbstractSubsamplingDesign} <: GlobalGradientStrategy
+    deterministic_gradient!::F
+    residual_oracle::O
+    envelope::E
+    anchor::Vector{Float64}
+    deterministic_hvp!::H
+    refresh_anchor_callback!::R
+    subset_design::D
+    m::Int
+    subset::Vector{Int}
+    residual_buffer::Vector{Float64}
+    sampling_map::Dict{Int,Int}
+end
+
+deterministic_rate_cell_bound(strategy::FullGradient,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        strategy.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(strategy::FullGradient) =
+    has_direct_deterministic_rate_cell_bound(strategy.f)
+
+deterministic_rate_cell_bound(strategy::SubsampledControlVariate,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        strategy.deterministic_gradient!, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(strategy::SubsampledControlVariate) =
+    has_direct_deterministic_rate_cell_bound(strategy.deterministic_gradient!)
+
+function SubsampledControlVariate(deterministic_gradient!, residual_oracle,
+    envelope::AbstractResidualEnvelope, anchor::AbstractVector, m::Integer;
+    deterministic_hvp! = nothing, refresh_anchor! = nothing,
+    subset_design::AbstractSubsamplingDesign=UniformSubsamplingDesign())
+    N = n_observations(envelope)
+    1 <= m <= N || throw(ArgumentError("minibatch size m must lie in 1:N"))
+    requested_anchor = collect(Float64, anchor)
+    trajectory_anchor = trajectory_scale_anchor(envelope)
+    if trajectory_anchor !== nothing
+        trajectory_anchor == requested_anchor || throw(ArgumentError(
+            "TrajectoryResidualEnvelope and SubsampledControlVariate anchors must match"))
+    end
+    active_anchor = _subsampling_anchor_owner(envelope, requested_anchor)
+    sampling_map = Dict{Int,Int}()
+    sizehint!(sampling_map, Int(m))
+    return SubsampledControlVariate(deterministic_gradient!, residual_oracle, envelope,
+        active_anchor, deterministic_hvp!, refresh_anchor!, subset_design, Int(m),
+        Vector{Int}(undef, m), zeros(Float64, length(active_anchor)), sampling_map)
+end
+
+function _validate_subsampling_anchor(envelope::AbstractResidualEnvelope, anchor)
+    trajectory_anchor = trajectory_scale_anchor(envelope)
+    trajectory_anchor === nothing || trajectory_anchor == anchor || throw(ArgumentError(
+        "subsampling residual envelope does not match the active anchor"))
+    return nothing
+end
+
+function _validated_refreshed_envelope(cv::SubsampledControlVariate,
+        envelope::AbstractResidualEnvelope, requested)
+    typeof(envelope) === typeof(cv.envelope) || throw(ArgumentError(
+        "anchor-refresh provider must return the same concrete envelope type; " *
+        "reconstruct the SubsampledControlVariate to change callback types"))
+    _validate_subsampling_anchor(envelope, requested)
+    return envelope
+end
+_validated_refreshed_envelope(cv::SubsampledControlVariate, value, requested) = throw(ArgumentError(
+    "anchor-refresh provider must return an AbstractResidualEnvelope"))
+
+"""
+    refresh_anchor_owned!(cv::SubsampledControlVariate, anchor::Vector{Float64})
+
+Like `refresh_anchor!`, but `cv` keeps `anchor` itself instead of a copy, so
+the caller must not modify it afterwards. Part of the extension interface.
+"""
+function refresh_anchor_owned!(cv::SubsampledControlVariate,
+        requested::Vector{Float64})
+    callback = cv.refresh_anchor_callback!
+    callback === nothing && throw(ArgumentError(
+        "this SubsampledControlVariate has no anchor-refresh provider"))
+    length(requested) == length(cv.anchor) || throw(DimensionMismatch(
+        "new subsampling anchor has the wrong dimension"))
+    new_envelope = _validated_refreshed_envelope(
+        cv, callback(requested), requested)::typeof(cv.envelope)
+    setfield!(cv, :envelope, new_envelope)
+    setfield!(cv, :anchor, _subsampling_anchor_owner(new_envelope, requested))
+    return cv
+end
+
+function refresh_anchor!(cv::SubsampledControlVariate, anchor::AbstractVector)
+    return refresh_anchor_owned!(cv, collect(Float64, anchor))
+end
+
+function _reconstruct_subsampling(cv::SubsampledControlVariate;
+        deterministic_gradient! = cv.deterministic_gradient!,
+        residual_oracle = cv.residual_oracle,
+        envelope = deepcopy(cv.envelope),
+        deterministic_hvp! = cv.deterministic_hvp!,
+        refresh_anchor_callback! = cv.refresh_anchor_callback!,
+        subset_design = cv.subset_design)
+    return SubsampledControlVariate(deterministic_gradient!, residual_oracle,
+        envelope, copy(cv.anchor), cv.m;
+        deterministic_hvp! = deterministic_hvp!,
+        refresh_anchor! = refresh_anchor_callback!, subset_design)
+end
+
+function Base.copy(cv::SubsampledControlVariate)
+    cv.refresh_anchor_callback! === nothing || throw(ArgumentError(
+        "an anchor-managed SubsampledControlVariate cannot be copied safely; " *
+        "construct one provider and model per chain"))
+    return _reconstruct_subsampling(cv;
+        deterministic_gradient! = _copy_callable(cv.deterministic_gradient!),
+        residual_oracle = _copy_callable(cv.residual_oracle),
+        deterministic_hvp! = _copy_callable(cv.deterministic_hvp!),
+        refresh_anchor_callback! = _copy_callable(cv.refresh_anchor_callback!))
+end
+
+"""
+    component_scales!(out, envelope, state, flow, t)
+    component_cell_scales!(out, envelope, state, flow, left, right)
+
+Write the residual scale of each envelope component into `out`: at elapsed
+time `t` along the trajectory from `state`, or as an upper bound over the
+closed cell `[left, right]`. The scales must be finite and nonnegative.
+Envelope types with their own representation extend these. Part of the
+extension interface.
+"""
+function component_scales!(out, envelope::AbstractResidualEnvelope, state, flow, t)
+    envelope.component_scales!(out, state, flow, t)
+    return _validate_component_scales(out, envelope.totals, "component")
+end
+
+function _validate_component_scales(out, totals, kind)
+    length(out) == length(totals) || throw(DimensionMismatch(
+        "wrong number of $(kind) scales"))
+    any(x -> !isfinite(x) || x < 0, out) &&
+        throw(ArgumentError("residual-envelope $(kind) scales must be finite and nonnegative"))
+    return out
+end
+
+component_scales!(out, envelope::AbstractResidualEnvelope, state, t) =
+    component_scales!(out, envelope, state, nothing, t)
+
+@doc (@doc component_scales!) function component_cell_scales!(out, envelope::AbstractResidualEnvelope,
+        state, flow, left, right)
+    callback = envelope.component_cell_scales!
+    if callback === nothing
+        envelope.component_scales! isa CertifiedAffineComponentScales ||
+            throw(ArgumentError("endpoint cell bounds require certified affine component scales"))
+        # The caller explicitly certified affine scales, whose maximum on a
+        # closed cell is attained at an endpoint.
+        envelope.component_scales!(envelope.scales, state, flow, left)
+        envelope.component_scales!(envelope.cell_scales, state, flow, right)
+        @inbounds for r in eachindex(out, envelope.scales, envelope.cell_scales)
+            out[r] = max(envelope.scales[r], envelope.cell_scales[r])
+        end
+    else
+        callback(out, state, flow, left, right)
+    end
+    return _validate_component_scales(out, envelope.totals, "component cell")
+end
+
+"""
+    ResidualAffineCell
+
+Certified affine residual roof for one closed trajectory cell. `left` and
+`slope` describe the aggregate residual bound
+`left + slope * (t - t_left)`. The endpoint component/term masses are kept
+with the certificate so a provider can use the same representation when
+sampling a distinguished factor from the proposal clock.
+"""
+struct ResidualAffineCell{L,R,LT,RT}
+    left::Float64
+    slope::Float64
+    left_components::L
+    right_components::R
+    left_terms::LT
+    right_terms::RT
+end
+
+# Providers with a tighter affine residual roof specialize this hook. The
+# default preserves the established constant closed-cell roof.
+residual_affine_cell_bound(::AbstractResidualEnvelope, state, flow, left, right) =
+    nothing
+
+"""
+    total_residual_bound(envelope, state, flow, t) -> Float64
+
+Return the total residual bound `B` at elapsed time `t`, the sum over
+components of scale times mass, and store the cumulative masses that
+[`draw_component`](@ref) samples from. Part of the extension interface.
+"""
+function total_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t)
+    scales = component_scales!(envelope.scales, envelope, state, flow, t)
+    cumulative = 0.0
+    @inbounds for component in eachindex(scales, envelope.totals)
+        cumulative += scales[component] * envelope.totals[component]
+        envelope.cumulative_masses[component] = cumulative
+    end
+    return cumulative
+end
+
+total_residual_bound(envelope::AbstractResidualEnvelope, state, t) =
+    total_residual_bound(envelope, state, nothing, t)
+
+"""
+    screening_residual_bound(envelope, state, flow, t) -> Float64
+    prepare_residual_sampling!(envelope, state, flow, t)
+
+`screening_residual_bound` returns the total residual bound used to screen a
+proposal; by default it is [`total_residual_bound`](@ref). Envelopes with a
+compact aggregate formula can return it without computing every component
+mass, and must then extend `prepare_residual_sampling!` to fill `scales` and
+`cumulative_masses` before a subset is drawn. Part of the extension interface.
+"""
+screening_residual_bound(envelope::AbstractResidualEnvelope, state, flow, t) =
+    total_residual_bound(envelope, state, flow, t)
+@doc (@doc screening_residual_bound) prepare_residual_sampling!(::AbstractResidualEnvelope, state, flow, t) = nothing
+
+# Providers may return a generation token after pointwise screening and
+# consume it when candidate evaluation is for exactly that screened state.
+# The default is deliberately non-reusable; provider implementations must
+# opt in and validate their own token before skipping preparation.
+residual_sampling_generation(::AbstractResidualEnvelope) = nothing
+residual_sampling_generation(envelope::AbstractResidualEnvelope, state) =
+    residual_sampling_generation(envelope)
+reuse_screened_residual_sampling!(::AbstractResidualEnvelope, state, flow, t,
+    ::Any) = false
+
+"""
+    n_observations(envelope) -> Int
+    observation_residual_bound(envelope, observation) -> Float64
+
+The number of observations `N` an envelope covers, and the residual bound of
+one observation under the current component scales. Part of the extension
+interface.
+"""
+n_observations(envelope::SeparableResidualEnvelope) = size(envelope.weights, 2)
+
+@doc (@doc n_observations) function observation_residual_bound(envelope::SeparableResidualEnvelope,
+        observation::Integer)
+    result = 0.0
+    @inbounds for component in axes(envelope.weights, 1)
+        result += envelope.scales[component] *
+            envelope.weights[component, observation]
+    end
+    return result
+end
+
+
+"""Install a sampled residual in `gradient` and return its complete event rate."""
+function subsampling_candidate_rate!(oracle, state, gradient, residual,
+        scale, flow, deterministic_rate, subset)
+    axpy!(scale, residual, gradient)
+    return λ(state, gradient, flow)
+end
+
+"""
+    record_subsampling_proposal!(oracle, D, B, subset_bound, deterministic_rate,
+        residual_rate, rate, accepted)
+    record_subsampling_mark_source!(oracle, residual_source::Bool)
+
+Observation hooks for subsampling diagnostics: called after each evaluated
+proposal, and after each subset draw with whether the subset came from the
+residual part of the mixture. They do nothing by default. Part of the
+extension interface.
+"""
+record_subsampling_proposal!(oracle, args...) = nothing
+@doc (@doc record_subsampling_proposal!) record_subsampling_mark_source!(oracle, residual_source::Bool) = nothing
+
+"""Invalidate oracle workspaces before a newly selected subsampling mark."""
+begin_subsampling_mark!(oracle) = nothing
+
+"""Type-stable result for optional deferred deterministic-rate evaluation."""
+struct DeferredSubsamplingRate{T}
+    signed::T
+    active::Bool
+end
+
+"""Optional signed deterministic rate used to defer vector construction."""
+subsampling_deterministic_signed_rate(oracle, cv, state, flow) =
+    DeferredSubsamplingRate(0.0, false)
+
+"""Complete a deferred scalar event-rate calculation from a selected residual."""
+subsampling_deferred_candidate_rate(
+    oracle, state, residual, scale, flow, signed_rate, subset) = nothing
+
+"""Internal hook for cheaply tightening a sampled subset's event-rate bound."""
+subsampling_subset_bound(oracle, state, gradient, flow, D, M, subset, scale) =
+    signed_subset_bound(state, gradient, flow, D, M)
+
+"""Internal pre-gradient hook for tightening a sampled residual bound."""
+subsampling_residual_subset_bound(oracle, state, flow, D, M, subset, scale) = M
+subsampling_residual_subset_bound(oracle, state, gradient, flow,
+        D, M, subset, scale) = subsampling_residual_subset_bound(
+    oracle, state, flow, D, M, subset, scale)
+
+"""Copy a residual prepared while tightening the selected subset bound.
+
+Specialized analytic oracles may prepare a selected residual in a
+preallocated workspace.  Returning `false` keeps the existing residual-oracle
+call as the fallback for all other strategies.
+"""
+subsampling_cached_residual!(oracle, out, state, subset, anchor) = false
+
+"""Materialize one selected residual, reusing refinement work when present."""
+function subsampling_selected_residual!(oracle, out, state, subset, anchor)
+    fill!(out, zero(eltype(out)))
+    subsampling_cached_residual!(oracle, out, state, subset, anchor) ||
+        oracle(out, state.ξ.x, subset, anchor)
+    return out
+end
+
+"""
+    deterministic_gradient!(out, cv::SubsampledControlVariate, x)
+    deterministic_gradient!(out, cv::SubsampledControlVariate, state, flow)
+
+Write the deterministic part of the control-variate gradient (the anchor
+term, without any residual) into `out`. Part of the extension interface.
+"""
+deterministic_gradient!(out, cv::SubsampledControlVariate, x) = cv.deterministic_gradient!(out, x)
+function deterministic_gradient!(out, cv::SubsampledControlVariate, state, flow)
+    deterministic_gradient!(out, cv, state.ξ.x)
+    return out
+end
 
 struct CoordinateWiseGradient{F} <: CoordinateWiseGradientStrategy
     f::F
@@ -52,36 +589,123 @@ end
 
 Base.copy(g::CoordinateWiseGradient) = CoordinateWiseGradient(_copy_callable(g.f))
 
-with_stats(grad::FullGradient,       stats::AbstractStatisticCounter) = FullGradient(with_stats(grad.f, stats))
-function with_stats(grad::SubsampledGradient, stats::AbstractStatisticCounter)
-    SubsampledGradient(with_stats(grad.f, stats), grad.resample_indices!, grad.update_anchor!, grad.full, grad.nsub,
-                       grad.no_anchor_updates, grad.use_full_gradient_for_reflections, grad.resample_dt)
-end
-with_stats(grad::CoordinateWiseGradient, stats::AbstractStatisticCounter) = CoordinateWiseGradient(with_stats(grad.f, stats))
+with_stats(grad::FullGradient, stats::AbstractStatisticCounter) =
+    FullGradient(with_stats(grad.f, stats, Val(:ordinary_full_gradient)))
 
-with_stats(f, stats::AbstractStatisticCounter) = WithStats(f, stats)
-
-struct WithStats{F,S} <: Function
+struct WithResidualStats{F,S}
     f::F
     stats::S
 end
-(ws::WithStats)(args...) = (_inc_counter_∇f_calls(ws.stats); ws.f(args...))
+function (ws::WithResidualStats)(args...)
+    _inc_counter_residual_oracle_calls(ws.stats)
+    return ws.f(args...)
+end
+subsampling_candidate_rate!(oracle::WithResidualStats, args...) =
+    subsampling_candidate_rate!(oracle.f, args...)
+record_subsampling_proposal!(oracle::WithResidualStats, args...) =
+    record_subsampling_proposal!(oracle.f, args...)
+begin_subsampling_mark!(oracle::WithResidualStats) =
+    begin_subsampling_mark!(oracle.f)
+subsampling_deterministic_signed_rate(
+        oracle::WithResidualStats, cv, state, flow) =
+    subsampling_deterministic_signed_rate(oracle.f, cv, state, flow)
+subsampling_deferred_candidate_rate(oracle::WithResidualStats, state,
+        residual, scale, flow, signed_rate, subset) =
+    subsampling_deferred_candidate_rate(
+        oracle.f, state, residual, scale, flow, signed_rate, subset)
+record_subsampling_mark_source!(oracle::WithResidualStats, residual_source::Bool) =
+    record_subsampling_mark_source!(oracle.f, residual_source)
+subsampling_subset_bound(oracle::WithResidualStats, state, gradient, flow,
+        D, M, subset, scale) = subsampling_subset_bound(
+    oracle.f, state, gradient, flow, D, M, subset, scale)
+subsampling_residual_subset_bound(oracle::WithResidualStats, state, flow,
+        D, M, subset, scale) = subsampling_residual_subset_bound(
+    oracle.f, state, flow, D, M, subset, scale)
+subsampling_residual_subset_bound(oracle::WithResidualStats, state, gradient,
+        flow, D, M, subset, scale) = subsampling_residual_subset_bound(
+    oracle.f, state, gradient, flow, D, M, subset, scale)
+subsampling_cached_residual!(oracle::WithResidualStats, out, state, subset, anchor) =
+    subsampling_cached_residual!(oracle.f, out, state, subset, anchor)
+function subsampling_selected_residual!(oracle::WithResidualStats, out,
+        state, subset, anchor)
+    fill!(out, zero(eltype(out)))
+    if !subsampling_cached_residual!(oracle.f, out, state, subset, anchor)
+        oracle(out, state.ξ.x, subset, anchor)
+    end
+    return out
+end
+function with_stats(cv::SubsampledControlVariate, stats::AbstractStatisticCounter)
+    return _reconstruct_subsampling(cv;
+        deterministic_gradient! = WithStats(
+            cv.deterministic_gradient!, stats, Val(:deterministic_gradient)),
+        residual_oracle = WithResidualStats(cv.residual_oracle, stats))
+end
+with_stats(grad::CoordinateWiseGradient, stats::AbstractStatisticCounter) =
+    CoordinateWiseGradient(with_stats(grad.f, stats, Val(:ordinary_full_gradient)))
 
+with_stats(f, stats::AbstractStatisticCounter) = WithStats(f, stats, Val(:ordinary_full_gradient))
+with_stats(f, stats::AbstractStatisticCounter, purpose::Val) = WithStats(f, stats, purpose)
 
-# struct ControlVariateGradient{F} <: GradientStrategy
-#     f::F
-#     subsample_size::Int
-#     reference_point::Vector{Float64}
-#     cached_full_gradient::Vector{Float64}
-#     control_frequency::Int
-# end
+struct WithStats{F,S,P} <: Function
+    f::F
+    stats::S
+end
+WithStats(f::F, stats::S, ::Val{P}) where {F,S,P} = WithStats{F,S,P}(f, stats)
+
+(ws::WithStats{F,S,P})(args...) where {F,S,P} = begin
+    _inc_counter_∇f_calls(ws.stats)
+    _inc_gradient_purpose!(ws.stats, Val(P))
+    ws.f(args...)
+end
+set_active_set!(ws::WithStats, free::BitVector) = set_active_set!(ws.f, free)
+deterministic_rate_cell_bound(ws::WithStats,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        ws.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(ws::WithStats) =
+    has_direct_deterministic_rate_cell_bound(ws.f)
+
+struct WithFDCurvatureStats{F,S} <: Function
+    f::F
+    stats::S
+end
+
+(ws::WithFDCurvatureStats)(args...) = begin
+    _inc_counter_fd_curvature_gradient_calls(ws.stats)
+    ws.f(args...)
+end
+set_active_set!(ws::WithFDCurvatureStats, free::BitVector) = set_active_set!(ws.f, free)
+deterministic_rate_cell_bound(ws::WithFDCurvatureStats,
+    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
+    right::Real) = deterministic_rate_cell_bound(
+        ws.f, state, flow, left, right)
+has_direct_deterministic_rate_cell_bound(ws::WithFDCurvatureStats) =
+    has_direct_deterministic_rate_cell_bound(ws.f)
 
 
 # Gradient computation interface
 
+set_active_set!(strategy::FullGradient, free::BitVector) = set_active_set!(strategy.f, free)
+set_active_set!(strategy::CoordinateWiseGradient, free::BitVector) = set_active_set!(strategy.f, free)
+function set_active_set!(strategy::SubsampledControlVariate, free::BitVector)
+    set_active_set!(strategy.deterministic_gradient!, free)
+    set_active_set!(strategy.residual_oracle, free)
+    set_active_set!(strategy.envelope, free)
+    return nothing
+end
+
 # Main entry point: compute gradient from state
 function compute_gradient!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
     ∇ϕx = compute_gradient!(gradient_strategy, state.ξ.x, cache.∇ϕx)
+    correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
+    return ∇ϕx
+end
+
+function compute_gradient!(state::AbstractPDMPState,
+        gradient_strategy::SubsampledControlVariate,
+        flow::ContinuousDynamics, cache)
+    ∇ϕx = deterministic_gradient!(
+        cache.∇ϕx, gradient_strategy, state, flow)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
     return ∇ϕx
 end
@@ -93,7 +717,6 @@ function compute_gradient!(x::AbstractVector, θ::AbstractVector, gradient_strat
     return ∇ϕx
 end
 
-# For reflection events with subsampled gradients, may use full gradient
 function compute_gradient_for_reflection!(state::AbstractPDMPState, gradient_strategy::GradientStrategy, flow::ContinuousDynamics, cache)
     ∇ϕx = compute_gradient_for_reflection!(gradient_strategy, state.ξ.x, cache.∇ϕx)
     correct_gradient!(∇ϕx, state.ξ.x, state.ξ.θ, flow, cache)
@@ -106,8 +729,8 @@ function compute_gradient!(strategy::FullGradient, x, out)
     return out
 end
 
-function compute_gradient!(strategy::SubsampledGradient, x, out)
-    strategy.f(out, x)
+function compute_gradient!(strategy::SubsampledControlVariate, x, out)
+    deterministic_gradient!(out, strategy, x)
     return out
 end
 
@@ -116,17 +739,10 @@ function compute_gradient!(strategy::CoordinateWiseGradient, x, i::Integer, cach
     return cache.∇ϕx[i]
 end
 
-# For subsampled gradients, optionally use full gradient for reflections
 function compute_gradient_for_reflection!(strategy::FullGradient, x, out)
     strategy.f(out, x)
     return out
 end
 
-function compute_gradient_for_reflection!(strategy::SubsampledGradient, x, out)
-    if strategy.use_full_gradient_for_reflections
-        compute_gradient_for_reflection!(strategy.full, x, out)
-    else
-        strategy.f(out, x)
-    end
-    return out
-end
+compute_gradient_for_reflection!(strategy::SubsampledControlVariate, x, out) =
+    compute_gradient!(strategy, x, out)

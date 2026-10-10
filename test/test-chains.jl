@@ -120,7 +120,7 @@
     @testset "single chain show" begin
         Random.seed!(42)
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; progress=false)
+        chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
         chains.stats[1].lazy_fallback_low_tightness = 2
         chains.stats[1].lazy_fallback_bound_violation = 1
         chains.stats[1].lazy_proposal_attempts = 5

@@ -6,6 +6,23 @@ import ForwardDiff
 
 struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
 
+mutable struct ActiveSetRecorder
+    free::BitVector
+    calls::Int
+end
+ActiveSetRecorder(n::Integer) = ActiveSetRecorder(falses(n), 0)
+function (r::ActiveSetRecorder)(out, x)
+    copyto!(out, x)
+    return out
+end
+PDMPSamplers.set_active_set!(r::ActiveSetRecorder, free::BitVector) = (r.free .= free; r.calls += 1; nothing)
+
+struct LastGradientPotentialProbe <: Function
+    value::Float64
+end
+(probe::LastGradientPotentialProbe)(out, x) = copyto!(out, x)
+PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe.value
+
 @testset "Miscellaneous" begin
 
     @testset "HVP sign for FullGradient path" begin
@@ -35,29 +52,29 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         @test_throws ErrorException("Cannot compute statistics on a trace with fewer than 2 events") mean(trace_single)
     end
 
-    @testset "Boomerang freezing_time" begin
+    @testset "Boomerang sticking_time" begin
         flow_zero_mu = Boomerang(1)
 
         @testset "μ=0, θ=0, x>0 → π/2" begin
             ξ = SkeletonPoint([1.0], [0.0])
-            @test PDMPSamplers.freezing_time(ξ, flow_zero_mu, 1) ≈ π / 2
+            @test PDMPSamplers.sticking_time(ξ, flow_zero_mu, 1) ≈ π / 2
         end
 
         @testset "μ=0, θ=0, x<0 → π/2" begin
             ξ = SkeletonPoint([-1.0], [0.0])
-            @test PDMPSamplers.freezing_time(ξ, flow_zero_mu, 1) ≈ π / 2
+            @test PDMPSamplers.sticking_time(ξ, flow_zero_mu, 1) ≈ π / 2
         end
 
         @testset "μ=0, θ=0, x=0 → Inf" begin
             ξ = SkeletonPoint([0.0], [0.0])
-            @test PDMPSamplers.freezing_time(ξ, flow_zero_mu, 1) == Inf
+            @test PDMPSamplers.sticking_time(ξ, flow_zero_mu, 1) == Inf
         end
 
         @testset "x=2μ singularity → finite positive" begin
             μ_val = 1.5
             flow_nonzero = Boomerang(Diagonal([1.0]), [μ_val])
             ξ = SkeletonPoint([2μ_val], [1.0])
-            t = PDMPSamplers.freezing_time(ξ, flow_nonzero, 1)
+            t = PDMPSamplers.sticking_time(ξ, flow_nonzero, 1)
             @test isfinite(t)
             @test t > 0
         end
@@ -67,7 +84,7 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
                                (1.0, 0.5, 0.3), (3.0, -1.0, 1.0)]
                 flow_i = Boomerang(Diagonal([1.0]), [μ])
                 ξ = SkeletonPoint([x], [θ])
-                t_computed = PDMPSamplers.freezing_time(ξ, flow_i, 1)
+                t_computed = PDMPSamplers.sticking_time(ξ, flow_i, 1)
                 trajectory(t) = (x - μ) * cos(t) + θ * sin(t) + μ
                 if isfinite(t_computed)
                     @test abs(trajectory(t_computed)) < 1e-10
@@ -119,18 +136,18 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
     @testset "Statistic counter composition and defaults" begin
         c1 = PDMPSamplers.GridThinningCounter()
         c2 = PDMPSamplers.GridThinningCounter()
-        auto1 = PDMPSamplers.CertifiedAutoCounter()
-        auto2 = PDMPSamplers.CertifiedAutoCounter()
+        pipeline1 = PDMPSamplers.SubsamplingPipelineCounter()
+        pipeline2 = PDMPSamplers.SubsamplingPipelineCounter()
         basic = PDMPSamplers.BasicEventCounter()
         multi = PDMPSamplers.MultiCounter((c1, c2))
-        auto_multi = PDMPSamplers.MultiCounter((auto1, auto2))
+        pipeline_multi = PDMPSamplers.MultiCounter((pipeline1, pipeline2))
         noop = TestNoopCounter()
 
         @test basic.last_rejected == false
         phase = PDMPSamplers.PhaseSummaryCounter()
         @test phase.stop_reason === :none
         @test PDMPSamplers._get_counter_grid_acceptance_tests(noop) == 0
-        @test PDMPSamplers._get_counter_auto_area_saved(noop) == 0.0
+        @test PDMPSamplers._get_counter_grid_bound_seconds(noop) == 0.0
         @test !PDMPSamplers._get_counter_last_rejected(noop)
 
         PDMPSamplers._inc_counter_grid_acceptance_tests(c1)
@@ -138,9 +155,9 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         PDMPSamplers._inc_counter_grid_acceptance_tests(c2)
         @test PDMPSamplers._get_counter_grid_acceptance_tests(multi) == 3
 
-        PDMPSamplers._inc_counter_auto_area_saved(auto1, 0.25)
-        PDMPSamplers._inc_counter_auto_area_saved(auto2, 0.5)
-        @test PDMPSamplers._get_counter_auto_area_saved(auto_multi) == 0.75
+        PDMPSamplers._inc_counter_grid_bound_seconds(pipeline1, 0.25)
+        PDMPSamplers._inc_counter_grid_bound_seconds(pipeline2, 0.5)
+        @test PDMPSamplers._get_counter_grid_bound_seconds(pipeline_multi) == 0.75
 
         PDMPSamplers._set_counter_last_rejected(basic, true)
         @test PDMPSamplers._get_counter_last_rejected(PDMPSamplers.MultiCounter((c1, basic)))
@@ -160,15 +177,101 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         @test PDMPSamplers._counter_struct_name(:(MyCounter{T})) === :MyCounter
         @test_throws ErrorException PDMPSamplers._counter_struct_name(1)
 
-        component = PDMPSamplers.ComponentwiseAffineCounter()
-        PDMPSamplers._record_counter_componentwise_cell_diagnostics!(
-            component, 3, 2, 1, 0.75, 0.25)
-        @test component.componentwise_proposed_breakpoints_per_cell == [3.0]
-        @test component.componentwise_segments_per_cell == [2.0]
-        @test component.componentwise_zero_crossings_per_cell == [1.0]
-        @test component.componentwise_area_saved_per_cell == [0.75]
-        @test component.componentwise_area_saved_fraction_per_cell == [0.25]
-        @test isnothing(PDMPSamplers._record_counter_componentwise_cell_diagnostics!(nothing, 1, 2, 3))
+    end
+
+    @testset "Gradient purpose counters" begin
+        stats = PDMPSamplers.DevelStatisticCounter()
+        x = [1.0, 2.0]
+        out = zeros(2)
+
+        full = PDMPSamplers.with_stats(FullGradient((out, x) -> copyto!(out, x)), stats)
+        PDMPSamplers.compute_gradient!(full, x, out)
+        @test stats.∇f_calls == 1
+        @test stats.full_gradient_calls == 1
+
+        prior = PDMPSamplers.with_stats((out, x) -> copyto!(out, -x), stats, Val(:prior_gradient))
+        prior(out, x)
+        @test stats.∇f_calls == 2
+        @test stats.prior_gradient_calls == 1
+
+        fd_probe = PDMPSamplers.WithFDCurvatureStats(
+            PDMPSamplers.with_stats((out, x) -> copyto!(out, x), stats, Val(:ordinary_full_gradient)),
+            stats,
+        )
+        fd_probe(out, x)
+        @test stats.∇f_calls == 3
+        @test stats.full_gradient_calls == 2
+        @test stats.fd_curvature_gradient_calls == 1
+
+        hvp = PDMPSamplers.WithStatsHVP((x, v) -> v, stats)
+        @test hvp(x, x) == x
+        @test stats.∇²f_calls == 1
+
+        pipeline_start = PDMPSamplers._subsampling_pipeline_snapshot(stats)
+        PDMPSamplers._record_phase_stats!(
+            stats, :main, 0, 0, 0, 0, 0, 0, 0,
+            pipeline_start, time_ns())
+        @test stats.main_gradient_calls == stats.∇f_calls
+        @test stats.main_hessian_calls == stats.∇²f_calls
+        @test stats.main_full_gradient_calls == stats.full_gradient_calls
+        @test stats.main_prior_gradient_calls == stats.prior_gradient_calls
+        @test stats.main_fd_curvature_gradient_calls == stats.fd_curvature_gradient_calls
+        @test stats.main_exact_curvature_calls == stats.∇²f_calls
+    end
+
+    @testset "Active-set propagation through wrappers" begin
+        free = BitVector([true, false, true])
+
+        fixed_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(Base.Fix2((x, rec) -> rec, fixed_rec), free)
+        @test fixed_rec.free == free
+        @test fixed_rec.calls == 1
+
+        full_rec = ActiveSetRecorder(3)
+        coord_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(FullGradient(full_rec), free)
+        PDMPSamplers.set_active_set!(CoordinateWiseGradient(coord_rec), free)
+        @test full_rec.free == free
+        @test coord_rec.free == free
+
+        stats = PDMPSamplers.StatisticCounter()
+        wrapped_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(PDMPSamplers.with_stats(wrapped_rec, stats), free)
+        PDMPSamplers.set_active_set!(PDMPSamplers.WithFDCurvatureStats(wrapped_rec, stats), free)
+        @test wrapped_rec.calls == 2
+
+        vhv_rec = ActiveSetRecorder(3)
+        joint_rec = ActiveSetRecorder(3)
+        PDMPSamplers.set_active_set!(PDMPSamplers.WithStatsVHV(vhv_rec, stats), free)
+        PDMPSamplers.set_active_set!(PDMPSamplers.WithStatsJoint(joint_rec, stats), free)
+        @test vhv_rec.free == free
+        @test joint_rec.free == free
+
+        unavailable = PDMPModel(3, FullGradient((out, x) -> copyto!(out, x)))
+        @test !PDMPSamplers._potential_available(unavailable)
+    end
+
+    @testset "last gradient potential unwraps stats wrappers" begin
+        model = PDMPModel(2, FullGradient(LastGradientPotentialProbe(3.25)))
+        stats_model = PDMPSamplers.with_stats(model, PDMPSamplers.StatisticCounter())
+        @test PDMPSamplers._last_gradient_potential(model) == 3.25
+        @test PDMPSamplers._last_gradient_potential(stats_model) == 3.25
+    end
+
+    @testset "FiniteDiffVHV counts only shifted curvature gradients" begin
+        stats = PDMPSamplers.DevelStatisticCounter()
+        grad = PDMPSamplers.with_stats(x -> copy(x), stats, Val(:ordinary_full_gradient))
+        fd = PDMPSamplers.FiniteDiffVHV(grad, zeros(1), zeros(1), zeros(1), stats)
+        state = PDMPState(0.0, SkeletonPoint([1.0], [1.0]))
+        flow = BouncyParticle(1, 0.0)
+
+        rate, deriv = PDMPSamplers.get_rate_and_deriv(state, flow, fd, false)
+
+        @test rate ≈ 1.0
+        @test deriv ≈ 1.0
+        @test stats.∇f_calls == 2
+        @test stats.full_gradient_calls == 2
+        @test stats.fd_curvature_gradient_calls == 1
     end
 
     # @testset "PreconditionedDynamics with warmup adaptation" begin
@@ -251,5 +354,34 @@ struct TestNoopCounter <: PDMPSamplers.AbstractStatisticCounter end
         @test length(chains.traces) == 2
         m = mean(chains)
         @test m ≈ μ_true atol = 1.25
+    end
+
+    @testset "SamplerObserver sees phases and steps without changing the run" begin
+        d = 2
+        A = [2.0 0.5; 0.5 1.5]
+        neg_grad!(out, x) = (mul!(out, A, x); out)
+        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false, false)
+        ξ0 = SkeletonPoint([0.5, -0.5], [1.0, 1.0])
+        phases = Symbol[]
+        stages = Tuple{Symbol,Symbol}[]
+        observer = PDMPSamplers.SamplerObserver(;
+            phase_start=(phase, state, model, flow, alg, cache) -> push!(phases, phase),
+            step=(stage, phase, state, criterion_horizon, adapter_horizon,
+                event_type, stats) -> push!(stages, (stage, phase)))
+        observed, _ = pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
+            GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31,
+            observer)
+        plain, _ = pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
+            GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31)
+        observed_dense, plain_dense = PDMPTrace(observed), PDMPTrace(plain)
+        @test observed_dense.times == plain_dense.times
+        @test observed_dense.positions == plain_dense.positions
+        @test phases == [:warmup, :main]
+        @test !isempty(stages)
+        @test length(stages) % 3 == 0
+        @test all(first.(stages[1:3:end]) .=== :before_step)
+        @test all(first.(stages[2:3:end]) .=== :after_step)
+        @test all(first.(stages[3:3:end]) .=== :after_adapt)
+        @test Set(last.(stages)) == Set([:warmup, :main])
     end
 end

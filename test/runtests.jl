@@ -1,5 +1,6 @@
 include("testsetup.jl")
 
+import Dates
 import DifferentiationInterface as DI
 import ForwardDiff
 
@@ -28,13 +29,17 @@ else
     selected
 end
 
+_timestamp() = Dates.format(Dates.now(), "yy-mm-dd HH:MM:SS.s")
+
 @testset verbose = true "PDMPSamplers" begin
     for t in tests_to_run
         skip_test(basename(t)) && continue
+        println("[", _timestamp(), " START] ", basename(t))
         @testset "Test $(basename(t))" begin
             Random.seed!(345679)
             include(t)
         end
+        println("[", _timestamp(), " END]   ", basename(t))
     end
 end
 
