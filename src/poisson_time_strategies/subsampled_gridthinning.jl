@@ -113,28 +113,6 @@ function draw_subset!(rng::Random.AbstractRNG, cv::SubsampledControlVariate,
     return D + _subsampling_scale(cv) * subset_weight
 end
 
-@inline function _uniform_subset_probability(N::Int, m::Int)
-    probability = 1.0
-    @inbounds for j in 1:m
-        probability *= j / (N - m + j)
-    end
-    return probability
-end
-
-@inline function _base_subset_probability(cv::SubsampledControlVariate,
-        ::UniformSubsamplingDesign)
-    return _uniform_subset_probability(n_observations(cv.envelope), cv.m)
-end
-
-
-@inline function _selected_subset_probability(cv::SubsampledControlVariate,
-        D::Real, B::Real, selected_bound::Real)
-    total = D + B
-    ispositive(total) || return 0.0
-    return _base_subset_probability(cv, cv.subset_design) *
-        selected_bound / total
-end
-
 _signed_subset_bound(state, gradient, ::ContinuousDynamics, D, M) = M
 function _signed_subset_bound(state, gradient,
         ::Union{BouncyParticle,AnyBoomerang}, D, M)
@@ -189,7 +167,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     _subset_t0 = time_ns()
     begin_subsampling_mark!(cv.residual_oracle)
     M_subset = draw_subset!(rng, cv, D, B)
-    selected_probability = _selected_subset_probability(cv, D, B, M_subset)
     _inc_counter_subset_draw_seconds(stats,
         (time_ns() - _subset_t0) * 1.0e-9)
     _refine_t0 = time_ns()
@@ -202,9 +179,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
              rand(rng) * M_subset > residual_subset_bound)
         _inc_counter_selected_subset_refinement_seconds(stats,
             (time_ns() - _refine_t0) * 1.0e-9)
-        record_subsampling_candidate!(cv.residual_oracle,
-            cell_roof, D + B, true, selected_probability, residual_subset_bound,
-            NaN, false)
         return SubsamplingCandidateResult(false, 0.0, 0.0)
     end
 
@@ -234,9 +208,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     if iszero(tight_subset_bound) ||
             (tight_subset_bound < residual_subset_bound &&
              rand(rng) * residual_subset_bound > tight_subset_bound)
-        record_subsampling_candidate!(cv.residual_oracle,
-            cell_roof, D + B, true, selected_probability, tight_subset_bound,
-            NaN, false)
         return SubsamplingCandidateResult(false, deterministic_actual, 0.0)
     end
     _inc_counter_selected_subset_bound_passes(stats)
@@ -271,9 +242,6 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         G = compute_gradient!(candidate, cv, flow, cache)
         axpy!(scale, cv.residual_buffer, G)
     end
-    record_subsampling_candidate!(cv.residual_oracle,
-        cell_roof, D + B, true, selected_probability, tight_subset_bound,
-        actual, accepted)
     positive_residual_rate = λ(candidate, cv.residual_buffer, flow)
     rmul!(cv.residual_buffer, -1)
     negative_residual_rate = λ(candidate, cv.residual_buffer, flow)
@@ -346,13 +314,6 @@ function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
     _inc_counter_final_thinning_seconds(stats,
         (time_ns() - _final_t0) * 1.0e-9)
     accepted && _inc_counter_final_thinning_acceptances(stats)
-    selected_probability = cv.envelope.joint_group_size >= 16 ?
-        (length(cv.subset) / n_observations(cv.envelope)) *
-            (cap / cell_roof) :
-        cap / (size(cv.envelope.joint_groups, 2) * cell_roof)
-    record_subsampling_candidate!(cv.residual_oracle,
-        cell_roof, cell_roof, true, selected_probability,
-        cap, actual, accepted)
     return SubsamplingCandidateResult(accepted, 0.0, actual)
 end
 
@@ -556,9 +517,6 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
                         (time_ns() - _loop_t0) * 1.0e-9)
                     return τ_proposal, :reflect, _gradient_meta(cache)
                 end
-            else
-                record_subsampling_candidate!(cv.residual_oracle,
-                    bar_M, aggregate, false, NaN, NaN, NaN, false)
             end
 
             # Every valid rejection consumes one further exponential budget.

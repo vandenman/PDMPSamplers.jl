@@ -463,7 +463,6 @@ end
 
 """Internal observation hook for proposal-weighted subsampling diagnostics."""
 record_subsampling_proposal!(oracle, args...) = nothing
-record_subsampling_candidate!(oracle, args...) = nothing
 record_subsampling_mark_source!(oracle, residual_source::Bool) = nothing
 
 """Invalidate oracle workspaces before a newly selected subsampling mark."""
@@ -536,8 +535,6 @@ subsampling_candidate_rate!(oracle::WithResidualStats, args...) =
     subsampling_candidate_rate!(oracle.f, args...)
 record_subsampling_proposal!(oracle::WithResidualStats, args...) =
     record_subsampling_proposal!(oracle.f, args...)
-record_subsampling_candidate!(oracle::WithResidualStats, args...) =
-    record_subsampling_candidate!(oracle.f, args...)
 begin_subsampling_mark!(oracle::WithResidualStats) =
     begin_subsampling_mark!(oracle.f)
 subsampling_deterministic_signed_rate(

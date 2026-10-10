@@ -204,20 +204,6 @@ end
 _maybe_copy_criterion(::Nothing) = nothing
 _maybe_copy_criterion(c::StoppingCriterion) = copy(c)
 
-# Research profiling hooks. Both are `nothing` in ordinary runs, so the main
-# loop pays only two predictable checks per retained phase, never per event.
-const _main_phase_profile_start_hook = Ref{Any}(nothing)
-const _main_phase_profile_stop_hook = Ref{Any}(nothing)
-function set_main_phase_profile_hooks!(start_hook, stop_hook)
-    _main_phase_profile_start_hook[] = start_hook
-    _main_phase_profile_stop_hook[] = stop_hook
-    return nothing
-end
-@inline function _run_optional_hook!(hook)
-    hook === nothing || hook()
-    return nothing
-end
-
 _copy_flow(flow::ContinuousDynamics) = flow
 _copy_flow(flow::MutableBoomerang) = copy(flow)
 _copy_flow(pd::PreconditionedDynamics) = PreconditionedDynamics(deepcopy(pd.metric), _copy_flow(pd.dynamics))
@@ -746,7 +732,6 @@ function _pdmp_sample_single(
     retained_initial_state = PDMPTerminalState(state, flow)
     main_phase_start = time_ns()
     main_phase_allocated_start = Base.gc_bytes()
-    _run_optional_hook!(_main_phase_profile_start_hook[])
     _run_phase_for_policy!(rng, stop_criterion, state, phase_model, flow,
         phase_alg, phase_cache, trace_manager, stats, health, :main,
         adapter, progress, prg, tstop, T_float, progress_stops,
@@ -754,13 +739,10 @@ function _pdmp_sample_single(
     main_loop_done_ns = time_ns()
     finish_trace_phase!(trace_manager, state, flow, :main)
     trace_done_ns = time_ns()
-    _run_optional_hook!(_main_phase_profile_stop_hook[])
-    profile_hook_done_ns = time_ns()
     if get(ENV, "OMRF_PROFILE_EXCLUSIVE", "") == "1"
         println(stderr, "OMRF_PROFILE main_loop_seconds=",
             (main_loop_done_ns - main_phase_start) / 1e9,
-            " trace_finish_seconds=", (trace_done_ns - main_loop_done_ns) / 1e9,
-            " profile_hook_seconds=", (profile_hook_done_ns - trace_done_ns) / 1e9)
+            " trace_finish_seconds=", (trace_done_ns - main_loop_done_ns) / 1e9)
     end
     _set_counter_main_phase_elapsed_time(stats, (time_ns() - main_phase_start) / 1e9)
     _set_counter_main_phase_allocated_bytes(

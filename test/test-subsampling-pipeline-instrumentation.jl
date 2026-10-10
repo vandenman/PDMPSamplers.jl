@@ -32,10 +32,6 @@ function _direct_instrumentation_fixture()
     return PDMPModel(1, cv), BouncyParticle(1, 0.5)
 end
 
-mutable struct CandidateRecorder
-    rows::Vector{NTuple{7,Any}}
-end
-
 @testset "statistics preserve direct-certificate event dispatch" begin
     model_a, flow_a = _direct_instrumentation_fixture()
     model_b, flow_b = _direct_instrumentation_fixture()
@@ -66,12 +62,6 @@ end
     @test stats_b.grid_bound_evaluations > 0
     @test stats_b.grid_endpoint_gradient_calls == 0
 end
-function PDMPSamplers.record_subsampling_candidate!(
-        recorder::CandidateRecorder, args...)
-    push!(recorder.rows, args)
-    return nothing
-end
-
 @testset "subsampling pipeline counters are observational" begin
     model_a, flow_a = _instrumentation_fixture()
     model_b, flow_b = _instrumentation_fixture()
@@ -135,15 +125,4 @@ end
     @test stats_b.selected_subset_bound_passes <= stats_b.selected_subset_bound_evaluations
     @test stats_b.final_thinning_acceptances <= stats_b.residual_oracle_evaluations
     @test stats_b.reflection_events <= stats_b.final_thinning_acceptances
-end
-
-@testset "subsampling candidate instrumentation is observational" begin
-    q = fill(0.25, 4)
-    envelope = TrajectoryResidualEnvelope(reshape(q, 1, :), [0.0])
-    recorder = CandidateRecorder(NTuple{7,Any}[])
-    cv = SubsampledControlVariate((out, x) -> (out[1] = 0.0), recorder,
-        envelope, [0.0], 2)
-    @test PDMPSamplers._base_subset_probability(
-        cv, cv.subset_design) == 1 / 6
-    @test PDMPSamplers._selected_subset_probability(cv, 1.0, 2.0, 3.0) == 1 / 6
 end
