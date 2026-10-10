@@ -3,11 +3,20 @@ _grid_vhv_provider(alg::GridAdaptiveState, model::PDMPModel) = VHVProvider(alg.g
 _grid_fd_provider(alg::GridAdaptiveState, stats) = FiniteDiffVHV(alg.grad_provider, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf, stats)
 
 function _grid_event_provider(model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState, stats)
+    return _with_grid_event_provider(identity, model, flow, alg, stats)
+end
+
+# Call `f(provider)` with the selected rate-derivative provider. Each branch
+# passes one concrete provider type: returning the provider as a `Union` of
+# the finite-difference and the exact provider makes Julia (1.13.1) box it on
+# every event search.
+@inline function _with_grid_event_provider(f::F, model::PDMPModel,
+        flow::ContinuousDynamics, alg::GridAdaptiveState, stats) where {F}
     backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
-    backend === :finite_difference && return _grid_fd_provider(alg, stats)
+    backend === :finite_difference && return f(_grid_fd_provider(alg, stats))
     alg.exact_provider === nothing && throw(ArgumentError(
         "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
-    return alg.exact_provider
+    return f(alg.exact_provider)
 end
 
 function _next_event_time_with_provider!(
@@ -36,6 +45,20 @@ function _next_event_time_with_provider!(
     end
     return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+# The lazy grid search with the selected provider, for fallbacks from the
+# value-quadratic construction.
+function _next_event_time_lazy_selected!(rng::Random.AbstractRNG,
+        model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState,
+        state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
+        max_horizon::Float64, include_refresh::Bool,
+        max_horizon_event::Symbol, probe_failure_handler::GridBoundaryProbe)
+    return _with_grid_event_provider(model, flow, alg, stats) do provider
+        _next_event_time_lazy!(rng, provider, model, flow, alg, state, cache,
+            stats, max_horizon, include_refresh, max_horizon_event,
+            probe_failure_handler)
+    end
 end
 
 function _next_event_time_resolved_provider!(rng::Random.AbstractRNG,
@@ -106,10 +129,11 @@ function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<
     # value-quadratic construction for this event search.  Probe only the first
     # deterministic cell; `_grid_bound_modes` repeats the call and carries the
     # certified value into the ordinary grid builder.
-    provider = _grid_event_provider(model, flow, alg, stats)
-    return _next_event_time_resolved_provider!(rng, provider, model, flow, alg,
-        state, cache, stats, max_horizon, include_refresh, max_horizon_event,
-        probe_failure_handler)
+    return _with_grid_event_provider(model, flow, alg, stats) do provider
+        _next_event_time_resolved_provider!(rng, provider, model, flow, alg,
+            state, cache, stats, max_horizon, include_refresh,
+            max_horizon_event, probe_failure_handler)
+    end
 end
 
 function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,

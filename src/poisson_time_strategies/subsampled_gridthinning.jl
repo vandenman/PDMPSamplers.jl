@@ -576,9 +576,11 @@ function next_event_time(rng::Random.AbstractRNG,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache,
     stats::AbstractStatisticCounter, max_horizon::Float64=Inf,
     include_refresh::Bool=true, max_horizon_event::Symbol=:horizon_hit)::GridEvent
-    return _next_subsampled_event_time_with_provider!(rng,
-        _grid_event_provider(model, flow, alg, stats), model, flow, alg, state,
-        cache, stats, max_horizon, include_refresh, max_horizon_event)
+    return _with_grid_event_provider(model, flow, alg, stats) do provider
+        _next_subsampled_event_time_with_provider!(rng, provider, model, flow,
+            alg, state, cache, stats, max_horizon, include_refresh,
+            max_horizon_event)
+    end
 end
 
 function next_event_time(rng::Random.AbstractRNG,
