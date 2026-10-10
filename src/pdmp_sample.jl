@@ -208,19 +208,9 @@ _maybe_copy_criterion(c::StoppingCriterion) = copy(c)
 # loop pays only two predictable checks per retained phase, never per event.
 const _main_phase_profile_start_hook = Ref{Any}(nothing)
 const _main_phase_profile_stop_hook = Ref{Any}(nothing)
-const _phase_first_proposal_observer = Ref{Any}(nothing)
-const _phase_step_observer = Ref{Any}(nothing)
 function set_main_phase_profile_hooks!(start_hook, stop_hook)
     _main_phase_profile_start_hook[] = start_hook
     _main_phase_profile_stop_hook[] = stop_hook
-    return nothing
-end
-function set_phase_first_proposal_observer!(observer)
-    _phase_first_proposal_observer[] = observer
-    return nothing
-end
-function set_phase_step_observer!(observer)
-    _phase_step_observer[] = observer
     return nothing
 end
 @inline function _run_optional_hook!(hook)
@@ -395,8 +385,6 @@ function _run_phase!(
     if phase === :main && !(get_main_trace(trace_manager) isa StreamingPDMPTrace)
         record_event!(trace_manager, state, flow, nothing, phase)
     end
-    observer = _phase_first_proposal_observer[]
-    observer === nothing || observer(phase, state, model_, flow, alg_, cache)
 
     _maybe_simplify_counter = 0
     phase_events_start = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
@@ -439,24 +427,17 @@ function _run_phase!(
             adapter, state, flow, adaptation_grad, phase, stats)
         adapter_owns_horizon = isfinite(adapter_horizon) &&
             adapter_horizon <= criterion_horizon
-        step_observer = _phase_step_observer[]
-        step_observer === nothing || step_observer(:before_step, phase, state,
-            criterion_horizon, adapter_horizon, :pending, stats)
         prepare_trace_storage_boundary!(trace_manager, phase)
         event_type = _step!(rng, state, model_, flow, alg_, cache, stats,
             trace_manager, boundary_policy, phase,
             min(criterion_horizon, adapter_horizon),
             adapter_owns_horizon ? :anchor_selection_boundary : :horizon_hit)
-        step_observer === nothing || step_observer(:after_step, phase, state,
-            criterion_horizon, adapter_horizon, event_type, stats)
         event_type === :anchor_selection_boundary ||
             update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, adaptation_grad, trace_manager;
             phase, stats, event_type,
             anchor_boundary_won=event_type === :anchor_selection_boundary)
-        step_observer === nothing || step_observer(:after_adapt, phase, state,
-            criterion_horizon, adapter_horizon, event_type, stats)
         _handle_gradient_adaptation!(adapter, alg_)
         _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats,
             trace_manager, phase)
