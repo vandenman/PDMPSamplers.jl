@@ -355,4 +355,33 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         m = mean(chains)
         @test m ≈ μ_true atol = 1.25
     end
+
+    @testset "SamplerObserver sees phases and steps without changing the run" begin
+        d = 2
+        A = [2.0 0.5; 0.5 1.5]
+        neg_grad!(out, x) = (mul!(out, A, x); out)
+        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false, false)
+        ξ0 = SkeletonPoint([0.5, -0.5], [1.0, 1.0])
+        phases = Symbol[]
+        stages = Tuple{Symbol,Symbol}[]
+        observer = PDMPSamplers.SamplerObserver(;
+            phase_start=(phase, state, model, flow, alg, cache) -> push!(phases, phase),
+            step=(stage, phase, state, criterion_horizon, adapter_horizon,
+                event_type, stats) -> push!(stages, (stage, phase)))
+        observed, _ = pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
+            GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31,
+            observer)
+        plain, _ = pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
+            GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31)
+        observed_dense, plain_dense = PDMPTrace(observed), PDMPTrace(plain)
+        @test observed_dense.times == plain_dense.times
+        @test observed_dense.positions == plain_dense.positions
+        @test phases == [:warmup, :main]
+        @test !isempty(stages)
+        @test length(stages) % 3 == 0
+        @test all(first.(stages[1:3:end]) .=== :before_step)
+        @test all(first.(stages[2:3:end]) .=== :after_step)
+        @test all(first.(stages[3:3:end]) .=== :after_adapt)
+        @test Set(last.(stages)) == Set([:warmup, :main])
+    end
 end

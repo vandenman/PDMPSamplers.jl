@@ -61,6 +61,39 @@ function make_initial_rng(seed::SeedSpec, n_chains::Int)
     return _make_chain_rng(seed, 1)
 end
 
+"""
+    SamplerObserver(; phase_start=nothing, step=nothing)
+
+Callbacks for one `pdmp_sample` run, passed as `observer`. Both are optional:
+
+- `phase_start(phase, state, model, flow, alg, cache)` is called once at the
+  start of the warmup and of the main phase, before the first proposal.
+- `step(stage, phase, state, criterion_horizon, adapter_horizon, event_type,
+  stats)` is called three times per step, with `stage` `:before_step` (and
+  `event_type` `:pending`), `:after_step` and `:after_adapt`.
+
+The callbacks observe; they must not change `state` or the other arguments.
+With several chains one observer serves all of them, concurrently when
+`threaded=true`. Part of the extension interface.
+"""
+struct SamplerObserver{P,S}
+    phase_start::P
+    step::S
+end
+SamplerObserver(; phase_start=nothing, step=nothing) =
+    SamplerObserver(phase_start, step)
+
+@inline _observe_phase_start(::Nothing, args...) = nothing
+@inline function _observe_phase_start(observer::SamplerObserver, args...)
+    observer.phase_start === nothing || observer.phase_start(args...)
+    return nothing
+end
+@inline _observe_step(::Nothing, args...) = nothing
+@inline function _observe_step(observer::SamplerObserver, args...)
+    observer.step === nothing || observer.step(args...)
+    return nothing
+end
+
 function _rng_seed(rng::Random.AbstractRNG, draw_i::Int)
     rng_copy = Random.copy(rng)
     seed = zero(UInt)
@@ -83,6 +116,8 @@ Provided criteria take precedence over time arguments.
 
 Warmup runs first with adaptation enabled and writes to the warmup trace.
 Main sampling runs second with adaptation disabled and writes to the main trace.
+`observer` takes a [`SamplerObserver`](@ref) whose callbacks see each phase
+start and each step.
 Criteria are initialized per phase, so mutable criteria (e.g. `WallTimeCriterion`, ESS counters)
 are phase-local. An exception is `TotalWallTimeCriterion`, whose timer starts once globally
 and is not re-initialized per phase.
@@ -103,6 +138,7 @@ function pdmp_sample(
     initial_free::Union{Nothing,AbstractVector{Bool}}=nothing,
     initial_stored_velocity::Union{Nothing,AbstractVector{<:Real}}=nothing,
     trace_storage::Union{Nothing,StreamingTraceStorage}=nothing,
+    observer::Union{Nothing,SamplerObserver}=nothing,
 )
     n_chains >= 1 || throw(ArgumentError("n_chains must be >= 1, got $n_chains"))
     _validate_seed_spec(seed, n_chains)
@@ -111,14 +147,15 @@ function pdmp_sample(
         rng = make_initial_rng(seed, n_chains)
         trace, stats, installed, retained_initial, endpoint = _pdmp_sample_single(rng, ξ₀, flow, model, alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, model,
-            statistic_counter; initial_free, initial_stored_velocity, trace_storage)
+            statistic_counter; initial_free, initial_stored_velocity, trace_storage,
+            observer)
         return PDMPChains([trace], [stats], [installed], [retained_initial], [endpoint])
     end
     models = [copy(model) for _ in 1:n_chains]
     return pdmp_sample(ξ₀, flow, models, alg, t₀, T, t_warmup;
         stop, warmup_stop, threaded, progress, adapter, seed,
         support_boundary_options, statistic_counter, initial_free,
-        initial_stored_velocity, trace_storage)
+        initial_stored_velocity, trace_storage, observer)
 end
 
 _make_chain_rng(::Nothing, chain_i::Int) = Random.Xoshiro()
@@ -142,6 +179,7 @@ function pdmp_sample(
     initial_free::Union{Nothing,AbstractVector{Bool}}=nothing,
     initial_stored_velocity::Union{Nothing,AbstractVector{<:Real}}=nothing,
     trace_storage::Union{Nothing,StreamingTraceStorage}=nothing,
+    observer::Union{Nothing,SamplerObserver}=nothing,
 )
     n_chains = length(models)
     n_chains >= 1 || throw(ArgumentError("models must be non-empty"))
@@ -153,7 +191,7 @@ function pdmp_sample(
         trace, stats, installed, retained_initial, endpoint = _pdmp_sample_single(rng, ξ₀, flow, models[1], alg, t₀, T, t_warmup,
             progress, adapter, stop, warmup_stop, support_boundary_options, models[1],
             statistic_counter; initial_free, initial_stored_velocity,
-            trace_storage)
+            trace_storage, observer)
         return PDMPChains([trace], [stats], [installed], [retained_initial], [endpoint])
     end
 
@@ -169,7 +207,7 @@ function pdmp_sample(
                 _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
                     false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
                     statistic_counter; initial_free, initial_stored_velocity,
-                    trace_storage=_chain_trace_storage(trace_storage, i))
+                    trace_storage=_chain_trace_storage(trace_storage, i), observer)
             end
         end
         results = fetch.(tasks)
@@ -184,7 +222,7 @@ function pdmp_sample(
             _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
                 false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
                 statistic_counter; initial_free, initial_stored_velocity,
-                trace_storage=_chain_trace_storage(trace_storage, i))
+                trace_storage=_chain_trace_storage(trace_storage, i), observer)
         end
     end
 
@@ -379,12 +417,14 @@ function _run_phase!(
     progress_stops::Int,
     boundary_policy::BoundaryPolicy;
     adaptation_grad=model_.grad,
+    observer=nothing,
 ) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
     begin_trace_phase!(trace_manager, state, flow, phase)
     if phase === :main && !(get_main_trace(trace_manager) isa StreamingPDMPTrace)
         record_event!(trace_manager, state, flow, nothing, phase)
     end
+    _observe_phase_start(observer, phase, state, model_, flow, alg_, cache)
 
     _maybe_simplify_counter = 0
     phase_events_start = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
@@ -427,17 +467,23 @@ function _run_phase!(
             adapter, state, flow, adaptation_grad, phase, stats)
         adapter_owns_horizon = isfinite(adapter_horizon) &&
             adapter_horizon <= criterion_horizon
+        _observe_step(observer, :before_step, phase, state,
+            criterion_horizon, adapter_horizon, :pending, stats)
         prepare_trace_storage_boundary!(trace_manager, phase)
         event_type = _step!(rng, state, model_, flow, alg_, cache, stats,
             trace_manager, boundary_policy, phase,
             min(criterion_horizon, adapter_horizon),
             adapter_owns_horizon ? :anchor_selection_boundary : :horizon_hit)
+        _observe_step(observer, :after_step, phase, state,
+            criterion_horizon, adapter_horizon, event_type, stats)
         event_type === :anchor_selection_boundary ||
             update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, adaptation_grad, trace_manager;
             phase, stats, event_type,
             anchor_boundary_won=event_type === :anchor_selection_boundary)
+        _observe_step(observer, :after_adapt, phase, state,
+            criterion_horizon, adapter_horizon, event_type, stats)
         _handle_gradient_adaptation!(adapter, alg_)
         _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats,
             trace_manager, phase)
@@ -512,10 +558,11 @@ function _run_phase_with_boundary_policy!(
     original_model::PDMPModel,
     support_boundary_options::SupportBoundaryOptions;
     adaptation_grad=model_.grad,
+    observer=nothing,
 )
     return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats, health,
         phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy;
-        adaptation_grad)
+        adaptation_grad, observer)
 end
 
 function _run_phase_with_boundary_policy!(
@@ -540,11 +587,12 @@ function _run_phase_with_boundary_policy!(
     original_model::PDMPModel,
     support_boundary_options::SupportBoundaryOptions;
     adaptation_grad=model_.grad,
+    observer=nothing,
 )
     try
         return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats, health,
             phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy;
-            adaptation_grad)
+            adaptation_grad, observer)
     catch err
         if err isa _ProbeFailureException
             _handle_boundary!(original_model, err.ctx, support_boundary_options)
@@ -576,10 +624,11 @@ function _run_phase_for_policy!(
     original_model::PDMPModel,
     support_boundary_options::SupportBoundaryOptions;
     adaptation_grad=model_.grad,
+    observer=nothing,
 )
     return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats,
         health, phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy;
-        adaptation_grad)
+        adaptation_grad, observer)
 end
 
 function _run_phase_for_policy!(
@@ -604,10 +653,11 @@ function _run_phase_for_policy!(
     original_model::PDMPModel,
     support_boundary_options::SupportBoundaryOptions;
     adaptation_grad=model_.grad,
+    observer=nothing,
 )
     return _run_phase_with_boundary_policy!(rng, criterion, state, model_, flow, alg_, cache,
         trace_manager, stats, health, phase, adapter, progress, prg, tstop, T, progress_stops,
-        boundary_policy, original_model, support_boundary_options; adaptation_grad)
+        boundary_policy, original_model, support_boundary_options; adaptation_grad, observer)
 end
 
 _phase_criterion(::Nothing, T::Real) = _CommonPhaseCriterion(; T)
@@ -635,6 +685,7 @@ function _pdmp_sample_single(
     initial_free::Union{Nothing,AbstractVector{Bool}}=nothing,
     initial_stored_velocity::Union{Nothing,AbstractVector{<:Real}}=nothing,
     trace_storage::Union{Nothing,StreamingTraceStorage}=nothing,
+    observer::Union{Nothing,SamplerObserver}=nothing,
 ) where {FL<:ContinuousDynamics}
 
     # TODO: it's possible to sample to have t_warmup < T...
@@ -708,7 +759,7 @@ function _pdmp_sample_single(
         _run_phase_for_policy!(rng, warmup_criterion, state, phase_model, flow, phase_alg, phase_cache,
             trace_manager, stats, health, :warmup, adapter, progress, prg, tstop, T_float,
             progress_stops, boundary_policy, model, support_boundary_options;
-            adaptation_grad=warmup_grad)
+            adaptation_grad=warmup_grad, observer)
         finish_trace_phase!(trace_manager, state, flow, :warmup)
         _set_counter_warmup_phase_elapsed_time(
             stats, (time_ns() - warmup_phase_start) / 1e9)
@@ -749,7 +800,7 @@ function _pdmp_sample_single(
     _run_phase_for_policy!(rng, stop_criterion, state, phase_model, flow,
         phase_alg, phase_cache, trace_manager, stats, health, :main,
         adapter, progress, prg, tstop, T_float, progress_stops,
-        boundary_policy, original_model, support_boundary_options)
+        boundary_policy, original_model, support_boundary_options; observer)
     finish_trace_phase!(trace_manager, state, flow, :main)
     _set_counter_main_phase_elapsed_time(stats, (time_ns() - main_phase_start) / 1e9)
     _set_counter_main_phase_allocated_bytes(

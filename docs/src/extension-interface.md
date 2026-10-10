@@ -11,6 +11,11 @@ docstrings are on the [API](api.md) page.
 Statistics counters are updated through the generated `_inc_counter_<name>`
 functions described in `src/statistic_counters.jl`.
 
+## Observing a run
+
+- [`PDMPSamplers.SamplerObserver`](@ref), passed to `pdmp_sample` as
+  `observer`
+
 ## Flows and random numbers
 
 - [`PDMPSamplers.underlying_flow`](@ref)
