@@ -61,12 +61,3 @@ function _piecewise_constant_area(pcb::PiecewiseConstantBound,
     end
     return area
 end
-
-function _record_budget_grid_build!(stats::AbstractStatisticCounter, n_cells::Integer, built_area::Real,
-    exponential_budget::Real, is_extension::Bool)
-    is_extension && (_inc_counter_grid_budget_extensions(stats))
-    _inc_counter_grid_budget_cells_built(stats, max(Int(n_cells), 0))
-    _inc_counter_grid_budget_area_built(stats, float(built_area))
-    _inc_counter_grid_budget_exponential_sum(stats, float(exponential_budget))
-    return nothing
-end

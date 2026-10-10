@@ -184,7 +184,6 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
     end
     _record_grid_schedule!(stats, alg)
     built_area = _piecewise_constant_area(pcb)
-    _record_budget_grid_build!(stats, n_cells_bounded, built_area, cumulative_exp, append)
     _inc_counter_grid_bound_seconds(stats, (time_ns() - _grid_t0) * 1.0e-9)
     return n_cells_bounded, built_area
 end

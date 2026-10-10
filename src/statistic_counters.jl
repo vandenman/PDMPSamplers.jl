@@ -8,9 +8,8 @@ The code below is a llm-generated metaprogrammed drop-in replacement for
 the hand-written hot-garbage counter plumbing that used to be there.
 
 They are very useful for debugging and performance analysis.
-The default `StatisticCounter` keeps user-facing counts. Expensive grid/lazy/
-affine/componentwise diagnostics live in `DevelStatisticCounter` for research
-and performance work.
+The default `StatisticCounter` keeps user-facing counts. Expensive grid and lazy
+diagnostics live in `DevelStatisticCounter` for research and performance work.
 
 
 Public API preserved:
@@ -509,10 +508,6 @@ end
     curvature_backend::Symbol
     grid_certificate_calls::Int
     grid_certificate_fallbacks::Int
-    grid_budget_extensions::Int
-    grid_budget_cells_built::Int
-    grid_budget_area_built::Float64
-    grid_budget_exponential_sum::Float64
     grid_budget_tail_restarts::Int
     grid_endpoint_evaluations::Int
     grid_endpoint_derivative_calls::Int
@@ -535,7 +530,6 @@ end
         grid_horizon_hits,
         grid_schedule_samples,
         grid_certificate_calls,
-        grid_budget_extensions,
         grid_budget_tail_restarts,
         grid_endpoint_evaluations,
         grid_endpoint_derivative_calls,
@@ -555,9 +549,6 @@ end
         grid_tmax_sum,
         grid_h_sum,
         grid_certificate_fallbacks,
-        grid_budget_cells_built,
-        grid_budget_area_built,
-        grid_budget_exponential_sum,
         grid_endpoint_derivative_points_loaded,
     )
 
@@ -906,96 +897,6 @@ end
     )
 end
 
-@counter_struct mutable struct AffineBoundCounter <: AbstractStatisticCounter
-    affine_constant_cells::Int
-    affine_area_constant_equiv::Float64
-    affine_area_hybrid::Float64
-end
-
-@counter_ops AffineBoundCounter begin
-    inc(
-        affine_constant_cells,
-    )
-
-    incval(
-        affine_area_constant_equiv,
-        affine_area_hybrid,
-    )
-
-    get_float(affine_area_constant_equiv)
-end
-
-mutable struct ComponentwiseAffineCounter <: AbstractStatisticCounter
-    # Cumulative channel-work counters, not model dimension fields.
-    componentwise_channels::Int
-    componentwise_channel_point_evaluations::Int
-    componentwise_affine_cells::Int
-    componentwise_flat_fallback_cells::Int
-    componentwise_flat_fallback_segment_cap::Int
-    componentwise_flat_fallback_numerical::Int
-    componentwise_affine_skipped_by_area_gate::Int
-    componentwise_affine_skipped_by_policy::Int
-    componentwise_flat_fallback_area_gate::Int
-    componentwise_flat_fallback_policy::Int
-    componentwise_flat_fallback_other::Int
-    componentwise_affine_segments_added::Int
-    componentwise_breakpoints_merged::Int
-    componentwise_area_saved::Float64
-    componentwise_proposed_breakpoints_per_cell::Vector{Float64}
-    componentwise_segments_per_cell::Vector{Float64}
-    componentwise_zero_crossings_per_cell::Vector{Float64}
-    componentwise_area_saved_per_cell::Vector{Float64}
-    componentwise_area_saved_fraction_per_cell::Vector{Float64}
-end
-
-function ComponentwiseAffineCounter()
-    return ComponentwiseAffineCounter(
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0,
-        Float64[], Float64[], Float64[], Float64[], Float64[],
-    )
-end
-
-@counter_ops ComponentwiseAffineCounter begin
-    inc(
-        componentwise_affine_cells,
-        componentwise_flat_fallback_cells,
-        componentwise_flat_fallback_segment_cap,
-        componentwise_flat_fallback_numerical,
-        componentwise_affine_skipped_by_area_gate,
-        componentwise_affine_skipped_by_policy,
-        componentwise_flat_fallback_area_gate,
-        componentwise_flat_fallback_policy,
-        componentwise_flat_fallback_other,
-    )
-
-    incval(
-        componentwise_channels,
-        componentwise_channel_point_evaluations,
-        componentwise_affine_segments_added,
-        componentwise_breakpoints_merged,
-        componentwise_area_saved,
-    )
-
-    get_sum(
-        componentwise_channels,
-        componentwise_channel_point_evaluations,
-        componentwise_affine_cells,
-        componentwise_flat_fallback_cells,
-        componentwise_flat_fallback_segment_cap,
-        componentwise_flat_fallback_numerical,
-        componentwise_affine_skipped_by_area_gate,
-        componentwise_affine_skipped_by_policy,
-        componentwise_flat_fallback_area_gate,
-        componentwise_flat_fallback_policy,
-        componentwise_flat_fallback_other,
-        componentwise_affine_segments_added,
-        componentwise_breakpoints_merged,
-    )
-
-    get_float(componentwise_area_saved)
-end
-
-
 @counter_struct mutable struct PhaseSummaryCounter <: AbstractStatisticCounter
     warmup_events::Int
     main_events::Int
@@ -1142,8 +1043,6 @@ end
     SubsamplingPhaseCounter,
     ConstantBoundCounter,
     StickyStatsCounter,
-    AffineBoundCounter,
-    ComponentwiseAffineCounter,
     PhaseSummaryCounter,
     LazyBoundCounter,
 )

@@ -252,11 +252,6 @@ function construct_rate_bound_grid!(
         Λ_vals[cell] = M
 
         cell_area = M * Δt
-        if stats !== nothing
-            _inc_counter_affine_constant_cells(stats)
-            _inc_counter_affine_area_constant_equiv(stats, cell_area)
-            _inc_counter_affine_area_hybrid(stats, cell_area)
-        end
 
         cumulative_integral += cell_area
         if cumulative_integral >= early_stop_threshold && i <= N
@@ -345,9 +340,6 @@ function construct_rate_bound_grid!(
                 _fill_rate_derivatives!(
                     G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points, state_cache)
             end
-            stats !== nothing && (_inc_counter_componentwise_channels(stats, n_channels))
-            stats !== nothing && (_inc_counter_componentwise_channel_point_evaluations(
-                stats, n_channels * n_points))
             for point in start_point:stop_point
                 offset = point - start_point + 1
                 y_vals[point] = sum(pos(G[j, offset]) for j in 1:n_channels)
@@ -368,14 +360,6 @@ function construct_rate_bound_grid!(
         end
         Λ_vals[cell] = M
         cell_area = M * (b - a)
-        if stats !== nothing
-            _inc_counter_affine_constant_cells(stats)
-            _inc_counter_affine_area_constant_equiv(stats, cell_area)
-            _inc_counter_affine_area_hybrid(stats, cell_area)
-            _inc_counter_componentwise_flat_fallback_cells(stats)
-            _inc_counter_componentwise_affine_skipped_by_policy(stats)
-            _inc_counter_componentwise_flat_fallback_policy(stats)
-        end
         cumulative_integral += cell_area
         N_evaluated = cell
         if cumulative_integral >= early_stop_threshold && cell <= N

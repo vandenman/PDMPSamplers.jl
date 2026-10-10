@@ -136,18 +136,18 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
     @testset "Statistic counter composition and defaults" begin
         c1 = PDMPSamplers.GridThinningCounter()
         c2 = PDMPSamplers.GridThinningCounter()
-        affine1 = PDMPSamplers.AffineBoundCounter()
-        affine2 = PDMPSamplers.AffineBoundCounter()
+        pipeline1 = PDMPSamplers.SubsamplingPipelineCounter()
+        pipeline2 = PDMPSamplers.SubsamplingPipelineCounter()
         basic = PDMPSamplers.BasicEventCounter()
         multi = PDMPSamplers.MultiCounter((c1, c2))
-        affine_multi = PDMPSamplers.MultiCounter((affine1, affine2))
+        pipeline_multi = PDMPSamplers.MultiCounter((pipeline1, pipeline2))
         noop = TestNoopCounter()
 
         @test basic.last_rejected == false
         phase = PDMPSamplers.PhaseSummaryCounter()
         @test phase.stop_reason === :none
         @test PDMPSamplers._get_counter_grid_acceptance_tests(noop) == 0
-        @test PDMPSamplers._get_counter_affine_area_constant_equiv(noop) == 0.0
+        @test PDMPSamplers._get_counter_grid_bound_seconds(noop) == 0.0
         @test !PDMPSamplers._get_counter_last_rejected(noop)
 
         PDMPSamplers._inc_counter_grid_acceptance_tests(c1)
@@ -155,9 +155,9 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         PDMPSamplers._inc_counter_grid_acceptance_tests(c2)
         @test PDMPSamplers._get_counter_grid_acceptance_tests(multi) == 3
 
-        PDMPSamplers._inc_counter_affine_area_constant_equiv(affine1, 0.25)
-        PDMPSamplers._inc_counter_affine_area_constant_equiv(affine2, 0.5)
-        @test PDMPSamplers._get_counter_affine_area_constant_equiv(affine_multi) == 0.75
+        PDMPSamplers._inc_counter_grid_bound_seconds(pipeline1, 0.25)
+        PDMPSamplers._inc_counter_grid_bound_seconds(pipeline2, 0.5)
+        @test PDMPSamplers._get_counter_grid_bound_seconds(pipeline_multi) == 0.75
 
         PDMPSamplers._set_counter_last_rejected(basic, true)
         @test PDMPSamplers._get_counter_last_rejected(PDMPSamplers.MultiCounter((c1, basic)))
