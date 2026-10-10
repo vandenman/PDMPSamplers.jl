@@ -270,33 +270,4 @@ export
 # test_boomerang_dynamics
 
 
-
-# Temporary aliases for the names PDMPSamplersR used before the extension
-# interface; removed once it uses the public names.
-const _underlying_flow = underlying_flow
-const _stream_cursor = stream_cursor
-const _load_streaming_chunk = load_streaming_chunk
-const _stream_apply_event! = stream_apply_event!
-const _stream_move! = stream_move!
-const _restore_streaming_trace = restore_streaming_trace
-const _flush_streaming_trace! = flush_streaming_trace!
-const _STREAM_EVENT_REFLECT_FULL = STREAM_EVENT_REFLECT_FULL
-const _STREAM_EVENT_REFLECT_COORD = STREAM_EVENT_REFLECT_COORD
-const _STREAM_EVENT_REFRESH = STREAM_EVENT_REFRESH
-const _STREAM_EVENT_FREEZE = STREAM_EVENT_FREEZE
-const _STREAM_EVENT_RELEASE = STREAM_EVENT_RELEASE
-const _STREAM_EVENT_DYNAMICS = STREAM_EVENT_DYNAMICS
-const _make_initial_rng = make_initial_rng
-const _trajectory_scale_anchor = trajectory_scale_anchor
-const _validate_subsampling_grid_envelope = validate_subsampling_grid_envelope
-const _joint_signed_group_enabled = joint_signed_group_enabled
-const _joint_signed_cell_mass! = joint_signed_cell_mass!
-const _joint_signed_active_mass! = joint_signed_active_mass!
-const _joint_signed_draw_mark! = joint_signed_draw_mark!
-const _draw_component = draw_component
-const _draw_distinguished = draw_distinguished
-const _draw_base_subset! = draw_base_subset!
-const _signed_subset_bound = signed_subset_bound
-const _has_integrable_segment = has_integrable_segment
-
 end # module PDMPSamplers
