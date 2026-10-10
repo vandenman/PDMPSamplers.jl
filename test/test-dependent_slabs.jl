@@ -122,6 +122,16 @@ end
             rng, clock, flow, state, event_time, can_stick) in beta
         @test thinning_diagnostics(clock).fallbacks == 0
 
+        timed = HarmonicLogLinearAggregateClock(provider, prior; diagnostics=true)
+        @test PDMPSamplers.sample_time(MersenneTwister(445), timed, flow, state,
+            8π, can_stick) == PDMPSamplers.sample_time(MersenneTwister(445),
+            HarmonicLogLinearAggregateClock(provider, prior), flow, state, 8π,
+            can_stick)
+        @test thinning_diagnostics(timed).aggregate_calls == 1
+        @test thinning_diagnostics(copy(timed)).enabled
+        @test thinning_diagnostics(copy(timed).fallback).enabled
+        @test !thinning_diagnostics(clock).enabled
+
         preconditioned = PreconditionedDynamics(
             DiagonalPreconditioner(ones(8)), flow)
         pre_clock = PDMPSamplers.default_aggregate_unstick_clock(
@@ -759,6 +769,20 @@ end
         rng_ref = MersenneTwister(99)
         τ = PDMPSamplers.sample_time(rng_time, const_clock, const_flow, const_state, Inf, const_can_stick)
         @test τ ≈ rand(rng_ref, Exponential()) / λ0 rtol=1e-7 atol=1e-8
+
+        quiet_clock = SummedRateClock(const_provider, BernoulliModelPrior(fill(0.5, 2)))
+        timed_clock = SummedRateClock(const_provider, BernoulliModelPrior(fill(0.5, 2));
+            diagnostics=true)
+        τ_quiet = PDMPSamplers.sample_time(MersenneTwister(7), quiet_clock,
+            const_flow, const_state, Inf, const_can_stick)
+        τ_timed = PDMPSamplers.sample_time(MersenneTwister(7), timed_clock,
+            const_flow, const_state, Inf, const_can_stick)
+        @test τ_quiet == τ_timed
+        @test PDMPSamplers.thinning_diagnostics(quiet_clock).aggregate_calls == 0
+        @test PDMPSamplers.thinning_diagnostics(timed_clock).aggregate_calls == 1
+        @test PDMPSamplers.thinning_diagnostics(timed_clock).rate_evaluations > 0
+        @test PDMPSamplers.thinning_diagnostics(copy(timed_clock)).enabled
+        @test !PDMPSamplers.thinning_diagnostics(copy(quiet_clock)).enabled
 
         tiny_prior = BernoulliModelPrior(fill(1e-20, 2))
         tiny_linear = LinearGaussianAggregateClock(const_provider, tiny_prior)

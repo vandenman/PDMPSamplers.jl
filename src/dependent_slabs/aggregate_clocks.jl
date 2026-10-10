@@ -10,12 +10,16 @@ active_prior_neggrad!(provider::AbstractGaussianSlabProvider, out::AbstractVecto
 
 """
     SummedRateClock(slab_provider, model_prior; rtol=1e-8, atol=1e-10,
-                    initial_bracket=1.0, bracket_multiplier=2.0)
+                    initial_bracket=1.0, bracket_multiplier=2.0,
+                    diagnostics=false)
 
 Generic aggregate unstick clock. It evaluates the summed rate over all inactive
 stickable beta coordinates by calling the provider's boundary densities and the
 model prior. This is the flexible arbitrary-prior baseline; it may allocate
 and uses numerical quadrature/root finding for inhomogeneous clocks.
+
+With `diagnostics=true` the clock also records call counts and the time spent
+in each step, available from `thinning_diagnostics(clock)`.
 """
 mutable struct SummedRateClockDiagnostics
     enabled::Bool
@@ -31,10 +35,8 @@ mutable struct SummedRateClockDiagnostics
     root_inversion_ns::UInt64
 end
 
-SummedRateClockDiagnostics() = SummedRateClockDiagnostics(
-    lowercase(get(ENV, "PDMPSAMPLERS_AGGREGATE_CLOCK_DIAGNOSTICS", "false")) in
-        ("1", "true", "yes"),
-    0, 0, 0, 0, 0, UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+SummedRateClockDiagnostics(enabled::Bool=false) = SummedRateClockDiagnostics(
+    enabled, 0, 0, 0, 0, 0, UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
 
 mutable struct SummedRateClockCache
     active_beta::BitVector
@@ -95,9 +97,8 @@ mutable struct AggregateClockDiagnostics
     allocations::Int
 end
 
-AggregateClockDiagnostics() = AggregateClockDiagnostics(
-    lowercase(get(ENV, "PDMPSAMPLERS_AGGREGATE_CLOCK_DIAGNOSTICS", "false")) in ("1", "true", "yes"),
-    0, 0, 0, 0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0, :none, :none,
+AggregateClockDiagnostics(enabled::Bool=false) = AggregateClockDiagnostics(
+    enabled, 0, 0, 0, 0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0, :none, :none,
     0, 0, 0, 0, 0, 0, 0, 0,
     UInt64(0), UInt64(0), UInt64(0), UInt64(0), 0)
 
@@ -146,7 +147,8 @@ Certified piecewise-constant aggregate boundary clock for a log-linear
 Gaussian slab along a diagonal-preconditioned Boomerang trajectory. Each cell
 uses the exact sinusoidal minimum of every inactive edge's log scale. The
 generic `SummedRateClock` remains the fallback for infinite horizons and
-unsupported flows.
+unsupported flows. With `diagnostics=true` both record call counts and
+timings, available from `thinning_diagnostics`.
 """
 struct HarmonicLogLinearAggregateClock{P<:AbstractLogLinearIndependentGaussianSlab,
         O<:AbstractModelPrior,S<:SummedRateClock} <: AbstractAggregateUnstickClock
@@ -162,15 +164,18 @@ end
 function HarmonicLogLinearAggregateClock(
         slab_provider::AbstractLogLinearIndependentGaussianSlab,
         model_prior::AbstractModelPrior; max_cell_width::Real=0.1,
-        max_cells::Integer=64, rtol::Real=1e-8, atol::Real=1e-10)
+        max_cells::Integer=64, rtol::Real=1e-8, atol::Real=1e-10,
+        diagnostics::Bool=false)
     max_cell_width > 0 || throw(ArgumentError("max_cell_width must be positive"))
     max_cells > 0 || throw(ArgumentError("max_cells must be positive"))
-    fallback = SummedRateClock(slab_provider, model_prior; rtol, atol)
+    fallback = SummedRateClock(slab_provider, model_prior; rtol, atol,
+        diagnostics)
     m = length(beta_indices(slab_provider))
     workspace = HarmonicLogLinearAggregateWorkspace(falses(m), falses(m),
         zeros(max_cells), zeros(max_cells + 1), zeros(m), zeros(m), 0)
     return HarmonicLogLinearAggregateClock(slab_provider, model_prior,
-        Float64(max_cell_width), Int(max_cells), AggregateClockDiagnostics(),
+        Float64(max_cell_width), Int(max_cells),
+        AggregateClockDiagnostics(diagnostics),
         fallback, workspace)
 end
 
@@ -178,7 +183,8 @@ Base.copy(clock::HarmonicLogLinearAggregateClock) =
     HarmonicLogLinearAggregateClock(_copy_callable(clock.slab_provider),
         _copy_callable(clock.model_prior);
         max_cell_width=clock.max_cell_width, max_cells=clock.max_cells,
-        rtol=clock.fallback.rtol, atol=clock.fallback.atol)
+        rtol=clock.fallback.rtol, atol=clock.fallback.atol,
+        diagnostics=clock.diagnostics.enabled)
 
 mutable struct LinearGaussianAggregateCache
     active_beta::BitVector
@@ -334,13 +340,14 @@ function SummedRateClock(
     atol::Real=1e-10,
     initial_bracket::Real=1.0,
     bracket_multiplier::Real=2.0,
+    diagnostics::Bool=false,
 )
     rtol > 0 || throw(ArgumentError("rtol must be positive"))
     atol >= 0 || throw(ArgumentError("atol must be non-negative"))
     initial_bracket > 0 || throw(ArgumentError("initial_bracket must be positive"))
     bracket_multiplier > 1 || throw(ArgumentError("bracket_multiplier must be greater than 1"))
     _check_model_prior_length(model_prior, slab_provider)
-    return SummedRateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), Float64(initial_bracket), Float64(bracket_multiplier), SummedRateClockCache(length(beta_indices(slab_provider))), SummedRateClockDiagnostics())
+    return SummedRateClock(slab_provider, model_prior, Float64(rtol), Float64(atol), Float64(initial_bracket), Float64(bracket_multiplier), SummedRateClockCache(length(beta_indices(slab_provider))), SummedRateClockDiagnostics(diagnostics))
 end
 
 Base.copy(clock::SummedRateClock) = SummedRateClock(
@@ -350,6 +357,7 @@ Base.copy(clock::SummedRateClock) = SummedRateClock(
     atol=clock.atol,
     initial_bracket=clock.initial_bracket,
     bracket_multiplier=clock.bracket_multiplier,
+    diagnostics=clock.diagnostics.enabled,
 )
 
 """
