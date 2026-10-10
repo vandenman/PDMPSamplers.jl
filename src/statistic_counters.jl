@@ -328,7 +328,6 @@ end
     sticky_freezes::Int
     sticky_unfreezes::Int
     sticky_unfreeze_rejections::Int
-    boundary_reflections::Int
     last_rejected::Bool
 end
 
@@ -341,7 +340,6 @@ end
         sticky_freezes,
         sticky_unfreezes,
         sticky_unfreeze_rejections,
-        boundary_reflections,
     )
 
     set(last_rejected)
@@ -526,14 +524,6 @@ end
     grid_bound_violations::Int
     grid_endpoint_derivative_points_loaded::Int
     grid_resets_from_dynamics_adaptation::Int
-    positive_variation_cells::Int
-    positive_variation_refinements::Int
-    positive_variation_fallbacks::Int
-    positive_variation_accepts::Int
-    positive_variation_skipped_cells::Int
-    shared_node_cells::Int
-    shared_node_two_point_cells::Int
-    shared_node_three_point_cells::Int
 end
 
 @counter_ops GridThinningCounter begin
@@ -556,13 +546,6 @@ end
         grid_acceptance_gradient_calls,
         grid_bound_violations,
         grid_resets_from_dynamics_adaptation,
-        positive_variation_cells,
-        positive_variation_refinements,
-        positive_variation_fallbacks,
-        positive_variation_accepts,
-        shared_node_cells,
-        shared_node_two_point_cells,
-        shared_node_three_point_cells,
     )
 
     incval(
@@ -576,7 +559,6 @@ end
         grid_budget_area_built,
         grid_budget_exponential_sum,
         grid_endpoint_derivative_points_loaded,
-        positive_variation_skipped_cells,
     )
 
     set(
@@ -655,7 +637,6 @@ end
     final_thinning_acceptances::Int
     reflection_events::Int
     sticky_boundary_events::Int
-    anchor_refreshes::Int
     grid_schedule_builds::Int
     grid_schedule_searches::Int
     poisson_time_generations::Int
@@ -675,7 +656,6 @@ end
     reflection_sticky_schedule_seconds::Float64
     reflection_state_validation_seconds::Float64
     sticky_update_seconds::Float64
-    anchor_refresh_seconds::Float64
     # Schedule-search and candidate-loop timings are inclusive diagnostics;
     # they are not included in the exclusive main-loop remainder.
     grid_schedule_build_seconds::Float64
@@ -700,7 +680,6 @@ end
         final_thinning_acceptances,
         reflection_events,
         sticky_boundary_events,
-        anchor_refreshes,
         grid_schedule_builds,
         grid_schedule_searches,
         poisson_time_generations,
@@ -722,7 +701,6 @@ end
         reflection_sticky_schedule_seconds,
         reflection_state_validation_seconds,
         sticky_update_seconds,
-        anchor_refresh_seconds,
         grid_schedule_build_seconds,
         grid_schedule_search_seconds,
         poisson_time_generation_seconds,
@@ -743,7 +721,6 @@ end
         final_thinning_acceptances,
         reflection_events,
         sticky_boundary_events,
-        anchor_refreshes,
     )
     get_float(
         grid_bound_seconds,
@@ -758,7 +735,6 @@ end
         reflection_sticky_schedule_seconds,
         reflection_state_validation_seconds,
         sticky_update_seconds,
-        anchor_refresh_seconds,
     )
 end
 
@@ -931,63 +907,22 @@ end
 end
 
 @counter_struct mutable struct AffineBoundCounter <: AbstractStatisticCounter
-    affine_roof_cells::Int
-    affine_inflated_cells::Int
     affine_constant_cells::Int
     affine_area_constant_equiv::Float64
     affine_area_hybrid::Float64
-    affine_area_saved::Float64
-    affine_cells_skipped_by_min_gain::Int
-    affine_segments_added::Int
-    affine_bound_violations::Int
 end
 
 @counter_ops AffineBoundCounter begin
     inc(
-        affine_roof_cells,
-        affine_inflated_cells,
         affine_constant_cells,
-        affine_cells_skipped_by_min_gain,
-        affine_bound_violations,
     )
 
     incval(
         affine_area_constant_equiv,
         affine_area_hybrid,
-        affine_area_saved,
-        affine_segments_added,
     )
 
     get_float(affine_area_constant_equiv)
-end
-
-@counter_struct mutable struct CertifiedAutoCounter <: AbstractStatisticCounter
-    auto_flat_cells::Int
-    auto_affine_cells::Int
-    auto_area_saved::Float64
-    auto_affine_fraction::Float64
-    auto_used_affine_grids::Int
-    auto_used_flat_grids::Int
-end
-
-@counter_ops CertifiedAutoCounter begin
-    inc(
-        auto_flat_cells,
-        auto_affine_cells,
-        auto_used_affine_grids,
-        auto_used_flat_grids,
-    )
-
-    incval(auto_area_saved)
-
-    set(auto_affine_fraction)
-
-    get_sum(
-        auto_flat_cells,
-        auto_affine_cells,
-    )
-
-    get_float(auto_area_saved)
 end
 
 mutable struct ComponentwiseAffineCounter <: AbstractStatisticCounter
@@ -1181,35 +1116,6 @@ end
     )
 end
 
-@counter_struct mutable struct BoomerangInterferenceCounter <: AbstractStatisticCounter
-    boomerang_interference_events::Int
-    boomerang_target_c_share_sum::Float64
-    boomerang_target_d_share_sum::Float64
-    boomerang_nuisance_driven_target_disturbances::Int
-end
-
-@counter_ops BoomerangInterferenceCounter begin
-    inc(
-        boomerang_interference_events,
-        boomerang_nuisance_driven_target_disturbances,
-    )
-
-    incval(
-        boomerang_target_c_share_sum,
-        boomerang_target_d_share_sum,
-    )
-
-    get_sum(
-        boomerang_interference_events,
-        boomerang_nuisance_driven_target_disturbances,
-    )
-
-    get_float(
-        boomerang_target_c_share_sum,
-        boomerang_target_d_share_sum,
-    )
-end
-
 # ===========================================================================================
 # Convenience type aliases for backward-compatible construction
 # ===========================================================================================
@@ -1237,9 +1143,7 @@ end
     ConstantBoundCounter,
     StickyStatsCounter,
     AffineBoundCounter,
-    CertifiedAutoCounter,
     ComponentwiseAffineCounter,
     PhaseSummaryCounter,
     LazyBoundCounter,
-    BoomerangInterferenceCounter,
 )
