@@ -643,7 +643,10 @@
             phase=:main)
         @test PDMPSamplers.did_gradient_adapt(changed)
         grid = PDMPSamplers._build_grid_adaptive_state(
-            GridThinningStrategy(; N=5, t_max=1.0), state, 5, 5, Inf)
+            GridThinningStrategy(; N=5, t_max=1.0), state,
+            BouncyParticle(length(state.ξ)),
+            PDMPModel(length(state.ξ), FullGradient((out, x) -> copyto!(out, x))),
+            (; ∇ϕx=similar(state.ξ.x)), 5, 5, 5)
         grid.has_cached_gradient[] = true
         PDMPSamplers._handle_gradient_adaptation!(changed, grid)
         @test !grid.has_cached_gradient[]

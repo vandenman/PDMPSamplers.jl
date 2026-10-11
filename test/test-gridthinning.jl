@@ -1066,7 +1066,9 @@ end
         d = 3
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 20, 5, Inf)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache,
+            BouncyParticle(d), PDMPModel(d, FullGradient((out, x) -> copyto!(out, x))),
+            (; ∇ϕx=zeros(d)), 20, 5, 20)
 
         # Tight bound → shrink N
         PDMPSamplers._adapt_grid_N!(alg, 0.8)
@@ -1096,7 +1098,9 @@ end
         d = 3
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         strat = GridThinningStrategy(; N=20, N_min=5, t_max=2.0)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 16, 5, Inf)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache,
+            BouncyParticle(d), PDMPModel(d, FullGradient((out, x) -> copyto!(out, x))),
+            (; ∇ϕx=zeros(d)), 16, 5, 16)
 
         PDMPSamplers._increase_grid_N!(alg)
         @test alg.N[] == 16
@@ -1136,7 +1140,9 @@ end
         d = 3
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         strat = GridThinningStrategy(; N=20, N_min=5, t_max=5.0)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache, 10, 5, Inf)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state_cache,
+            BouncyParticle(d), PDMPModel(d, FullGradient((out, x) -> copyto!(out, x))),
+            (; ∇ϕx=zeros(d)), 10, 5, 10)
 
         PDMPSamplers.reset_grid_scale!(alg, 3.0)
         @test alg.t_max[] ≈ 3.0
@@ -1510,7 +1516,9 @@ end
         d = 3
         state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
         strat = GridThinningStrategy(; N=20, t_max=2.0, post_warmup_simplify=true)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 20, 5, 5.0)
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state,
+            BouncyParticle(d), PDMPModel(d, FullGradient((out, x) -> copyto!(out, x))),
+            (; ∇ϕx=zeros(d)), 20, 5, 20)
 
         stats = PDMPSamplers.DevelStatisticCounter()
         stats.reflections_accepted = 2
@@ -1617,8 +1625,8 @@ end
 
         strat = GridThinningStrategy(; N=16, t_max=2.0, post_warmup_simplify=true,
             bound=:constant)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, 16, 5, 5.0)
         cache = (; z=similar(ξ0.x), ∇ϕx=similar(ξ0.x))
+        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, flow, model, cache, 16, 5, 16)
         stats = PDMPSamplers.DevelStatisticCounter()
 
         # Arm the constant bound to a deliberately high value so thinning always accepts
@@ -1632,7 +1640,7 @@ end
 
         # With include_refresh=true and high refresh rate, should sometimes return :refresh
         flow_refresh = BouncyParticle(d, 1e6)
-        alg2 = PDMPSamplers._build_grid_adaptive_state(strat, state, 16, 5, 5.0)
+        alg2 = PDMPSamplers._build_grid_adaptive_state(strat, state, flow_refresh, model, cache, 16, 5, 16)
         alg2.constant_bound_rate[] = 1.0
         τ2, event_type2, _ = PDMPSamplers._constant_bound_event_time(
             model, flow_refresh, alg2, state, cache, stats, Inf, true)
@@ -1650,7 +1658,7 @@ end
         θ3 = zeros(d); θ3[1] = 1.0
         ξ3 = SkeletonPoint(x3, θ3)
         state3 = PDMPState(0.0, ξ3)
-        alg3 = PDMPSamplers._build_grid_adaptive_state(strat, state3, 16, 5, 5.0)
+        alg3 = PDMPSamplers._build_grid_adaptive_state(strat, state3, flow, model3, cache, 16, 5, 16)
         alg3.constant_bound_rate[] = 10.0
         τ3, _, _ = PDMPSamplers._constant_bound_event_time(
             model3, flow, alg3, state3, cache, stats, Inf, false)

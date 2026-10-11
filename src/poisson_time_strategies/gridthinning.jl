@@ -32,7 +32,6 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     α⁺::Float64
     α⁻::Float64
     safety_limit::Int
-    early_stop_threshold::Float64
     use_fd_hvp::Bool
     curvature_backend::Symbol
     post_warmup_simplify::Bool
@@ -183,7 +182,7 @@ function _normalize_grid_bound(bound::Symbol)
 end
 
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
-    safety_limit::Int=500, early_stop_threshold::Real=5.0, use_fd_hvp::Bool=false,
+    safety_limit::Int=500, use_fd_hvp::Bool=false,
     curvature_backend=nothing, post_warmup_simplify::Bool=false,
     lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing,
     max_rejections_before_tail_restart::Int=100,
@@ -201,7 +200,7 @@ function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺:
     backend = _normalize_curvature_backend(curvature_backend, use_fd_hvp)
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
-        Float64(early_stop_threshold), backend === :finite_difference, backend,
+        backend === :finite_difference, backend,
         post_warmup_simplify,
         lazy, bound_symbol, curvature_bound, bound_violation_symbol,
         max_rejections_before_tail_restart,
@@ -217,8 +216,6 @@ function Base.show(io::IO, strat::GridThinningStrategy)
     print(io, ")")
 end
 
-_default_early_stop(::ContinuousDynamics, est::Float64) = est
-_default_early_stop(pd::PreconditionedDynamics, est::Float64) = _default_early_stop(pd.dynamics, est)
 
 function _grid_min_cells(strat::GridThinningStrategy, flow::ContinuousDynamics, N_base::Int)
     strat.bound === :value_quadratic && return strat.N_min
@@ -261,10 +258,8 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     # Derivative info is always available: either via HVP, VHV, joint, or FD fallback.
     N_base = strat.N
     N_min = _grid_min_cells(strat, flow, N_base)
-    est = _default_early_stop(flow, strat.early_stop_threshold)
-    est = _adjust_early_stop(model.grad, est)
     N_max = max(N_base + 4, 2 * N_base)
-    alg = _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, est, stats)
+    alg = _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_max, stats)
     _set_counter_grid_initial_N(stats, alg.N[])
     _set_counter_grid_final_N(stats, alg.N[])
     _set_counter_grid_initial_tmax(stats, alg.t_max[])
@@ -277,7 +272,6 @@ function _to_internal(strat::GridThinningStrategy, ::Random.AbstractRNG, flow::C
     return alg
 end
 
-_adjust_early_stop(::GradientStrategy, est::Float64) = est
 function _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh::Float64, max_horizon::Float64,
     max_horizon_event::Symbol=:horizon_hit)
     if τ_refresh <= t_max && τ_refresh <= max_horizon
@@ -312,18 +306,7 @@ function _return_grid_horizon!(alg, stats::AbstractStatisticCounter, flow::Conti
     return effective_horizon, horizon_event, default_return
 end
 
-function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
-    flow = BouncyParticle(length(state.ξ))
-    model = PDMPModel(length(state.ξ), FullGradient((out, x) -> copyto!(out, x)))
-    cache = (; ∇ϕx=similar(state.ξ.x))
-    return _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_base, est)
-end
-
-function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, est) where S<:AbstractPDMPState
-    return _build_grid_adaptive_state(strat, state, flow, model, cache, N_base, N_min, N_base, est)
-end
-
-function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, N_max::Int, est, stats=nothing) where S<:AbstractPDMPState
+function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow::ContinuousDynamics, model::PDMPModel, cache, N_base::Int, N_min::Int, N_max::Int, stats=nothing) where S<:AbstractPDMPState
     T = typeof(strat.t_max)
     state_cache = copy(state)
     state_cache2 = copy(state)
@@ -358,10 +341,8 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         N_min,
         N_max,
         Ref(false),
-        est,
         state_cache,
         state_cache2,
-        empty_gradient,
         GradientMeta(empty_gradient),
         strat.curvature_backend,
         fd_buf,
@@ -392,7 +373,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
     )
 end
 
-struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q,B} <: PoissonTimeStrategy
+struct GridAdaptiveState{S<:AbstractPDMPState,P,Q,B} <: PoissonTimeStrategy
     pcb::PiecewiseConstantBound{Float64}
     subsampling_bound::PiecewiseAffineBound{Float64}
     N::Base.RefValue{Int}
@@ -403,10 +384,8 @@ struct GridAdaptiveState{S<:AbstractPDMPState,V<:AbstractVector,P,Q,B} <: Poisso
     N_min::Int
     N_max::Int
     schedule_frozen::Base.RefValue{Bool}
-    early_stop_threshold::Float64
     state_cache::S
     state_cache2::S
-    empty_∇ϕx::V
     empty_gradient_meta::GradientMeta
     curvature_backend::Symbol
     fd_buf::Vector{Float64}
