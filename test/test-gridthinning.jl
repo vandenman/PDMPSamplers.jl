@@ -406,7 +406,8 @@ end
         τ, event_type, meta = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, false)
 
         @test event_type === :horizon_hit
-        @test τ > alg.t_max
+        # A tail restart must retain the original search horizon.
+        @test τ == alg.t_max
         @test stats.grid_budget_tail_restarts > 0
         @test state.t[] == state_before.t[]
         @test state.ξ.x == state_before.ξ.x
