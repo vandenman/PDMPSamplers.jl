@@ -78,7 +78,10 @@ function _throw_grid_boundary_error(current_state::AbstractPDMPState, original_s
     algorithm_type::Type=GridThinningStrategy
 )
     ctx = _grid_boundary_context(original_state, flow, err, t_valid, t_invalid, algorithm_type)
-    _support_boundary_probe_is_valid(model, ctx, t_invalid) && throw(err)
+    if _support_boundary_probe_is_valid(model, ctx, t_invalid)
+        # A finite-difference probe can cross support beyond the grid endpoint.
+        err isa ErrorException && occursin("Outside support", err.msg) || throw(err)
+    end
     throw(_ProbeFailureException(ctx))
 end
 
