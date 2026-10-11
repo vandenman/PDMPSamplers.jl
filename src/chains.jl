@@ -11,17 +11,8 @@ function PDMPTerminalState(state::AbstractPDMPState, flow)
     stored = state isa StickyPDMPState ? copy(state.stored_velocity) :
         zeros(Float64, length(state.ξ))
     free = state isa StickyPDMPState ? copy(state.free) : trues(length(state.ξ))
-    # Endpoint provenance must also work for legacy covariance wrappers whose
-    # internal factor object has no `copy` method.  This does not alter the
-    # sampler's working flow; it only snapshots it for export.
-    flow_snapshot = try
-        _copy_flow(flow)
-    catch err
-        err isa MethodError || rethrow()
-        deepcopy(flow)
-    end
     return PDMPTerminalState(Float64(state.t[]), Float64.(state.ξ.x),
-        Float64.(state.ξ.θ), stored, free, flow_snapshot)
+        Float64.(state.ξ.θ), stored, free, deepcopy(flow))
 end
 
 struct PDMPChains{T<:AbstractPDMPTrace,S,E}
