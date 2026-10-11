@@ -169,14 +169,14 @@ end
 
 function _integrate_segment(
     f::Union{typeof(_transformed_mean_segment),typeof(_transformed_var_segment)},
-    flow::ContinuousDynamics, x0, x1, v0, v1, t0, t1, args...)
+    flow::Union{ZigZag,BouncyParticle,AnyBoomerang}, x0, x1, v0, v1, t0, t1, args...)
     integral = zeros(length(x0))
     return _integrate_segment!(integral, f, flow, x0, x1, v0, v1, t0, t1, args...)
 end
 
 function _integrate_segment!(integral,
     f::Union{typeof(_transformed_mean_segment),typeof(_transformed_var_segment)},
-    flow::ContinuousDynamics, x0, x1, v0, v1, t0, t1,
+    flow::Union{ZigZag,BouncyParticle,AnyBoomerang}, x0, x1, v0, v1, t0, t1,
     transforms::AbstractVector{<:ParameterTransform}, args...)
     return _integrate_segment!(integral, f, flow, x0, x1, v0, v1, t0, t1,
         nothing, transforms, args...)
@@ -184,7 +184,7 @@ end
 
 function _integrate_segment!(integral,
     f::Union{typeof(_transformed_mean_segment),typeof(_transformed_var_segment)},
-    flow::ContinuousDynamics, x0, x1, v0, v1, t0, t1,
+    flow::Union{ZigZag,BouncyParticle,AnyBoomerang}, x0, x1, v0, v1, t0, t1,
     free::Union{Nothing,AbstractVector{Bool}}, transforms, centers=nothing)
     base = underlying_flow(flow)
     dt = Float64(t1 - t0)

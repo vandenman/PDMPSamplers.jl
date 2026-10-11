@@ -11,6 +11,12 @@ import QuadGK
         @test var(trace, [IdentityTransform()]) == var(trace) == [0.0]
         @test mean(trace, [LowerBoundTransform(2.0)]) == [3.0]
         @test var(trace, [LowerBoundTransform(2.0)]) == [0.0]
+        wrapped = PDMPSamplers.PreconditionedDynamics(
+            PDMPSamplers.IdentityPreconditioner(), flow)
+        wrapped_trace = PDMPTrace(trace.times, trace.positions, trace.velocities,
+            wrapped, trace.free_masks)
+        @test mean(wrapped_trace, [IdentityTransform()]) == [0.0]
+        @test var(wrapped_trace, [IdentityTransform()]) == [0.0]
     end
 
     # ──────────────────────────────────────────────────────────────────────────
