@@ -32,8 +32,8 @@ struct _DependentSlabFiniteDiffHVP{T<:DependentSlabTarget} <: Function
     step::Float64
 end
 
-struct _DependentSlabFiniteDiffVHV{T<:DependentSlabTarget} <: Function
-    hvp!::_DependentSlabFiniteDiffHVP{T}
+struct _DependentSlabVHV{H} <: Function
+    hvp!::H
     hv_buf::Vector{Float64}
 end
 
@@ -84,12 +84,12 @@ function Base.copy(h::_DependentSlabFiniteDiffHVP)
     return _DependentSlabFiniteDiffHVP(copy(h.target), similar(h.x_plus), similar(h.x_minus), similar(h.grad_plus), similar(h.grad_minus), h.step)
 end
 
-function Base.copy(v::_DependentSlabFiniteDiffVHV)
-    return _DependentSlabFiniteDiffVHV(copy(v.hvp!), similar(v.hv_buf))
+function Base.copy(v::_DependentSlabVHV)
+    return _DependentSlabVHV(copy(v.hvp!), similar(v.hv_buf))
 end
 
 _copy_callable(h::_DependentSlabFiniteDiffHVP) = copy(h)
-_copy_callable(v::_DependentSlabFiniteDiffVHV) = copy(v)
+_copy_callable(v::_DependentSlabVHV) = copy(v)
 
 function set_active_set!(target::DependentSlabTarget, free::BitVector)
     length(free) == target.d || throw(DimensionMismatch("active set length $(length(free)) does not match target dimension $(target.d)"))
@@ -101,7 +101,7 @@ function set_active_set!(target::DependentSlabTarget, free::BitVector)
 end
 
 set_active_set!(h::_DependentSlabFiniteDiffHVP, free::BitVector) = set_active_set!(h.target, free)
-set_active_set!(v::_DependentSlabFiniteDiffVHV, free::BitVector) = set_active_set!(v.hvp!, free)
+set_active_set!(v::_DependentSlabVHV, free::BitVector) = set_active_set!(v.hvp!, free)
 
 function _evaluate_negative_gradient!(f, out::AbstractVector, x::AbstractVector)
     f(out, x)
@@ -143,7 +143,7 @@ function (h::_DependentSlabFiniteDiffHVP)(out::AbstractVector, x::AbstractVector
     return out
 end
 
-function (v::_DependentSlabFiniteDiffVHV)(x::AbstractVector, direction::AbstractVector, weight::AbstractVector)
+function (v::_DependentSlabVHV)(x::AbstractVector, direction::AbstractVector, weight::AbstractVector)
     v.hvp!(v.hv_buf, x, direction)
     return dot(weight, v.hv_buf)
 end
@@ -160,22 +160,12 @@ struct _DependentSlabAnalyticHVP{T<:DependentSlabTarget} <: Function
     slab_buf::Vector{Float64}
 end
 
-struct _DependentSlabAnalyticVHV{H<:_DependentSlabAnalyticHVP} <: Function
-    hvp!::H
-    hv_buf::Vector{Float64}
-end
-
 Base.copy(h::_DependentSlabAnalyticHVP) = _DependentSlabAnalyticHVP(
     copy(h.target), similar(h.posterior_buf), similar(h.all_active_slab_buf),
     similar(h.slab_buf))
-Base.copy(v::_DependentSlabAnalyticVHV) =
-    _DependentSlabAnalyticVHV(copy(v.hvp!), similar(v.hv_buf))
 _copy_callable(h::_DependentSlabAnalyticHVP) = copy(h)
-_copy_callable(v::_DependentSlabAnalyticVHV) = copy(v)
 set_active_set!(h::_DependentSlabAnalyticHVP, free::BitVector) =
     set_active_set!(h.target, free)
-set_active_set!(v::_DependentSlabAnalyticVHV, free::BitVector) =
-    set_active_set!(v.hvp!, free)
 
 function (h::_DependentSlabAnalyticHVP)(out::AbstractVector,
         x::AbstractVector, direction::AbstractVector)
@@ -193,12 +183,6 @@ function (h::_DependentSlabAnalyticHVP)(out::AbstractVector,
     return out
 end
 
-function (v::_DependentSlabAnalyticVHV)(x::AbstractVector,
-        direction::AbstractVector, weight::AbstractVector)
-    v.hvp!(v.hv_buf, x, direction)
-    return dot(weight, v.hv_buf)
-end
-
 _has_analytic_active_prior_hvp(::AbstractSlabPrior) = false
 _has_analytic_active_prior_hvp(::LogLinearGaussianScaleSlab) = true
 
@@ -213,8 +197,7 @@ function PDMPModel(target::DependentSlabTarget; hvp::Bool=false)
             _has_analytic_active_prior_hvp(target.slab_provider)
         hvp! = analytic ? _dependent_slab_analytic_hvp(target) :
             _dependent_slab_hvp(target)
-        vhv = analytic ? _DependentSlabAnalyticVHV(copy(hvp!), zeros(target.d)) :
-            _DependentSlabFiniteDiffVHV(copy(hvp!), zeros(target.d))
+        vhv = _DependentSlabVHV(copy(hvp!), zeros(target.d))
         return PDMPModel(target.d, FullGradient(target), hvp!, vhv, true)
     end
     return PDMPModel(target.d, FullGradient(target), nothing)
