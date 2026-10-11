@@ -347,7 +347,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             SkeletonPoint([0.0], [1.0]),
             BouncyParticle(1, 0.0),
             PDMPModel(1, adaptive_gradient, nothing),
-            GridThinningStrategy(),
+            GridThinningStrategy(curvature_bound=0.0),
             0.0, 0.1, 1.0;
             warmup_stop=adaptive_criterion,
             progress=false,
