@@ -158,6 +158,8 @@ end
 # phase, but populate new entries only from warmup traces. The callbacks take
 # the chain-local SubsampledControlVariate explicitly so copied/statistics-wrapped
 # models cannot accidentally refresh another chain's provider.
+# Selection takes (grad, state, flow, phase, stats, event_type); every adapter
+# supplies selection, update, warmup-finish, and horizon callbacks explicitly.
 mutable struct SubsamplingAnchorBankAdapter{F1,F2,F3,F4} <: AbstractAdapter
     select_fn!::F1
     update_fn!::F2
@@ -167,18 +169,6 @@ mutable struct SubsamplingAnchorBankAdapter{F1,F2,F3,F4} <: AbstractAdapter
     last_update::Float64
     did_update::Bool
 end
-
-SubsamplingAnchorBankAdapter(select_fn!, update_fn!, update_dt, last_update) =
-    SubsamplingAnchorBankAdapter(select_fn!, update_fn!, (_args...) -> false,
-        (_args...) -> Inf, update_dt, last_update, false)
-SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
-        update_dt, last_update) =
-    SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
-        (_args...) -> Inf, update_dt, last_update, false)
-SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
-        horizon_fn!, update_dt, last_update) =
-    SubsamplingAnchorBankAdapter(select_fn!, update_fn!, finish_warmup_fn!,
-        horizon_fn!, update_dt, last_update, false)
 
 function adaptation_horizon(ad::SubsamplingAnchorBankAdapter, state, flow,
         grad, phase::Symbol, stats)
@@ -191,24 +181,9 @@ end
 
 function adapt!(::Random.AbstractRNG, ad::SubsamplingAnchorBankAdapter, state, flow,
         grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
-    # The statistics argument is optional for backwards compatibility with
-    # external anchor selectors.  The OMRF provider uses it for opt-in
-    # trajectory-window diagnostics, while older selectors keep the original
-    # four-argument callback contract.
     stats = get(kwargs, :stats, nothing)
     event_type = get(kwargs, :event_type, :unknown)
-    anchor_boundary_won = get(kwargs, :anchor_boundary_won, false)
-    ad.did_update = if stats !== nothing && applicable(
-            ad.select_fn!, grad, state, flow, phase, stats, event_type,
-            anchor_boundary_won)
-        ad.select_fn!(grad, state, flow, phase, stats, event_type,
-            anchor_boundary_won) === true
-    elseif stats !== nothing && applicable(
-            ad.select_fn!, grad, state, flow, phase, stats)
-        ad.select_fn!(grad, state, flow, phase, stats) === true
-    else
-        ad.select_fn!(grad, state, flow, phase) === true
-    end
+    ad.did_update = ad.select_fn!(grad, state, flow, phase, stats, event_type) === true
     if phase === :warmup && state.t[] - ad.last_update >= ad.update_dt
         trace = get_warmup_trace(trace_mgr)
         if has_integrable_segment(trace)

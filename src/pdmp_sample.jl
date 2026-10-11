@@ -480,8 +480,7 @@ function _run_phase!(
             update!(criterion, state, trace_manager, stats, event_type)
 
         adapt!(rng, adapter, state, flow, adaptation_grad, trace_manager;
-            phase, stats, event_type,
-            anchor_boundary_won=event_type === :anchor_selection_boundary)
+            phase, stats, event_type)
         _observe_step(observer, :after_adapt, phase, state,
             criterion_horizon, adapter_horizon, event_type, stats)
         _handle_gradient_adaptation!(adapter, alg_)

@@ -625,9 +625,11 @@
         selected = Ref(0)
         updated = Ref(0)
         ad = PDMPSamplers.SubsamplingAnchorBankAdapter(
-            (cv, state, flow, phase) -> (selected[] += phase === :main),
+            (cv, state, flow, phase, stats, event_type) -> (selected[] += phase === :main),
             (cv, trace) -> (updated[] += 1),
-            1.0, 0.0)
+            (cv, state, flow, trace_mgr, stats) -> false,
+            (cv, state, flow, phase, stats) -> Inf,
+            1.0, 0.0, false)
 
         PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
         @test selected[] == 1
@@ -636,9 +638,11 @@
         @test !PDMPSamplers.did_gradient_adapt(ad)
 
         changed = PDMPSamplers.SubsamplingAnchorBankAdapter(
-            (cv, state, flow, phase) -> true,
+            (cv, state, flow, phase, stats, event_type) -> true,
             (cv, trace) -> nothing,
-            1.0, 0.0)
+            (cv, state, flow, trace_mgr, stats) -> false,
+            (cv, state, flow, phase, stats) -> Inf,
+            1.0, 0.0, false)
         PDMPSamplers.adapt!(changed, state, nothing, grad, trace_mgr;
             phase=:main)
         @test PDMPSamplers.did_gradient_adapt(changed)
@@ -653,10 +657,11 @@
 
         finished = Ref(0)
         staged = PDMPSamplers.SubsamplingAnchorBankAdapter(
-            (cv, state, flow, phase) -> nothing,
+            (cv, state, flow, phase, stats, event_type) -> nothing,
             (cv, trace) -> nothing,
-            (cv, args...) -> (finished[] += 1; true),
-            1.0, 0.0)
+            (cv, state, flow, trace_mgr, stats) -> (finished[] += 1; true),
+            (cv, state, flow, phase, stats) -> Inf,
+            1.0, 0.0, false)
         @test PDMPSamplers.finish_warmup!(staged, state, nothing, grad,
             trace_mgr, PDMPSamplers.StatisticCounter())
         @test finished[] == 1
