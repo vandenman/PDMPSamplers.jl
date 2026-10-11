@@ -398,7 +398,6 @@ function boundary_logweights!(
 end
 
 _exchangeable_mean(provider::ExchangeableGaussianSlab) = provider.mean
-_exchangeable_mean(::ZeroMeanExchangeableGaussianSlab) = 0.0
 
 function _exchangeable_conditional_params(provider::AbstractExchangeableGaussianSlab, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)

@@ -118,7 +118,7 @@ end
             BouncyParticle(4, 0.0)),
     )
     prior = BernoulliModelPrior(fill(0.4, 2))
-    fixed = ZeroMeanExchangeableGaussianSlab([1, 2], 1.0, 0.2)
+    fixed = ExchangeableGaussianSlab([1, 2], 0.0, 1.0, 0.2)
     varying = LogLinearGaussianScaleSlab(
         [1, 2], [3, 4], zeros(2), Matrix{Float64}(I, 2, 2))
     state = StickyPDMPState(0.0,
@@ -140,7 +140,7 @@ end
         @test count(==(2), labels) / length(labels) ≈ 0.75 atol=0.012
     end
 
-    shared = ZeroMeanExchangeableGaussianSlab([1, 2], 1.0, 0.2)
+    shared = ExchangeableGaussianSlab([1, 2], 0.0, 1.0, 0.2)
     shared_state = StickyPDMPState(0.0,
         SkeletonPoint(zeros(3), zeros(3)),
         BitVector([false, false, true]), [1.0, 3.0, 0.0])

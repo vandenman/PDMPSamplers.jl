@@ -82,29 +82,6 @@ struct ExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
 end
 
 """
-    ZeroMeanExchangeableGaussianSlab(beta_indices, u, v)
-
-Zero-mean exchangeable Gaussian slab with covariance `u * I + v * ones(p, p)`.
-This has optimized boundary-density formulas for exchangeable active faces.
-"""
-struct ZeroMeanExchangeableGaussianSlab <: AbstractExchangeableGaussianSlab
-    beta_indices::Vector{Int}
-    u::Float64
-    v::Float64
-    function ZeroMeanExchangeableGaussianSlab(beta_indices::AbstractVector{<:Integer}, u::Real, v::Real)
-        isempty(beta_indices) && throw(ArgumentError("beta_indices must be non-empty"))
-        all(>(0), beta_indices) || throw(ArgumentError("beta_indices must be positive"))
-        length(unique(beta_indices)) == length(beta_indices) || throw(ArgumentError("beta_indices must be unique"))
-        p = length(beta_indices)
-        u_f = Float64(u)
-        v_f = Float64(v)
-        u_f > 0 || throw(ArgumentError("u must be positive"))
-        u_f + p * v_f > 0 || throw(ArgumentError("u + p*v must be positive"))
-        new(Vector{Int}(beta_indices), u_f, v_f)
-    end
-end
-
-"""
     LogLinearGaussianScaleSlab(beta_indices, logscale_indices,
                                log_base_scales, logscale_design)
 
@@ -201,7 +178,6 @@ end
 
 Base.copy(provider::DenseGaussianSlab) = DenseGaussianSlab(copy(provider.mean), copy(provider.cov), copy(provider.beta_indices))
 Base.copy(provider::ExchangeableGaussianSlab) = ExchangeableGaussianSlab(copy(provider.beta_indices), provider.mean, provider.u, provider.v)
-Base.copy(provider::ZeroMeanExchangeableGaussianSlab) = ZeroMeanExchangeableGaussianSlab(copy(provider.beta_indices), provider.u, provider.v)
 Base.copy(provider::LogLinearGaussianScaleSlab) =
     LogLinearGaussianScaleSlab(copy(provider.beta_indices), copy(provider.logscale_indices),
         copy(provider.log_base_scales), copy(provider.rowptr),
@@ -242,16 +218,6 @@ end
 function gaussian_slab!(provider::ExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
     m = length(provider.beta_indices)
     fill!(mean_out, provider.mean)
-    fill!(cov_out, provider.v)
-    @inbounds for i in 1:m
-        cov_out[i, i] = provider.u + provider.v
-    end
-    return nothing
-end
-
-function gaussian_slab!(provider::ZeroMeanExchangeableGaussianSlab, mean_out::AbstractVector, cov_out::AbstractMatrix, x::AbstractVector)
-    m = length(provider.beta_indices)
-    fill!(mean_out, 0.0)
     fill!(cov_out, provider.v)
     @inbounds for i in 1:m
         cov_out[i, i] = provider.u + provider.v
@@ -636,11 +602,8 @@ function active_prior_hvp!(provider::LogLinearGaussianScaleSlab,
     return out
 end
 
-_fixed_exchangeable_mean(provider::ExchangeableGaussianSlab) = provider.mean
-_fixed_exchangeable_mean(::ZeroMeanExchangeableGaussianSlab) = 0.0
 
-function active_slab_potential_gradient!(provider::Union{
-        ExchangeableGaussianSlab,ZeroMeanExchangeableGaussianSlab},
+function active_slab_potential_gradient!(provider::ExchangeableGaussianSlab,
         out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     length(out) == length(x) ||
@@ -653,7 +616,7 @@ function active_slab_potential_gradient!(provider::Union{
 
     k = _active_count(active_beta)
     iszero(k) && return out
-    μ = _fixed_exchangeable_mean(provider)
+    μ = provider.mean
     centered_sum = zero(eltype(out))
     @inbounds for j in eachindex(indices, active_beta)
         active_beta[j] && (centered_sum += x[indices[j]] - μ)

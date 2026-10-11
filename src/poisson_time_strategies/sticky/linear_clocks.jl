@@ -281,7 +281,6 @@ function _linear_gaussian_label_weights!(clock::LinearGaussianAggregateClock,
 end
 
 _exchangeable_linear_mean(provider::ExchangeableGaussianSlab) = provider.mean
-_exchangeable_linear_mean(::ZeroMeanExchangeableGaussianSlab) = 0.0
 
 function _exchangeable_linear_params(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, state::StickyPDMPState, can_stick::BitVector)
     provider = clock.slab_provider

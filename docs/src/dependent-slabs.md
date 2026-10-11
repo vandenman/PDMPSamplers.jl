@@ -49,7 +49,7 @@ dynamics it has no specialized method for.
 
 The public, user-facing constructors are the model priors `BernoulliModelPrior`
 and `BetaBernoulliModelPrior`, and the slabs `DenseGaussianSlab`,
-`ExchangeableGaussianSlab`, `ZeroMeanExchangeableGaussianSlab`, and
+`ExchangeableGaussianSlab` (including mean zero), and
 `LogLinearGaussianScaleSlab`.
 
 ## Complete example

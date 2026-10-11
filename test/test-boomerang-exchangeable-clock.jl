@@ -21,7 +21,7 @@ using PDMPSamplers, Test, Random, Statistics, LinearAlgebra
     can_stick[beta_idx] .= true
     n = 20_000
 
-    providers = (ZeroMeanExchangeableGaussianSlab(beta_idx, u, v),
+    providers = (ExchangeableGaussianSlab(beta_idx, 0.0, u, v),
                  ExchangeableGaussianSlab(beta_idx, 0.1, u, v))
     means = (zeros(d), [fill(0.05, nβ); 0.4; -0.2; 0.1])
     # (state scale, horizon): a gentle case over more than half a period, and a

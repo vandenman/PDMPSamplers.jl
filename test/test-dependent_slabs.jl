@@ -412,7 +412,7 @@ end
         @test _active_prior_grad_alloc(
             exch, generic_empty_out, x, BitVector([true, false, true])) == 0
 
-        zero_exch = ZeroMeanExchangeableGaussianSlab(indices, 1.3, 0.1)
+        zero_exch = ExchangeableGaussianSlab(indices, 0.0, 1.3, 0.1)
         zero_exch_out = fill(NaN, length(x))
         active_slab_potential_gradient!(zero_exch, zero_exch_out, x, active)
         zero_exch_cov = Matrix(1.3I, 3, 3) .+ 0.1
@@ -648,7 +648,7 @@ end
         dense_cov = Matrix{Float64}(I, 4, 4) .* u .+ fill(v, 4, 4)
         dense = DenseGaussianSlab(fill(μ, 4), dense_cov, indices)
         exch = ExchangeableGaussianSlab(indices, μ, u, v)
-        zero_exch = ZeroMeanExchangeableGaussianSlab(indices, u, v)
+        zero_exch = ExchangeableGaussianSlab(indices, 0.0, u, v)
         x = [0.8, 0.0, -0.2, 0.0]
         active = BitVector([true, false, true, false])
         stickable = trues(4)
@@ -877,7 +877,7 @@ end
         )
         _store_frozen_speeds!(subset_state)
         size_prior_subset = BetaBernoulliModelPrior(4, 2.0, 3.0)
-        subset_clock = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, v), size_prior_subset)
+        subset_clock = LinearGaussianAggregateClock(ExchangeableGaussianSlab(1:4, 0.0, u, v), size_prior_subset)
         full_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, trues(4))
         subset_rate = PDMPSamplers.rate(subset_clock, flow, subset_state, 0.0, subset_all_inactive)
         # With no active coordinate every term shares the odds and density at
@@ -886,18 +886,18 @@ end
         @test subset_rate ≈ full_rate *
             sum(all_speeds[subset_all_inactive]) / sum(all_speeds)
 
-        endpoint_exch = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:2, 1.0, 0.1), BernoulliModelPrior([1.0, 0.0]))
+        endpoint_exch = LinearGaussianAggregateClock(ExchangeableGaussianSlab(1:2, 0.0, 1.0, 0.1), BernoulliModelPrior([1.0, 0.0]))
         endpoint_exch_state = StickyPDMPState(Ref(0.0), SkeletonPoint(zeros(2), zeros(2)), falses(2))
         _store_frozen_speeds!(endpoint_exch_state)
         @test PDMPSamplers.rate(endpoint_exch, flow, endpoint_exch_state, 0.0, trues(2)) == Inf
         @test PDMPSamplers.sample_time(MersenneTwister(205), endpoint_exch, flow, endpoint_exch_state, 1.0, trues(2)) == 0.0
         @test PDMPSamplers.sample_label(MersenneTwister(206), endpoint_exch, flow, endpoint_exch_state, trues(2)) == 1
-        endpoint_exch_second = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:2, 1.0, 0.1), BernoulliModelPrior([0.0, 1.0]))
+        endpoint_exch_second = LinearGaussianAggregateClock(ExchangeableGaussianSlab(1:2, 0.0, 1.0, 0.1), BernoulliModelPrior([0.0, 1.0]))
         @test PDMPSamplers.rate(endpoint_exch_second, flow, endpoint_exch_state, 0.0, trues(2)) == Inf
         @test PDMPSamplers.sample_time(MersenneTwister(207), endpoint_exch_second, flow, endpoint_exch_state, 1.0, trues(2)) == 0.0
         @test PDMPSamplers.sample_label(MersenneTwister(208), endpoint_exch_second, flow, endpoint_exch_state, trues(2)) == 2
 
-        independent_exch = LinearGaussianAggregateClock(ZeroMeanExchangeableGaussianSlab(1:4, u, 0.0), BernoulliModelPrior(fill(0.5, 4)))
+        independent_exch = LinearGaussianAggregateClock(ExchangeableGaussianSlab(1:4, 0.0, u, 0.0), BernoulliModelPrior(fill(0.5, 4)))
         independent_dense = LinearGaussianAggregateClock(DenseGaussianSlab(zeros(4), Matrix{Float64}(I, 4, 4) .* u, 1:4), BernoulliModelPrior(fill(0.5, 4)))
         @test PDMPSamplers.rate(independent_exch, flow, exch_state, 0.4, trues(4)) ≈
               PDMPSamplers.rate(independent_dense, flow, exch_state, 0.4, trues(4))
@@ -1225,7 +1225,7 @@ end
 
         # Coordinate 2 has infinite model-prior odds, so it is released
         # immediately.
-        scalar_provider = ZeroMeanExchangeableGaussianSlab(1:2, 1.0, 0.1)
+        scalar_provider = ExchangeableGaussianSlab(1:2, 0.0, 1.0, 0.1)
         scalar_clock = default_aggregate_unstick_clock(scalar_provider, BernoulliModelPrior([0.0, 1.0]))
 
         tiny_clock = SummedRateClock(

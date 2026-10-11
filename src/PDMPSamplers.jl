@@ -174,7 +174,6 @@ export
     DenseGaussianSlab,
     LogLinearGaussianScaleSlab,
     ExchangeableGaussianSlab,
-    ZeroMeanExchangeableGaussianSlab,
     default_aggregate_unstick_clock,
     stickable_coordinates,
     DependentSlabTarget,
