@@ -401,18 +401,6 @@ function StreamingEventBuffer(d::Integer, capacity::Integer)
         Matrix{Float64}(undef, d, capacity), 0, 0)
 end
 
-mutable struct StreamingWarmupGrid
-    times::Vector{Float64}
-    positions::Matrix{Float64}
-    velocities::Matrix{Float64}
-    filled::BitVector
-    next_index::Int
-    last_time::Float64
-    last_position::Vector{Float64}
-    last_velocity::Vector{Float64}
-    last_free::BitVector
-end
-
 mutable struct StreamingRawMoments
     total_time::Float64
     sum_x::Vector{Float64}
@@ -431,23 +419,6 @@ function StreamingRawMoments(state::AbstractPDMPState)
         copy(state.ξ.x), copy(state.ξ.θ), free)
 end
 
-function StreamingWarmupGrid(state::AbstractPDMPState, start_time::Real,
-        end_time::Real)
-    # These are the two fixed grids consumed by the OMRF eight-anchor and
-    # node-source warmup finalizers. Keeping their union is bounded in both
-    # event count and physical dimension.
-    times = unique!(sort!(vcat(
-        collect(range(start_time + 0.5 * (end_time - start_time), end_time;
-            length=64)),
-        collect(range(start_time + 0.5 * (end_time - start_time), end_time;
-            length=128)))))
-    d = length(state.ξ.x)
-    free = state isa StickyPDMPState ? copy(state.free) : trues(d)
-    StreamingWarmupGrid(times, Matrix{Float64}(undef, d, length(times)),
-        Matrix{Float64}(undef, d, length(times)), falses(length(times)), 1,
-        Float64(state.t[]), copy(state.ξ.x), copy(state.ξ.θ), free)
-end
-
 mutable struct StreamingPDMPTrace{F<:ContinuousDynamics} <: AbstractPDMPTrace
     flow::F
     directory::String
@@ -456,7 +427,6 @@ mutable struct StreamingPDMPTrace{F<:ContinuousDynamics} <: AbstractPDMPTrace
     chunks::StreamingChunkIndex
     initial_state::Any
     terminal_state::Any
-    warmup_grid::Union{Nothing,StreamingWarmupGrid}
     moments::StreamingRawMoments
     physical_events::Int
     computational_boundaries::Int
@@ -471,8 +441,6 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
         warmup_end::Union{Nothing,Real}=nothing)
     directory = joinpath(storage.directory, String(prefix))
     mkpath(directory)
-    grid = warmup_end === nothing ? nothing :
-        StreamingWarmupGrid(state, state.t[], warmup_end)
     # Online summaries and event suppression apply to the retained phase only;
     # warmup finalizers still read the warmup event stream.
     is_main = warmup_end === nothing
@@ -487,7 +455,7 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
     end
     trace = StreamingPDMPTrace(flow, directory, String(prefix),
         StreamingEventBuffer(length(state.ξ.x), storage.buffer_events),
-        StreamingChunkIndex(directory, 0, 0), nothing, nothing, grid,
+        StreamingChunkIndex(directory, 0, 0), nothing, nothing,
         StreamingRawMoments(state), 0, 0, 0, false,
         storage.write_events || !is_main, online)
     # A zero-event (or zero-duration) warmup is still a valid source for an
@@ -517,46 +485,6 @@ function stream_move!(x, velocity, free, elapsed, flow)
         move_forward_time!(point, elapsed, underlying_flow(flow), free)
     else
         move_forward_time!(point, elapsed, flow)
-    end
-    return nothing
-end
-
-function _stream_observe_warmup!(trace::StreamingPDMPTrace,
-        state::AbstractPDMPState)
-    grid = trace.warmup_grid
-    grid === nothing && return nothing
-    current_time = Float64(state.t[])
-    current_time + 64eps(max(abs(current_time), 1.0)) >= grid.last_time ||
-        throw(ArgumentError("streaming warmup observations are not chronological"))
-    # Fill strict interior points from the previous outgoing physical state.
-    while grid.next_index <= length(grid.times) &&
-            grid.times[grid.next_index] < current_time
-        target = grid.times[grid.next_index]
-        x = copy(grid.last_position)
-        velocity = copy(grid.last_velocity)
-        stream_move!(x, velocity, grid.last_free,
-            target - grid.last_time, trace.flow)
-        copyto!(view(grid.positions, :, grid.next_index), x)
-        copyto!(view(grid.velocities, :, grid.next_index), velocity)
-        grid.filled[grid.next_index] = true
-        grid.next_index += 1
-    end
-    copyto!(grid.last_position, state.ξ.x)
-    copyto!(grid.last_velocity, state.ξ.θ)
-    if state isa StickyPDMPState
-        copyto!(grid.last_free, state.free)
-    else
-        fill!(grid.last_free, true)
-    end
-    grid.last_time = current_time
-    # A grid point exactly on an event uses its outgoing state, matching
-    # searchsortedlast on the established dense trace.
-    while grid.next_index <= length(grid.times) &&
-            grid.times[grid.next_index] == current_time
-        copyto!(view(grid.positions, :, grid.next_index), state.ξ.x)
-        copyto!(view(grid.velocities, :, grid.next_index), state.ξ.θ)
-        grid.filled[grid.next_index] = true
-        grid.next_index += 1
     end
     return nothing
 end
@@ -938,7 +866,6 @@ function begin_trace_phase!(trace::StreamingPDMPTrace,
     trace.initial_state = _stream_terminal_state(state, flow)
     trace.moments = StreamingRawMoments(state)
     trace.online === nothing || _online_begin!(trace.online, state)
-    _stream_observe_warmup!(trace, state)
     return trace
 end
 begin_trace_phase!(trace::AbstractPDMPTrace, state, flow) = trace
@@ -946,7 +873,6 @@ begin_trace_phase!(trace::AbstractPDMPTrace, state, flow) = trace
 function finish_trace_phase!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, flow::ContinuousDynamics)
     _stream_accumulate_moments!(trace, state)
-    _stream_observe_warmup!(trace, state)
     trace.terminal_state = _stream_terminal_state(state, flow)
     flush_streaming_trace!(trace)
     trace.online === nothing ||
@@ -960,7 +886,6 @@ function _record_streaming_event!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, flow::ContinuousDynamics, args,
         event_type::Symbol)
     _stream_accumulate_moments!(trace, state)
-    _stream_observe_warmup!(trace, state)
     if event_type in (:horizon_hit, :anchor_selection_boundary)
         trace.computational_boundaries += 1
         return nothing
@@ -1173,7 +1098,7 @@ function restore_streaming_trace(directory::AbstractString,
     trace = StreamingPDMPTrace(flow,
         resolved_directory, "restored",
         StreamingEventBuffer(d, 1), index,
-        initial_state, terminal_state, nothing,
+        initial_state, terminal_state,
         StreamingRawMoments(0.0, zeros(d), zeros(d), zeros(d),
             initial_state.t, copy(initial_state.position),
             copy(initial_state.physical_velocity), copy(initial_state.free)),
@@ -1375,28 +1300,6 @@ last_event_time(trace::StreamingPDMPTrace) = trace.terminal_state === nothing ?
 event_times(trace::StreamingPDMPTrace) = vcat(trace.initial_state.t,
     (chunk.times for chunk in (load_streaming_chunk(c) for c in trace.chunks))...,
     trace.terminal_state.t)
-
-function streaming_time_uniform_states(trace::StreamingPDMPTrace,
-        retained_fraction::Real, n_grid::Integer)
-    grid = trace.warmup_grid
-    grid === nothing && throw(ArgumentError(
-        "streaming trace has no bounded warmup grid"))
-    all(grid.filled) || throw(ArgumentError(
-        "streaming warmup grid was not completely observed"))
-    final_time = trace.terminal_state.t
-    initial_time = trace.initial_state.t
-    requested = collect(range(final_time - retained_fraction *
-        (final_time - initial_time), final_time; length=n_grid))
-    indices = Vector{Int}(undef, n_grid)
-    @inbounds for i in eachindex(requested)
-        index = searchsortedfirst(grid.times, requested[i])
-        index <= length(grid.times) && isapprox(grid.times[index], requested[i];
-            rtol=0.0, atol=64eps(max(abs(requested[i]), 1.0))) ||
-            throw(ArgumentError("requested warmup grid was not pre-recorded"))
-        indices[i] = index
-    end
-    return copy(grid.positions[:, indices]), copy(grid.velocities[:, indices])
-end
 
 """Bounded replay at the established dense-trace warmup grid.
 
