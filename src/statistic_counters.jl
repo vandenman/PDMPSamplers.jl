@@ -883,8 +883,6 @@ end
 end
 
 @counter_struct mutable struct PhaseSummaryCounter <: AbstractStatisticCounter
-    warmup_events::Int
-    main_events::Int
     warmup_gradient_calls::Int
     main_gradient_calls::Int
     warmup_hessian_calls::Int
@@ -925,10 +923,6 @@ end
     main_subsampling_subset_evaluations::Int
     warmup_subsampling_final_reflections::Int
     main_subsampling_final_reflections::Int
-    warmup_elapsed_time::Float64
-    main_elapsed_time::Float64
-    elapsed_time::Float64
-    stop_reason::Symbol
 end
 
 @counter_ops PhaseSummaryCounter begin

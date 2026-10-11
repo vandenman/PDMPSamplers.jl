@@ -144,7 +144,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         noop = TestNoopCounter()
 
         @test basic.last_rejected == false
-        phase = PDMPSamplers.PhaseSummaryCounter()
+        phase = PDMPSamplers.RunSummaryCounter()
         @test phase.stop_reason === :none
         @test PDMPSamplers._get_counter_grid_acceptance_tests(noop) == 0
         @test PDMPSamplers._get_counter_grid_bound_seconds(noop) == 0.0
