@@ -198,10 +198,25 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         @test hvp(x, x) == x
         @test stats.∇²f_calls == 1
 
+        grid_start = (;
+            endpoint_evaluations=0,
+            endpoint_gradient_calls=0,
+            endpoint_hessian_calls=0,
+            endpoint_derivative_calls=0,
+            acceptance_gradient_calls=0,
+            acceptance_tests=0,
+            cached_endpoint_reuses=0,
+            points_evaluated=0,
+            endpoint_derivative_points_loaded=0,
+            subsampling_cell_roof_proposals=0,
+            subsampling_aggregate_accepts=0,
+            subsampling_subset_evaluations=0,
+            subsampling_final_reflections=0,
+        )
         pipeline_start = PDMPSamplers._subsampling_pipeline_snapshot(stats)
         PDMPSamplers._record_phase_stats!(
             stats, :main, 0, 0, 0, 0, 0, 0, 0,
-            pipeline_start, time_ns())
+            grid_start, pipeline_start, time_ns())
         @test stats.main_gradient_calls == stats.∇f_calls
         @test stats.main_hessian_calls == stats.∇²f_calls
         @test stats.main_full_gradient_calls == stats.full_gradient_calls

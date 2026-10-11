@@ -363,40 +363,6 @@ function _record_phase_stats!(
     return nothing
 end
 
-function _record_phase_stats!(
-    stats::AbstractStatisticCounter,
-    phase::Symbol,
-    events_start::Int,
-    grad_start::Int,
-    hess_start::Int,
-    full_grad_start::Int,
-    prior_grad_start::Int,
-    fd_curvature_grad_start::Int,
-    potential_start::Int,
-    pipeline_start::NamedTuple,
-    time_start::UInt64,
-)
-    grid_start = (;
-        endpoint_evaluations=0,
-        endpoint_gradient_calls=0,
-        endpoint_hessian_calls=0,
-        endpoint_derivative_calls=0,
-        acceptance_gradient_calls=0,
-        acceptance_tests=0,
-        cached_endpoint_reuses=0,
-        points_evaluated=0,
-        endpoint_derivative_points_loaded=0,
-        subsampling_cell_roof_proposals=0,
-        subsampling_aggregate_accepts=0,
-        subsampling_subset_evaluations=0,
-        subsampling_final_reflections=0,
-    )
-    return _record_phase_stats!(
-        stats, phase, events_start, grad_start, hess_start, full_grad_start, prior_grad_start,
-        fd_curvature_grad_start, potential_start, grid_start, pipeline_start,
-        time_start)
-end
-
 function _run_phase!(
     rng::Random.AbstractRNG,
     criterion::StoppingCriterion,
