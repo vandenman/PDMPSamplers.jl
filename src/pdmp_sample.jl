@@ -195,35 +195,23 @@ function pdmp_sample(
         return PDMPChains([trace], [stats], [installed], [retained_initial], [endpoint])
     end
 
-    if threaded
-        tasks = map(1:n_chains) do i
-            Threads.@spawn begin
-                rng_i        = _make_chain_rng(seed, i)
-                flow_i        = _copy_flow(flow)
-                alg_i         = _copy_algorithm(alg)
-                adapter_i     = _copy_adapter(adapter)
-                stop_i        = _maybe_copy_criterion(stop)
-                warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-                _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
-                    false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
-                    statistic_counter; initial_free, initial_stored_velocity,
-                    trace_storage=_chain_trace_storage(trace_storage, i), observer)
-            end
-        end
-        results = fetch.(tasks)
+    function sample_chain(i)
+        rng_i         = _make_chain_rng(seed, i)
+        flow_i        = _copy_flow(flow)
+        alg_i         = _copy_algorithm(alg)
+        adapter_i     = _copy_adapter(adapter)
+        stop_i        = _maybe_copy_criterion(stop)
+        warmup_stop_i = _maybe_copy_criterion(warmup_stop)
+        return _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
+            false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
+            statistic_counter; initial_free, initial_stored_velocity,
+            trace_storage=_chain_trace_storage(trace_storage, i), observer)
+    end
+    results = if threaded
+        tasks = map(i -> Threads.@spawn(sample_chain(i)), 1:n_chains)
+        fetch.(tasks)
     else
-        results = map(1:n_chains) do i
-            rng_i        = _make_chain_rng(seed, i)
-            flow_i        = _copy_flow(flow)
-            alg_i         = _copy_algorithm(alg)
-            adapter_i     = _copy_adapter(adapter)
-            stop_i        = _maybe_copy_criterion(stop)
-            warmup_stop_i = _maybe_copy_criterion(warmup_stop)
-            _pdmp_sample_single(rng_i, copy(ξ₀), flow_i, models[i], alg_i, t₀, T, t_warmup,
-                false, adapter_i, stop_i, warmup_stop_i, support_boundary_options, models[i],
-                statistic_counter; initial_free, initial_stored_velocity,
-                trace_storage=_chain_trace_storage(trace_storage, i), observer)
-        end
+        map(sample_chain, 1:n_chains)
     end
 
     traces    = [r[1] for r in results]
