@@ -78,7 +78,7 @@ end
             model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
             alg = GridThinningStrategy()
 
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
+            trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress))
 
             acceptance_prob = stats.reflections_accepted / stats.reflections_events
             if !(flow isa AnyBoomerang)
@@ -120,7 +120,7 @@ end
         grad = FullGradient(Base.Fix1(neg_gradient!, target_s))
         model = PDMPModel(d_s, grad, Base.Fix1(neg_hvp!, target_s))
 
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
         @test length(trace) > 100

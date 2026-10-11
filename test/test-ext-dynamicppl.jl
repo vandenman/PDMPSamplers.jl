@@ -51,7 +51,7 @@ import ForwardDiff
         T = 1000.0
 
         # Run sampler
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false))
 
         # Basic checks
         @test length(trace) > 10
@@ -90,7 +90,7 @@ import ForwardDiff
             θ0 = PDMPSamplers.initialize_velocity(flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 1000.0; progress=false)
+            trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 1000.0; progress=false))
 
             @test length(trace) > 10
             @test stats.∇f_calls > 0

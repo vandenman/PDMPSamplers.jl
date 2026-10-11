@@ -47,14 +47,14 @@ end
     @test PDMPSamplers.has_direct_deterministic_rate_cell_bound(
         wrapped.deterministic_gradient!)
 
-    trace_a, _ = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_a, model_a,
+    trace_a, _ = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_a, model_a,
         GridThinningStrategy(N=4, t_max=1.0, lazy=true), 0.0, 4.0;
         seed=7732, progress=false,
-        statistic_counter=PDMPSamplers.StatisticCounter)
-    trace_b, stats_b = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_b, model_b,
+        statistic_counter=PDMPSamplers.StatisticCounter))
+    trace_b, stats_b = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_b, model_b,
         GridThinningStrategy(N=4, t_max=1.0, lazy=true), 0.0, 4.0;
         seed=7732, progress=false,
-        statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        statistic_counter=PDMPSamplers.DevelStatisticCounter))
     @test trace_a.times == trace_b.times
     @test trace_a.positions == trace_b.positions
     @test trace_a.velocities == trace_b.velocities
@@ -65,12 +65,12 @@ end
 @testset "subsampling pipeline counters are observational" begin
     model_a, flow_a = _instrumentation_fixture()
     model_b, flow_b = _instrumentation_fixture()
-    trace_a, _ = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_a, model_a,
+    trace_a, _ = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_a, model_a,
         GridThinningStrategy(N=4, t_max=1.0, lazy=false), 0.0, 4.0;
-        seed=7731, progress=false, statistic_counter=PDMPSamplers.StatisticCounter)
-    trace_b, stats_b = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_b, model_b,
+        seed=7731, progress=false, statistic_counter=PDMPSamplers.StatisticCounter))
+    trace_b, stats_b = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow_b, model_b,
         GridThinningStrategy(N=4, t_max=1.0, lazy=false), 0.0, 4.0;
-        seed=7731, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
+        seed=7731, progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter))
     @test trace_a.times == trace_b.times
     @test trace_a.positions == trace_b.positions
     @test trace_a.velocities == trace_b.velocities

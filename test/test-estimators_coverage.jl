@@ -48,7 +48,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         m = mean(trace)
         @test length(m) == d
@@ -70,7 +70,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         v = var(trace)
         @test length(v) == d
@@ -95,7 +95,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress))
 
         ip = inclusion_probs(trace)
         @test length(ip) == d
@@ -204,7 +204,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         for j in 1:d
             @test PDMPSamplers.cdf(trace, μ_true[j]; coordinate=j) ≈ 0.5 atol = 0.15
@@ -225,7 +225,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         # scalar quantile
         q50 = quantile(trace, 0.5)
@@ -260,7 +260,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress))
 
         for j in 1:d
             lo, hi = PDMPSamplers._trace_coordinate_bounds(trace, j)
@@ -299,7 +299,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
 
@@ -331,7 +331,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
 
@@ -361,7 +361,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
 
@@ -408,7 +408,7 @@ end
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         e = ess(trace; n_batches=10)
         @test length(e) == d

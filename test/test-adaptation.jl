@@ -555,7 +555,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         m = mean(trace)
         @test maximum(abs.(m .- μ_true)) ≤ 1.0
@@ -573,7 +573,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         m = mean(trace)
         @test maximum(abs.(m .- μ_true)) ≤ 1.0
@@ -591,7 +591,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress))
 
         m = mean(trace)
         lrp = flow.Γ::PDMPSamplers.LowRankPrecision

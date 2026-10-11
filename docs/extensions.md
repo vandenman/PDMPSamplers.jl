@@ -40,7 +40,7 @@ pdmp_model = PDMPModel(model, ADTypes.AutoMooncake(); needs_hvp=true)
 flow = ZigZag(pdmp_model.d)
 alg = GridThinningStrategy()
 x0 = randn(pdmp_model.d)
-trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
+trace, stats = only(pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0))
 ```
 
 ### Key Features
@@ -83,7 +83,7 @@ pdmp_model = PDMPModel(
 flow = BouncyParticle(pdmp_model.d)
 alg = GridThinningStrategy()
 x0 = randn(pdmp_model.d)
-trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
+trace, stats = only(pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0))
 ```
 
 ### Key Features

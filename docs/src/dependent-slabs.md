@@ -89,8 +89,8 @@ clock = default_aggregate_unstick_clock(slab, model_prior, flow)
 alg = AggregateSticky(GridThinningStrategy(), clock, can_stick)
 
 initial = SkeletonPoint([0.1, -0.1, 0.0], [1.0, -1.0, 1.0])
-trace, stats = pdmp_sample(initial, flow, model, alg, 0.0, 100.0;
-    seed=42, progress=false)
+trace, stats = only(pdmp_sample(initial, flow, model, alg, 0.0, 100.0;
+    seed=42, progress=false))
 
 # free_masks[i, n] is true when coordinate i is active at stored event n.
 active_beta_at_events = trace.free_masks[beta, :]

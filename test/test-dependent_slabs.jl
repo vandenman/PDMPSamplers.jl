@@ -546,7 +546,7 @@ end
         @test transition_model_.hvp(zeros(2), direction) ≈ [0.0, 1.0] atol=1e-6
         @test transition_model_.vhv(zeros(2), direction, direction) ≈ 1.0 atol=1e-6
 
-        hvp_trace, _ = pdmp_sample(SkeletonPoint([0.1, -0.2, 0.3], [0.4, 0.2, -0.1]), Boomerang(d, 0.0), hvp_model, GridThinningStrategy(), 0.0, 0.05)
+        hvp_trace, _ = only(pdmp_sample(SkeletonPoint([0.1, -0.2, 0.3], [0.4, 0.2, -0.1]), Boomerang(d, 0.0), hvp_model, GridThinningStrategy(), 0.0, 0.05))
         @test !isempty(hvp_trace.times)
     end
 
@@ -1157,8 +1157,8 @@ end
         _, _, accepted_subset_internal, _, _ = PDMPSamplers.initialize_state(
             MersenneTwister(122), ZigZag(2), model, accepted_subset, 0.0, ξ)
         @test accepted_subset_internal.stickable_indices == [1]
-        nuisance_trace, _ = pdmp_sample(ξ, ZigZag(2), model, accepted_subset,
-            0.0, 0.2; seed=122, progress=false)
+        nuisance_trace, _ = only(pdmp_sample(ξ, ZigZag(2), model, accepted_subset,
+            0.0, 0.2; seed=122, progress=false))
         nuisance_dense = PDMPTrace(nuisance_trace)
         nuisance_free = .!(iszero.(nuisance_dense.positions) .&
             iszero.(nuisance_dense.velocities))
@@ -1251,9 +1251,9 @@ end
             default_aggregate_unstick_clock(
                 scalar_provider, BernoulliModelPrior([0.5, 1.0])),
             BitVector([true, true, false]))
-        endpoint_trace, _ = pdmp_sample(
+        endpoint_trace, _ = only(pdmp_sample(
             all_frozen_ξ, ZigZag(3), scalar_model, endpoint_alg, 0.0, 0.1;
-            progress=false)
+            progress=false))
         @test last_event_time(endpoint_trace) == 0.1
 
         # The log scale of coordinate 1 grows along the path from exp(10), so
@@ -1267,7 +1267,7 @@ end
         @test defective_internal.aggregate_unstick_time == Inf
         PDMPSamplers.reschedule_aggregate_unstick_time!(MersenneTwister(133), defective_internal, defective_state2, ZigZag(2))
         @test defective_internal.aggregate_unstick_time == Inf
-        defective_trace, defective_stats = pdmp_sample(defective_ξ, ZigZag(2), defective_model, defective_alg, 0.0, 1.0; progress=false)
+        defective_trace, defective_stats = only(pdmp_sample(defective_ξ, ZigZag(2), defective_model, defective_alg, 0.0, 1.0; progress=false))
         @test isfinite(last_event_time(defective_trace))
         @test length(defective_trace) == 2
         @test last_event_time(defective_trace) == 1.0

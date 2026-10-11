@@ -144,7 +144,7 @@ import QuadGK
         grad   = FullGradient(Base.Fix1(neg_gradient!, target))
         model  = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg    = GridThinningStrategy()
-        trace, _ = pdmp_sample(ξ0, flow_immutable, model, alg, 0.0, 2000.0; progress=false)
+        trace, _ = only(pdmp_sample(ξ0, flow_immutable, model, alg, 0.0, 2000.0; progress=false))
 
         # Build accumulator from trace skeleton events
         ws_trace = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
@@ -376,8 +376,8 @@ import QuadGK
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         # Run WITHOUT adaptation (NoAdaptation) to keep reference fixed
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
-                               progress=false, adapter=PDMPSamplers.NoAdaptation())
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
+                               progress=false, adapter=PDMPSamplers.NoAdaptation()))
 
         ws_trace = PDMPSamplers.WelfordBoomerangStats(d)
         for k in eachindex(trace.times)

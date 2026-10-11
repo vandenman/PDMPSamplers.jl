@@ -201,7 +201,7 @@ end
         θ0 = PDMPSamplers.initialize_velocity(flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0))
         @test length(trace) > 10
         @test all(isfinite, mean(trace))
     end

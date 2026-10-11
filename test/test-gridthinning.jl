@@ -625,21 +625,21 @@ end
             bound_violation=:throw,
             lazy=false)
 
-        _, generic_stats = pdmp_sample(
+        _, generic_stats = only(pdmp_sample(
             ξ0, flow, model, generic, 0.0, 0.5;
             seed=32,
             progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        _, adaptive_stats = pdmp_sample(
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
+        _, adaptive_stats = only(pdmp_sample(
             ξ0, flow, model, adaptive, 0.0, 0.5;
             seed=34,
             progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        _, stats = pdmp_sample(
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
+        _, stats = only(pdmp_sample(
             ξ0, flow, model, bounded, 0.0, 0.5;
             seed=33,
             progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
         @test generic_stats.grid_bound_violations == 0
         @test adaptive_stats.grid_bound_violations >= 0
         @test stats.grid_bound_violations == 0
@@ -666,11 +666,11 @@ end
             bound_violation=:throw,
             lazy=false)
         ξ0 = SkeletonPoint([0.45, -0.35], [0.25, 0.4])
-        _, stats = pdmp_sample(
+        _, stats = only(pdmp_sample(
             ξ0, flow, model, alg, 0.0, 2.0;
             seed=35,
             progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
 
         @test stats.reflections_events == 0
         @test stats.reflections_accepted == 0
@@ -1201,10 +1201,10 @@ end
         alg_callable = GridThinningStrategy(; N=1, N_min=1, t_max=0.5,
             bound=:value_quadratic, curvature_bound=callable_bound,
             bound_violation=:throw)
-        trace_callable, stats_callable = pdmp_sample(
+        trace_callable, stats_callable = only(pdmp_sample(
             SkeletonPoint([0.1], [1.0]), flow, model, alg_callable, 0.0, 1.0;
             seed=20260717, progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
         @test length(trace_callable) > 0
         @test calls[] > 0
         @test stats_callable.grid_bound_violations == 0
@@ -1214,10 +1214,10 @@ end
         alg_warmup = GridThinningStrategy(; N=1, N_min=1, t_max=0.5,
             bound=:value_quadratic, curvature_bound=warmup_bound,
             bound_violation=:throw)
-        trace_warmup, stats_warmup = pdmp_sample(
+        trace_warmup, stats_warmup = only(pdmp_sample(
             SkeletonPoint([0.1], [1.0]), flow, model, alg_warmup, 0.0, 1.5, 0.5;
             seed=20260718, progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
         @test length(trace_warmup) > 0
         @test !warmup_bound.active
         @test warmup_bound.observations > 0

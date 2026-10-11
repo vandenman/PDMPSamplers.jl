@@ -14,7 +14,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 100_000.0, 10_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 100_000.0, 10_000.0; progress=show_progress))
         @test length(trace) > 100
 
         # scales should have been updated from ones(d)
@@ -43,7 +43,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 100_000.0, 10_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 100_000.0, 10_000.0; progress=show_progress))
         @test length(trace) > 100
 
         # scales should have been updated from ones(d)
@@ -72,7 +72,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 5_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 5_000.0; progress=show_progress))
         @test length(trace) > 100
 
         trace_mean = mean(trace)
@@ -94,7 +94,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 5_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 5_000.0; progress=show_progress))
         @test length(trace) > 100
 
         trace_mean = mean(trace)

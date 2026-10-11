@@ -96,7 +96,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adaptation quality: μ should be close to true (element-wise)
         for i in 1:d
@@ -146,7 +146,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adapted μ should be roughly correct (element-wise)
         for i in 1:d
@@ -182,7 +182,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         trace_mean = mean(trace)
 
@@ -212,7 +212,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         @test length(trace) > 100
         @test all(isfinite, mean(trace))
@@ -282,10 +282,10 @@ end
         model = PDMPModel(d,
             FullGradient(Base.Fix1(neg_gradient!, target)),
             Base.Fix1(neg_hvp!, target))
-        trace, stats = pdmp_sample(initial, flow, model,
+        trace, stats = only(pdmp_sample(initial, flow, model,
             Sticky(GridThinningStrategy(), κ, trues(d)),
             0.0, 50_000.0, 5_000.0; seed, progress=show_progress,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
 
         @test stats.grid_resets_from_dynamics_adaptation > 0
         @test stats.sticky_freezes > 100
@@ -379,7 +379,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adapted μ should be roughly correct
         for i in 1:d
@@ -430,7 +430,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Core correctness: posterior mean
         trace_mean = mean(trace)
@@ -464,7 +464,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         trace_mean = mean(trace)
         @test length(trace) > 100
@@ -685,7 +685,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adapted μ should be roughly correct
         for i in 1:d
@@ -728,7 +728,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         trace_mean = mean(trace)
         @test length(trace) > 100

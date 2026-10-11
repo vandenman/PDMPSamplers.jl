@@ -54,7 +54,7 @@ end
         flow = ZigZag(d)
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
 
-        trace, stats = pdmp_sample(
+        trace, stats = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -65,7 +65,7 @@ end
             warmup_stop=FixedTimeCriterion(0.0),
             stop=FixedTimeCriterion(0.0),
             progress=false,
-        )
+        ))
 
         @test isone(length(trace))
         @test iszero(first(trace).time)
@@ -78,9 +78,14 @@ end
     @testset "PDMPChains iteration yields one item per chain" begin
         trace1 = _simple_trace(0.0)
         trace2 = _simple_trace(10.0)
-        chains = PDMPChains([trace1, trace2], [:stats1, :stats2])
+        chains = PDMPChains([trace1, trace2], [:stats1, :stats2],
+            [nothing, nothing], [nothing, nothing], [nothing, nothing])
 
         @test collect(chains) == [(trace1, :stats1), (trace2, :stats2)]
+        single = PDMPChains([trace1], [:stats1], [nothing], [nothing], [nothing])
+        @test collect(single) == [(trace1, :stats1)]
+        @test only(single) == (trace1, :stats1)
+        @test_throws ArgumentError only(chains)
     end
 
     @testset "TotalWallTimeCriterion copies share the same timer" begin

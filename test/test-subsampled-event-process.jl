@@ -408,9 +408,9 @@ end
             (out, x) -> fill!(out, 0.0),
             (out, x, subset, anchor) -> fill!(out, 0.0),
             horizon_envelope, [0.0], 1)
-        horizon_trace, _ = pdmp_sample(SkeletonPoint([0.0], [1.0]), flow,
+        horizon_trace, _ = only(pdmp_sample(SkeletonPoint([0.0], [1.0]), flow,
             PDMPModel(1, horizon_cv), ThinningStrategy(GlobalBounds(0.0, 1)),
-            0.0, 0.01; seed=0x7a13, progress=false)
+            0.0, 0.01; seed=0x7a13, progress=false))
         @test last(horizon_trace).time == 0.01
     end
 
@@ -770,10 +770,10 @@ end
     @testset "Gaussian stationarity for BPS and ZigZag" begin
         for (flow, seed) in ((BouncyParticle(1, 0.5), 9101), (ZigZag(1), 9102))
             model = gaussian_subsampling_model(flow)
-            trace, stats = pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
+            trace, stats = only(pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
                 model, GridThinningStrategy(N=12, t_max=2.0, lazy=false,
                     bound_violation=:throw), 0.0, 12_000.0;
-                seed, progress=false)
+                seed, progress=false))
             moments = mean(trace)
             @test moments[1] ≈ 0 atol=0.09
             @test cov(trace)[1, 1] ≈ 1 atol=0.12
@@ -781,21 +781,21 @@ end
             @test stats.full_gradient_calls == 0
         end
         for flow in (BouncyParticle(1, 0.5), ZigZag(1))
-            trace, _ = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
+            trace, _ = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow),
                 GridThinningStrategy(N=8, t_max=1.5, lazy=false,
                     bound=:constant, bound_violation=:throw), 0.0, 50.0;
-                seed=774, progress=false)
+                seed=774, progress=false))
             @test length(trace) > 2
         end
     end
 
     @testset "subsampling ThinningStrategy stationarity and dynamics" begin
         for (flow, seed) in ((BouncyParticle(1, 0.5), 9201), (ZigZag(1), 9202))
-            trace, stats = pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
+            trace, stats = only(pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
                 gaussian_subsampling_model(flow),
                 ThinningStrategy(GlobalBounds(0.0, 1)), 0.0, 8_000.0;
-                seed, progress=false)
+                seed, progress=false))
             @test mean(trace)[1] ≈ 0 atol=0.11
             @test cov(trace)[1, 1] ≈ 1 atol=0.14
             @test stats.residual_oracle_calls > 100
@@ -810,19 +810,19 @@ end
             AdaptiveBoomerang(1; λref=0.2),
         ]
         for (seed, flow) in enumerate(flows)
-            trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
+            trace, stats = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow),
                 ThinningStrategy(GlobalBounds(100.0, 1)), 0.0, 12.0, 2.0;
-                seed=9300 + seed, progress=false)
+                seed=9300 + seed, progress=false))
             @test length(trace) > 1
             @test stats.residual_oracle_calls > 0
         end
 
-        sticky_trace, sticky_stats = pdmp_sample(
+        sticky_trace, sticky_stats = only(pdmp_sample(
             SkeletonPoint([0.4], [1.0]), BouncyParticle(1, 0.5),
             gaussian_subsampling_model(BouncyParticle(1, 0.5)),
             Sticky(ThinningStrategy(GlobalBounds(100.0, 1)), [1.0]),
-            0.0, 8.0; seed=9399, progress=false)
+            0.0, 8.0; seed=9399, progress=false))
         @test length(sticky_trace) > 1
         @test sticky_stats.residual_oracle_calls > 0
     end
@@ -862,11 +862,11 @@ end
             deterministic_hvp = (out, x, v) -> copyto!(out, v)
             cv = SubsampledControlVariate(deterministic_gradient, residual_oracle,
                 envelope, zeros(2), 1; deterministic_hvp! = deterministic_hvp)
-            trace, stats = pdmp_sample(
+            trace, stats = only(pdmp_sample(
                 SkeletonPoint([0.1, 1.0], [-1.0, 1.0]), flow,
                 PDMPModel(2, cv), Sticky(make_strategy(), [1.0, Inf]),
                 0.0, 30.0; seed=4, progress=false,
-                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+                statistic_counter=PDMPSamplers.DevelStatisticCounter))
 
             @test stats.sticky_events >= 4
             @test residual_calls_while_frozen[] > 0
@@ -1018,12 +1018,12 @@ end
             AdaptiveBoomerang(1; λref=0.2),
         ]
         for (seed, flow) in enumerate(flows)
-            trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
+            trace, stats = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow),
                 GridThinningStrategy(N=10, t_max=1.0, lazy=false,
                     bound_violation=:throw), 0.0, 20.0, 2.0;
                 seed=8300 + seed, progress=false,
-                statistic_counter=PDMPSamplers.DevelStatisticCounter)
+                statistic_counter=PDMPSamplers.DevelStatisticCounter))
             @test length(trace) > 2
             @test stats.residual_oracle_calls > 0
             @test stats.warmup_subsampling_cell_roof_proposals +
@@ -1048,9 +1048,9 @@ end
                 AdaptiveBoomerang(1; λref=0.2)))
             alg = Sticky(GridThinningStrategy(N=8, t_max=0.8, lazy=false,
                 bound_violation=:throw), [1.0])
-            trace, stats = pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
+            trace, stats = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow), alg, 0.0, 12.0;
-                seed=8400 + seed, progress=false)
+                seed=8400 + seed, progress=false))
             @test length(trace) > 1
             @test stats.residual_oracle_calls > 0
         end

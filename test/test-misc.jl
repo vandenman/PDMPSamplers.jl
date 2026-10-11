@@ -302,7 +302,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         @test alg.can_stick == BitVector([true, false, true, false])
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=false)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=false))
         @test stats.sticky_events > 0
         @test length(trace) > 100
 
@@ -325,7 +325,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         alg = Sticky(GridThinningStrategy(), κ_high)
 
         ξ0 = SkeletonPoint(0.01 .* randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=false)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=false))
         @test stats.sticky_events > 0
     end
 
@@ -358,11 +358,11 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
             phase_start=(phase, state, model, flow, alg, cache) -> push!(phases, phase),
             step=(stage, phase, state, criterion_horizon, adapter_horizon,
                 event_type, stats) -> push!(stages, (stage, phase)))
-        observed, _ = pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
+        observed, _ = only(pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
             GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31,
-            observer)
-        plain, _ = pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
-            GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31)
+            observer))
+        plain, _ = only(pdmp_sample(copy(ξ0), ZigZag(d), make_model(),
+            GridThinningStrategy(), 0.0, 20.0, 5.0; progress=false, seed=31))
         observed_dense, plain_dense = PDMPTrace(observed), PDMPTrace(plain)
         @test observed_dense.times == plain_dense.times
         @test observed_dense.positions == plain_dense.positions

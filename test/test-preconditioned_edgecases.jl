@@ -525,7 +525,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 20_000.0, 5_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 20_000.0, 5_000.0; progress=show_progress))
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
     end
@@ -542,7 +542,7 @@
         alg = GridThinningStrategy()
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 20_000.0, 5_000.0; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 20_000.0, 5_000.0; progress=show_progress))
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
     end

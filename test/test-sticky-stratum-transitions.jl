@@ -150,8 +150,8 @@ end
         )
 
         for (seed, strategy) in enumerate(strategies)
-            trace, stats = pdmp_sample(initial, ZigZag(1), model, strategy,
-                0.0, horizon; seed=seed, progress=false)
+            trace, stats = only(pdmp_sample(initial, ZigZag(1), model, strategy,
+                0.0, horizon; seed=seed, progress=false))
             @test last_event_time(trace) == horizon
             @test stats.stop_reason == :reached_time
             @test stats.sticky_unfreezes == 0
@@ -401,8 +401,8 @@ end
             rng = Random.Xoshiro(seed)
             initial = SkeletonPoint([1.0, -1.0],
                 PDMPSamplers.initialize_velocity(rng, flow, 2))
-            trace, stats = pdmp_sample(initial, flow, model, strategy,
-                0.0, 30.0; seed, progress=false)
+            trace, stats = only(pdmp_sample(initial, flow, model, strategy,
+                0.0, 30.0; seed, progress=false))
             @test stats.sticky_events >= 10
             @test stats.sticky_freezes >= 2
             @test stats.sticky_unfreezes >= 2
@@ -436,8 +436,8 @@ end
             rng = Random.Xoshiro(0xa660 + seed)
             initial = SkeletonPoint([1.0, -1.0],
                 PDMPSamplers.initialize_velocity(rng, flow, 2))
-            trace, stats = pdmp_sample(initial, flow, model, strategy,
-                0.0, 30.0; seed=0xa660 + seed, progress=false)
+            trace, stats = only(pdmp_sample(initial, flow, model, strategy,
+                0.0, 30.0; seed=0xa660 + seed, progress=false))
             @test stats.sticky_events >= 5
             @test stats.sticky_freezes >= 1
             @test stats.sticky_unfreezes >= 1
@@ -472,10 +472,10 @@ end
         )
         for (seed, strategy) in enumerate(strategies)
             flow = dense_flow()
-            trace, stats = pdmp_sample(
+            trace, stats = only(pdmp_sample(
                 SkeletonPoint([0.3, -0.4], flow.metric.L * [1.0, -1.0]),
                 flow, model, strategy, 0.0, 20_000.0;
-                seed=0x5a70 + seed, progress=false)
+                seed=0x5a70 + seed, progress=false))
             @test mean(trace) ≈ zeros(2) atol=0.14
             @test diag(cov(trace)) ≈ fill(0.5, 2) atol=0.16
             @test stats.sticky_freezes > 30

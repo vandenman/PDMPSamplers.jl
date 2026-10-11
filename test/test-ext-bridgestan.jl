@@ -67,7 +67,7 @@ else
             T = 1000.0
 
             # Run sampler
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
+            trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false))
 
             # Basic checks
             @test length(trace) > 10
@@ -94,7 +94,7 @@ else
             T = 500.0
 
             # Run sampler
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
+            trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false))
 
             # Basic checks
             @test length(trace) > 10
@@ -190,7 +190,7 @@ else
                 x0_hvp = randn(d)
                 θ0_hvp = PDMPSamplers.initialize_velocity(flow_hvp, d)
                 ξ0_hvp = SkeletonPoint(x0_hvp, θ0_hvp)
-                trace_hvp, stats_hvp = pdmp_sample(ξ0_hvp, flow_hvp, model_hvp, alg, 0.0, 1000.0; progress=false)
+                trace_hvp, stats_hvp = only(pdmp_sample(ξ0_hvp, flow_hvp, model_hvp, alg, 0.0, 1000.0; progress=false))
                 @test length(trace_hvp) > 10
                 @test stats_hvp.∇f_calls > 0
                 @test stats_hvp.reflections_accepted > 0

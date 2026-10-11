@@ -175,7 +175,7 @@ pdmp_model = PDMPModel(sm)
 
 flow = ZigZag(...)
 alg = GridThinningStrategy()
-trace, stats = pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0)
+trace, stats = only(pdmp_sample(x0, flow, pdmp_model, alg, 0.0, 10_000.0))
 ```
 
 # Notes

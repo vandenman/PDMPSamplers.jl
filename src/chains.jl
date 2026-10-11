@@ -32,12 +32,6 @@ struct PDMPChains{T<:AbstractPDMPTrace,S,E}
     terminal_states::Vector{E}
 end
 
-PDMPChains(traces::Vector{T}, stats::Vector{S}) where {T<:AbstractPDMPTrace,S} =
-    PDMPChains(traces, stats, Any[], Any[], Any[])
-PDMPChains(traces::Vector{T}, stats::Vector{S}, terminal_states::Vector{E}) where
-        {T<:AbstractPDMPTrace,S,E} =
-    PDMPChains(traces, stats, Any[], Any[], terminal_states)
-
 n_chains(chains::PDMPChains) = length(chains.traces)
 
 Base.getindex(chains::PDMPChains, i::Integer) = (chains.traces[i], chains.stats[i])
@@ -50,20 +44,10 @@ Base.lastindex(chains::PDMPChains) = n_chains(chains)
 Base.length(chains::PDMPChains) = n_chains(chains)
 Base.eachindex(chains::PDMPChains) = eachindex(chains.traces)
 
-function Base.iterate(chains::PDMPChains)
-    nchains = n_chains(chains)
-    iszero(nchains) && return nothing
-    isone(nchains) && return chains.traces[1], Val(:stats)
-    return (chains.traces[1], chains.stats[1]), 2
-end
-function Base.iterate(chains::PDMPChains, i::Int)
+function Base.iterate(chains::PDMPChains, i::Int=1)
     i > n_chains(chains) && return nothing
-    return (chains.traces[i], chains.stats[i]), i + 1
+    return chains[i], i + 1
 end
-function Base.iterate(chains::PDMPChains, ::Val{:stats})
-    return chains.stats[1], Val(:done)
-end
-Base.iterate(::PDMPChains, ::Val{:done}) = nothing
 
 function Base.only(chains::PDMPChains)
     nchains = n_chains(chains)

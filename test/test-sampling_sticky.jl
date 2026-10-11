@@ -102,7 +102,7 @@ end
 
                     grad = gradient_type == CoordinateWiseGradient ? CoordinateWiseGradient(Base.Fix1(neg_partial, slab_target)) : FullGradient(Base.Fix1(neg_gradient!, slab_target))
                     model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, slab_target))
-                    trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
+                    trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress))
 
                     acceptance_prob = stats.reflections_accepted / stats.reflections_events
                     if !(flow isa AnyBoomerang)
