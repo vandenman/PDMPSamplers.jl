@@ -20,8 +20,6 @@ function _record_final_grid_state!(
 end
 
 function finish_warmup!(@nospecialize(alg::GridAdaptiveState), ::AbstractStatisticCounter)
-    alg.curvature_bound isa WarmupCurvatureBound &&
-        _finish_warmup_curvature_bound!(alg.curvature_bound)
     return nothing
 end
 

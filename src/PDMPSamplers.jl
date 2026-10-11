@@ -162,7 +162,6 @@ export
     CoordinateWiseGradient,
     compute_gradient!,
     set_active_set!,
-    WarmupCurvatureBound,
     GridWarmupTuning,
     BoomerangAdaptationOptions,
 

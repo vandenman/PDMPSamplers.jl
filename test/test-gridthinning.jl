@@ -1174,17 +1174,10 @@ end
         @test value_strategy.bound === :value_quadratic
         @test value_strategy.curvature_bound !== nothing
 
-        warmup_bound = WarmupCurvatureBound(;
-            initial_bound=10.0,
-            min_bound=1.0,
-            safety_factor=2.0,
-            probe_fraction=0.5,
-            probe_stride=1)
-        @test warmup_bound.current_bound == 10.0
-        @test warmup_bound.active
+
     end
 
-    @testset "value-quadratic callable and warmup curvature providers" begin
+    @testset "value-quadratic callable curvature provider" begin
         function gaussian_grad!(out, x)
             out[1] = x[1]
             return out
@@ -1209,20 +1202,7 @@ end
         @test calls[] > 0
         @test stats_callable.grid_bound_violations == 0
 
-        warmup_bound = WarmupCurvatureBound(; initial_bound=10.0, min_bound=1.0,
-            safety_factor=2.0, probe_fraction=0.5, probe_stride=1, apply=true)
-        alg_warmup = GridThinningStrategy(; N=1, N_min=1, t_max=0.5,
-            bound=:value_quadratic, curvature_bound=warmup_bound,
-            bound_violation=:throw)
-        trace_warmup, stats_warmup = only(pdmp_sample(
-            SkeletonPoint([0.1], [1.0]), flow, model, alg_warmup, 0.0, 1.5, 0.5;
-            seed=20260718, progress=false,
-            statistic_counter=PDMPSamplers.DevelStatisticCounter))
-        @test length(trace_warmup) > 0
-        @test !warmup_bound.active
-        @test warmup_bound.observations > 0
-        @test warmup_bound.current_bound >= warmup_bound.min_bound
-        @test stats_warmup.grid_bound_violations == 0
+
     end
 
     @testset "R bridge GridThinning compatibility surface" begin

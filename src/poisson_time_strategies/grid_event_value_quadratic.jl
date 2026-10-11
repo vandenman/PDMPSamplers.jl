@@ -29,39 +29,6 @@ function _value_rate_at_state!(
 end
 
 
-_maybe_probe_warmup_curvature_bound!(args...) = nothing
-
-function _maybe_probe_warmup_curvature_bound!(
-    bound::WarmupCurvatureBound,
-    probe_failure_handler::GridBoundaryProbe,
-    state_probe::AbstractPDMPState,
-    state_start::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    grad_provider,
-    t_left::Float64,
-    t_right::Float64,
-    y_left::Float64,
-    y_right::Float64,
-    stats::AbstractStatisticCounter,
-)
-    bound.active || return nothing
-    bound.cells_seen += 1
-    bound.observations < bound.max_observations || return nothing
-    rem(bound.cells_seen, bound.probe_stride) == 0 || return nothing
-    h = t_right - t_left
-    ispositive(h) || return nothing
-    copyto!(state_probe, state_start)
-    t_probe = t_left + bound.probe_fraction * h
-    !iszero(t_probe) && move_forward_time!(state_probe, t_probe, flow)
-    _inc_counter_grid_certificate_calls(stats)
-    _inc_counter_grid_points_evaluated(stats, 1)
-    y_probe = _value_rate_at_state!(
-        probe_failure_handler, state_probe, flow, grad_provider, t_left, t_right)
-    required = 8 * max(0.0, y_probe - max(y_left, y_right, 0.0)) / (h * h)
-    _update_warmup_curvature_bound!(bound, required)
-    return nothing
-end
-
 function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
     max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol=:horizon_hit,
@@ -134,9 +101,7 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
 
         residual_bound = _evaluate_curvature_bound(alg.curvature_bound, state, flow, t_left, t_right, stats)
         residual_bound === nothing && return _next_event_time_lazy_selected!(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-        _maybe_probe_warmup_curvature_bound!(
-            alg.curvature_bound, probe_failure_handler, state2_, state, flow,
-            alg.grad_provider, t_left, t_right, Float64(y_left), Float64(y_right), stats)
+
 
         Λ_cell = _value_quadratic_cell_bound(y_left, y_right, Δt_cell, residual_bound)
         area_cell = pos(Λ_cell) * Δt_cell
