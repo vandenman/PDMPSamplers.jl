@@ -119,7 +119,6 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 _adapt_grid_N!(alg, tightness)
                 _adapt_grid_t_max!(alg, τ_reflection, model.grad)
                 _set_counter_grid_N_current(stats, alg.N[])
-                alg.max_observed_rate[] = max(alg.max_observed_rate[], l_reflection)
                 copyto!(alg.cached_gradient, ∇ϕx)
                 alg.has_cached_gradient[] = true
                 alg.has_cached_rate_derivative[] = false
@@ -486,7 +485,6 @@ function _next_event_time_lazy!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 _adapt_grid_N!(alg, tightness)
                 _adapt_grid_t_max!(alg, τ_proposal, model.grad)
                 _set_counter_grid_N_current(stats, alg.N[])
-                alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
                 _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 return τ_proposal, :reflect, GradientMeta(∇ϕx)
             end

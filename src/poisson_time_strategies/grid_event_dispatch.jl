@@ -118,12 +118,6 @@ end
 function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
     max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol,
     probe_failure_handler::GridBoundaryProbe)::GridEvent where {FL<:ContinuousDynamics}
-    if isfinite(alg.constant_bound_rate[])
-        return _constant_bound_event_time(rng, model, flow, alg, state, cache, stats,
-            max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
-
-
     # A provider-owned direct interval certificate supersedes derivative-based
     # value-quadratic construction for this event search.  Probe only the first
     # deterministic cell; `_grid_bound_modes` repeats the call and carries the

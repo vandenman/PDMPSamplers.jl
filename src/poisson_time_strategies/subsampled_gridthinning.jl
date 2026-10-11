@@ -540,8 +540,6 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
                             min(result.deterministic_actual / D, 1.0))
                     end
                     _adapt_grid_t_max!(alg, τ_proposal, cv)
-                    alg.max_observed_rate[] = max(
-                        alg.max_observed_rate[], result.actual)
                     _inc_counter_subsampling_final_reflections(stats)
                     _inc_counter_reflection_events(stats)
                     _inc_counter_candidate_loop_iterations(stats)

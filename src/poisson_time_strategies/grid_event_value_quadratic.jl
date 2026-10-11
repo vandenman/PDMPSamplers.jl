@@ -229,7 +229,6 @@ function _next_event_time_value_quadratic!(rng::Random.AbstractRNG, model::PDMPM
                 _adapt_grid_N!(alg, tightness)
                 _adapt_grid_t_max!(alg, τ_proposal, model.grad)
                 _set_counter_grid_N_current(stats, alg.N[])
-                alg.max_observed_rate[] = max(alg.max_observed_rate[], l_actual)
                 _record_lazy_search_stats!(stats, proposal_attempts, proposal_rejections)
                 return τ_proposal, :reflect, GradientMeta(∇ϕx)
             end

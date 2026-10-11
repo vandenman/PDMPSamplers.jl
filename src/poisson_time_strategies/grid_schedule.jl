@@ -173,19 +173,3 @@ function _shrink_t_max_on_rejection!(alg::GridAdaptiveState, pcb::PiecewiseConst
     end
 end
 _reset_inner_grid!(alg::GridAdaptiveState) = reset_grid_scale!(alg)
-
-function _maybe_activate_constant_bound!(
-    @nospecialize(alg::GridAdaptiveState),
-    @nospecialize(stats::AbstractStatisticCounter),
-)
-    alg.post_warmup_simplify || return nothing
-    isfinite(alg.constant_bound_rate[]) && return nothing
-    total_events = _get_counter_reflections_accepted(stats) + _get_counter_refreshment_events(stats)
-    total_events < 10 && return nothing
-    reflection_ratio = _get_counter_reflections_accepted(stats) / total_events
-    reflection_ratio > 0.3 && return nothing
-    max_rate = alg.max_observed_rate[]
-    !ispositive(max_rate) && return nothing
-    alg.constant_bound_rate[] = max_rate * 2.0
-    return nothing
-end

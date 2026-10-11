@@ -1241,8 +1241,7 @@ end
         alg = GridThinningStrategy(;
             N=30,
             t_max=2.0,
-            curvature_backend=:auto,
-            post_warmup_simplify=true)
+            curvature_backend=:auto)
         @test alg.bound === :value_quadratic
 
         fields = (
@@ -1504,30 +1503,7 @@ end
         stats = PDMPSamplers.DevelStatisticCounter()
 
         @test PDMPSamplers._reset_inner_grid!(roots) === nothing
-        @test PDMPSamplers._maybe_activate_constant_bound!(roots, stats) === nothing
         @test PDMPSamplers.accept_reflection_event(roots, :dummy) === true
-    end
-
-    @testset "Post-warmup constant-bound activation" begin
-        d = 3
-        state = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
-        strat = GridThinningStrategy(; N=20, t_max=2.0, post_warmup_simplify=true)
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state,
-            BouncyParticle(d), PDMPModel(d, FullGradient((out, x) -> copyto!(out, x))),
-            (; ∇ϕx=zeros(d)), 20, 5, 20)
-
-        stats = PDMPSamplers.DevelStatisticCounter()
-        stats.reflections_accepted = 2
-        stats.refreshment_events = 18
-        alg.max_observed_rate[] = 3.5
-        PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
-        @test alg.constant_bound_rate[] ≈ 7.0
-
-        alg.constant_bound_rate[] = NaN
-        stats.reflections_accepted = 8
-        stats.refreshment_events = 2
-        PDMPSamplers._maybe_activate_constant_bound!(alg, stats)
-        @test isnan(alg.constant_bound_rate[])
     end
 
     if RUN_EXTENDED_GRID_SMOKE_TESTS
@@ -1608,57 +1584,4 @@ end
     if RUN_EXTENDED_GRID_SMOKE_TESTS
     end
 
-    @testset "_constant_bound_event_time direct call" begin
-        d = 3
-        Random.seed!(45)
-        target = gen_data(Distributions.MvNormal, d, 2.0)
-
-        flow = BouncyParticle(d, 1.0)
-        grad = FullGradient(Base.Fix1(neg_gradient!, target))
-        model = PDMPModel(d, grad)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
-        state = PDMPState(0.0, ξ0)
-
-        strat = GridThinningStrategy(; N=16, t_max=2.0, post_warmup_simplify=true,
-            bound=:constant)
-        cache = (; z=similar(ξ0.x), ∇ϕx=similar(ξ0.x))
-        alg = PDMPSamplers._build_grid_adaptive_state(strat, state, flow, model, cache, 16, 5, 16)
-        stats = PDMPSamplers.DevelStatisticCounter()
-
-        # Arm the constant bound to a deliberately high value so thinning always accepts
-        alg.constant_bound_rate[] = 1e6
-
-        τ, event_type, meta = PDMPSamplers._constant_bound_event_time(
-            Random.default_rng(), model, flow, alg, state, cache, stats, Inf, false)
-        @test isfinite(τ)
-        @test τ > 0.0
-        @test event_type === :reflect
-
-        # With include_refresh=true and high refresh rate, should sometimes return :refresh
-        flow_refresh = BouncyParticle(d, 1e6)
-        alg2 = PDMPSamplers._build_grid_adaptive_state(strat, state, flow_refresh, model, cache, 16, 5, 16)
-        alg2.constant_bound_rate[] = 1.0
-        τ2, event_type2, _ = PDMPSamplers._constant_bound_event_time(
-            Random.default_rng(), model, flow_refresh, alg2, state, cache, stats, Inf, true)
-        @test isfinite(τ2)
-        @test event_type2 === :refresh
-
-        # Scenario 3: actual rate exceeds bound → fallback, constant_bound_rate → NaN
-        # ZeroMeanIsoNormal: gradient(x) = x, so rate = max(0, dot(x, θ))
-        # With x=[10,0,...] and θ=[1,0,...], rate = 10 + τ at proposal time τ.
-        # Setting λ_bound=10 guarantees l_actual = 10+τ > 10 for any τ > 0.
-        target3 = gen_data(Distributions.ZeroMeanIsoNormal, d)
-        grad3 = FullGradient(Base.Fix1(neg_gradient!, target3))
-        model3 = PDMPModel(d, grad3)
-        x3 = zeros(d); x3[1] = 10.0
-        θ3 = zeros(d); θ3[1] = 1.0
-        ξ3 = SkeletonPoint(x3, θ3)
-        state3 = PDMPState(0.0, ξ3)
-        alg3 = PDMPSamplers._build_grid_adaptive_state(strat, state3, flow, model3, cache, 16, 5, 16)
-        alg3.constant_bound_rate[] = 10.0
-        τ3, _, _ = PDMPSamplers._constant_bound_event_time(
-            Random.default_rng(), model3, flow, alg3, state3, cache, stats, Inf, false)
-        @test isnan(alg3.constant_bound_rate[])
-        @test isfinite(τ3)
-    end
 end

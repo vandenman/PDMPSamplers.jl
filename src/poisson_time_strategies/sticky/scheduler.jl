@@ -426,10 +426,3 @@ _record_final_grid_state!(alg::AggregateStickyLoopState, stats::AbstractStatisti
     _record_final_grid_state!(alg.inner_alg_state, stats)
 _invalidate_cached_gradient!(alg::StickyLoopState) = _invalidate_cached_gradient!(alg.inner_alg_state)
 _invalidate_cached_gradient!(alg::AggregateStickyLoopState) = _invalidate_cached_gradient!(alg.inner_alg_state)
-
-function _maybe_activate_constant_bound!(alg::StickyLoopState, stats::AbstractStatisticCounter)
-    _maybe_activate_constant_bound!(alg.inner_alg_state, stats)
-end
-function _maybe_activate_constant_bound!(alg::AggregateStickyLoopState, stats::AbstractStatisticCounter)
-    _maybe_activate_constant_bound!(alg.inner_alg_state, stats)
-end

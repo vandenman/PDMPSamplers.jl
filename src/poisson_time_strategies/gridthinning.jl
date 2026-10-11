@@ -31,7 +31,6 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     α⁻::Float64
     safety_limit::Int
     curvature_backend::Symbol
-    post_warmup_simplify::Bool
     lazy::Bool
     bound::Symbol
     curvature_bound
@@ -178,7 +177,7 @@ end
 
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
     safety_limit::Int=500,
-    curvature_backend=nothing, post_warmup_simplify::Bool=false,
+    curvature_backend=nothing,
     lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing,
     max_rejections_before_tail_restart::Int=100,
     lazy_low_tightness_threshold::Real=0.1, lazy_max_low_tightness_rejections::Int=3,
@@ -196,7 +195,6 @@ function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺:
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
         backend,
-        post_warmup_simplify,
         lazy, bound_symbol, curvature_bound, bound_violation_symbol,
         max_rejections_before_tail_restart,
         Float64(lazy_low_tightness_threshold), lazy_max_low_tightness_rejections,
@@ -345,9 +343,6 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         fd_w_buf,
         Float64[],
         Float64[],
-        Ref(NaN),
-        Ref(0.0),
-        strat.post_warmup_simplify,
         strat.lazy,
         Ref(strat.lazy),
         similar(state.ξ.x),
@@ -388,9 +383,6 @@ struct GridAdaptiveState{S<:AbstractPDMPState,P,Q,B} <: PoissonTimeStrategy
     fd_w_buf::Vector{Float64}
     rate_value_buf::Vector{Float64}
     rate_derivative_buf::Vector{Float64}
-    constant_bound_rate::Base.RefValue{Float64}
-    max_observed_rate::Base.RefValue{Float64}
-    post_warmup_simplify::Bool
     lazy::Bool
     lazy_enabled::Base.RefValue{Bool}
     cached_gradient::Vector{Float64}

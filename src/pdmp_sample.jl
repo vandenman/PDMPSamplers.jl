@@ -392,7 +392,6 @@ function _run_phase!(
     end
     _observe_phase_start(observer, phase, state, model_, flow, alg_, cache)
 
-    _maybe_simplify_counter = 0
     phase_events_start = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
     phase_grad_start = _get_counter_∇f_calls(stats)
     phase_hess_start = _get_counter_∇²f_calls(stats)
@@ -452,14 +451,6 @@ function _run_phase!(
         _handle_gradient_adaptation!(adapter, alg_)
         _handle_dynamics_adaptation!(rng, adapter, alg_, state, flow, stats,
             trace_manager, phase)
-
-        if phase === :main
-            _maybe_simplify_counter += 1
-            if _maybe_simplify_counter >= 100
-                _maybe_activate_constant_bound!(alg_, stats)
-                _maybe_simplify_counter = 0
-            end
-        end
 
         check_health!(health, stats)
         _update_progress!(progress, prg, tstop, T, progress_stops, state)
@@ -754,7 +745,6 @@ function _pdmp_sample_single(
         Float64(Base.gc_bytes() - main_sampler_initialization_allocated_start))
     algorithm_finish_start = time_ns()
     finish_warmup!(phase_alg, stats, flow)
-    _maybe_activate_constant_bound!(phase_alg, stats)
     _set_counter_algorithm_warmup_finish_elapsed_time(
         stats, (time_ns() - algorithm_finish_start) / 1e9)
     _set_counter_transition_elapsed_time(stats, (time_ns() - transition_start) / 1e9)

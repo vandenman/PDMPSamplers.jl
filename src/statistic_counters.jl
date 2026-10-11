@@ -861,24 +861,6 @@ function _record_subsampling_pipeline_phase!(stats::AbstractStatisticCounter,
     return nothing
 end
 
-@counter_struct mutable struct ConstantBoundCounter <: AbstractStatisticCounter
-    constant_bound_attempts::Int
-    constant_bound_accepts::Int
-    constant_bound_rejections::Int
-    constant_bound_violations::Int
-    constant_bound_safety_fallbacks::Int
-end
-
-@counter_ops ConstantBoundCounter begin
-    inc(
-        constant_bound_attempts,
-        constant_bound_accepts,
-        constant_bound_rejections,
-        constant_bound_violations,
-        constant_bound_safety_fallbacks,
-    )
-end
-
 @counter_struct mutable struct StickyStatsCounter <: AbstractStatisticCounter
     sticky_inner_searches::Int
     sticky_inner_wins::Int
@@ -1041,7 +1023,6 @@ end
     SubsamplingCounter,
     SubsamplingPipelineCounter,
     SubsamplingPhaseCounter,
-    ConstantBoundCounter,
     StickyStatsCounter,
     PhaseSummaryCounter,
     LazyBoundCounter,
