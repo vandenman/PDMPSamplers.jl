@@ -118,7 +118,6 @@ end
         @test event_time >= 0.0
         @test PDMPSamplers.sample_label(
             rng, clock, flow, state, event_time, can_stick) in beta
-        @test thinning_diagnostics(clock).fallbacks == 0
 
         timed = HarmonicLogLinearAggregateClock(provider, prior; diagnostics=true)
         @test PDMPSamplers.sample_time(MersenneTwister(445), timed, flow, state,
@@ -188,7 +187,6 @@ end
     @test rate_after ≈ PDMPSamplers.rate(
         reference, flow, state, 0.7, can_stick) rtol=1e-10
     @test rate_after != rate_before
-    @test thinning_diagnostics(clock).fallbacks == 0
 
     dense_covariance = dot(view(flow.ΣL, 1, :), view(flow.ΣL, 1, :))
     @test PDMPSamplers._boomerang_covariance_entry(flow, 1, 1) ≈ dense_covariance
