@@ -121,17 +121,11 @@
         Random.seed!(42)
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
-        chains.stats[1].lazy_fallback_low_tightness = 2
-        chains.stats[1].lazy_fallback_bound_violation = 1
-        chains.stats[1].lazy_proposal_attempts = 5
-        chains.stats[1].lazy_proposal_rejections = 4
         chains.stats[1].grid_resets_from_dynamics_adaptation = 3
         buf = IOBuffer()
         show(buf, chains)
         str = String(take!(buf))
         @test occursin("1 chain", str)
-        @test occursin("lazy_fallbacks(low_tightness=2, bound_violation=1)", str)
-        @test occursin("lazy_proposals=5/4 rejected", str)
         @test occursin("grid_resets=3", str)
     end
 

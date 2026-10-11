@@ -8,7 +8,7 @@ The code below is a llm-generated metaprogrammed drop-in replacement for
 the hand-written hot-garbage counter plumbing that used to be there.
 
 They are very useful for debugging and performance analysis.
-The default `StatisticCounter` keeps user-facing counts. Expensive grid and lazy
+The default `StatisticCounter` keeps user-facing counts. Expensive grid
 diagnostics live in `DevelStatisticCounter` for research and performance work.
 
 
@@ -515,6 +515,7 @@ end
     grid_endpoint_hessian_calls::Int
     grid_cached_endpoint_reuses::Int
     grid_acceptance_tests::Int
+    grid_proposal_rejections::Int
     grid_acceptance_gradient_calls::Int
     grid_bound_violations::Int
     grid_endpoint_derivative_points_loaded::Int
@@ -537,6 +538,7 @@ end
         grid_endpoint_hessian_calls,
         grid_cached_endpoint_reuses,
         grid_acceptance_tests,
+        grid_proposal_rejections,
         grid_acceptance_gradient_calls,
         grid_bound_violations,
         grid_resets_from_dynamics_adaptation,
@@ -575,6 +577,7 @@ end
     get_sum(
         grid_horizon_hits,
         grid_acceptance_tests,
+        grid_proposal_rejections,
         grid_endpoint_evaluations,
         grid_endpoint_gradient_calls,
         grid_endpoint_hessian_calls,
@@ -973,32 +976,6 @@ end
     )
 end
 
-@counter_struct mutable struct LazyBoundCounter <: AbstractStatisticCounter
-    lazy_fallback_low_tightness::Int
-    lazy_fallback_bound_violation::Int
-    lazy_proposal_attempts::Int
-    lazy_proposal_rejections::Int
-end
-
-@counter_ops LazyBoundCounter begin
-    inc(
-        lazy_fallback_low_tightness,
-        lazy_fallback_bound_violation,
-    )
-
-    incval(
-        lazy_proposal_attempts,
-        lazy_proposal_rejections,
-    )
-
-    get_sum(
-        lazy_fallback_low_tightness,
-        lazy_fallback_bound_violation,
-        lazy_proposal_attempts,
-        lazy_proposal_rejections,
-    )
-end
-
 # ===========================================================================================
 # Convenience type aliases for backward-compatible construction
 # ===========================================================================================
@@ -1025,5 +1002,4 @@ end
     SubsamplingPhaseCounter,
     StickyStatsCounter,
     PhaseSummaryCounter,
-    LazyBoundCounter,
 )

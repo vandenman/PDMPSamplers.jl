@@ -18,20 +18,24 @@ function _get_rate_and_deriv_or_throw(probe::GridBoundaryProbeHandler, state::Ab
     try
         return get_rate_and_deriv(state, flow, provider, add_rate, args...)
     catch err
-        err isa _ProbeFailureException && rethrow()
-        if t_valid == t_invalid
-            t_invalid = max(t_valid + eps(Float64), eps(Float64))
-            try
-                _throw_grid_boundary_error(probe, state, err; t_valid, t_invalid)
-            catch boundary_err
-                if boundary_err isa MethodError && boundary_err.f === _throw_grid_boundary_error
-                    throw(err)
-                end
-                rethrow()
-            end
-        end
-        _throw_grid_boundary_error(probe, state, err; t_valid, t_invalid)
+        _rethrow_grid_probe_error(probe, state, err, t_valid, t_invalid)
     end
+end
+
+function _rethrow_grid_probe_error(probe, state, err, t_valid, t_invalid)
+    err isa _ProbeFailureException && rethrow()
+    if t_valid == t_invalid
+        t_invalid = max(t_valid + eps(Float64), eps(Float64))
+        try
+            _throw_grid_boundary_error(probe, state, err; t_valid, t_invalid)
+        catch boundary_err
+            if boundary_err isa MethodError && boundary_err.f === _throw_grid_boundary_error
+                throw(err)
+            end
+            rethrow()
+        end
+    end
+    _throw_grid_boundary_error(probe, state, err; t_valid, t_invalid)
 end
 
 function _compute_grid_gradient_or_throw!(state::AbstractPDMPState, original_state::AbstractPDMPState, flow::ContinuousDynamics, model::PDMPModel, cache,

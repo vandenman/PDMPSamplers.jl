@@ -1,7 +1,3 @@
-function _can_use_signed_grid_bound(alg, state::AbstractPDMPState, flow::ContinuousDynamics, provider)
-    return _can_use_signed_grid(state, flow, provider)
-end
-
 function _curvature_bound_value(value)
     value === nothing && return nothing
     value isa Real || throw(ArgumentError(
@@ -148,7 +144,7 @@ function _rate_and_derivative_or_throw(
     try
         return rate_and_derivative(state, flow, provider, args...)
     catch err
-        _throw_grid_boundary_error(probe_failure_handler, state, err; t_valid, t_invalid)
+        _rethrow_grid_probe_error(probe_failure_handler, state, err, t_valid, t_invalid)
     end
 end
 
@@ -186,7 +182,8 @@ function construct_rate_bound_grid!(
     n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
-    used_batched_derivatives = _supports_rate_derivatives(provider, flow) && n_time_cells > 0
+    used_batched_derivatives = probe_failure_handler isa NoGridBoundaryProbe &&
+        _supports_rate_derivatives(provider, flow) && n_time_cells > 0
     loaded_batched_points = start_cell == 1 ? 0 : start_cell
     if start_cell > 1
         move_forward_time!(state_t, t_grid[start_cell], flow)
@@ -334,7 +331,24 @@ function construct_rate_bound_grid!(
             end
             stats !== nothing && (_inc_counter_grid_endpoint_derivative_calls(stats))
             stats !== nothing && (_inc_counter_grid_endpoint_derivative_points_loaded(stats, n_points))
-            if state_cache === nothing
+            if probe_failure_handler isa GridBoundaryProbeHandler
+                point_state = state_cache === nothing ? copy(state) : state_cache
+                zero_time = [0.0]
+                for (offset, point) in enumerate(start_point:stop_point)
+                    time = Float64(t_grid[point])
+                    previous = point == 1 ? time : Float64(t_grid[point - 1])
+                    copyto!(point_state, state)
+                    move_forward_time!(point_state, time, flow)
+                    try
+                        _fill_rate_derivatives!(view(G, :, offset:offset),
+                            view(dG, :, offset:offset), provider, point_state,
+                            flow, zero_time, 1)
+                    catch err
+                        _rethrow_grid_probe_error(probe_failure_handler,
+                            point_state, err, previous, time)
+                    end
+                end
+            elseif state_cache === nothing
                 _fill_rate_derivatives!(
                     G, dG, provider, state, flow, @view(t_grid[start_point:stop_point]), n_points)
             else

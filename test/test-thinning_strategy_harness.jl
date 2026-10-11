@@ -84,11 +84,11 @@ end
     @testset "GridThinningStrategy matrix" begin
         strategies = (
             "constant" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:constant, bound_violation=:throw),
+                bound=:constant, bound_violation=:throw),
             "value quadratic" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:value_quadratic, curvature_bound=0.0, bound_violation=:throw),
+                bound=:value_quadratic, curvature_bound=0.0, bound_violation=:throw),
             "finite diff" => GridThinningStrategy(; N=3, N_min=1, t_max=0.35,
-                lazy=false, bound=:value_quadratic, curvature_bound=0.0, curvature_backend=:finite_difference,
+                bound=:value_quadratic, curvature_bound=0.0, curvature_backend=:finite_difference,
                 bound_violation=:throw),
         )
         for (i, (name, strategy)) in enumerate(strategies)
@@ -100,7 +100,7 @@ end
 
         @testset "componentwise ZigZag" begin
             stats = _validate_strategy(zz_case, GridThinningStrategy(;
-                N=3, N_min=1, t_max=0.35, lazy=false, bound=:value_quadratic,
+                N=3, N_min=1, t_max=0.35, bound=:value_quadratic,
                 curvature_bound=0.0, bound_violation=:throw); seed=31_001)
             @test stats.grid_builds >= 1
         end

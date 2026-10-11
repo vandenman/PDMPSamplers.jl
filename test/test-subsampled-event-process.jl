@@ -254,8 +254,7 @@ end
         event_rng = Random.Xoshiro(0xc10c)
         state, counted_model, alg, cache, stats = PDMPSamplers.initialize_state(
             event_rng, flow, PDMPModel(1, cv),
-            GridThinningStrategy(N=1, t_max=20.0, lazy=false,
-                bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]))
+            GridThinningStrategy(N=1, t_max=20.0, bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]))
         alg.schedule_frozen[] = true
         production_waits = [first(PDMPSamplers.next_event_time(event_rng,
             counted_model, flow, alg, state, cache, stats)) for _ in 1:5_000]
@@ -321,7 +320,7 @@ end
         rng = Random.Xoshiro(0xcad1da7e)
         state, counted_model, alg, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, GridThinningStrategy(N=2, t_max=20.0,
-                lazy=false, bound_violation=:throw), 0.0, ξ)
+                bound_violation=:throw), 0.0, ξ)
         x_before, v_before, t_before = copy(state.ξ.x), copy(state.ξ.θ), state.t[]
         τ, event, meta = PDMPSamplers.next_event_time(rng, counted_model,
             flow, alg, state, cache, stats)
@@ -456,7 +455,7 @@ end
         @test periodic_state[3] isa PDMPSamplers.SubsamplingThinningState
         grid_state = PDMPSamplers.initialize_state(
             Random.Xoshiro(44), boom_flow, PDMPModel(1, generic_cv),
-            GridThinningStrategy(N=4, t_max=π, lazy=false), 0.0,
+            GridThinningStrategy(N=4, t_max=π), 0.0,
             SkeletonPoint([0.4], [1.0]))
         @test grid_state[3] isa PDMPSamplers.GridAdaptiveState
     end
@@ -516,7 +515,7 @@ end
         rng = Random.Xoshiro(191)
         state, model, alg, cache, stats = PDMPSamplers.initialize_state(rng,
             flow, PDMPModel(1, cv), GridThinningStrategy(N=1, t_max=20.0,
-                lazy=false, bound_violation=:shrink), 0.0,
+                bound_violation=:shrink), 0.0,
             SkeletonPoint([0.0], [1.0]);
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
         τ, event, _ = PDMPSamplers.next_event_time(rng, model, flow, alg,
@@ -535,7 +534,7 @@ end
         rng2 = Random.Xoshiro(192)
         state2, model2, alg2, cache2, stats2 = PDMPSamplers.initialize_state(rng2,
             flow, PDMPModel(1, cv2), GridThinningStrategy(N=1, t_max=20.0,
-                lazy=false, bound_violation=:shrink), 0.0,
+                bound_violation=:shrink), 0.0,
             SkeletonPoint([0.0], [1.0]);
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
         _, event2, _ = PDMPSamplers.next_event_time(rng2, model2, flow,
@@ -555,8 +554,7 @@ end
         bad_rng = Random.Xoshiro(193)
         bad_state, bad_model, bad_alg, bad_cache, bad_stats =
             PDMPSamplers.initialize_state(bad_rng, flow, PDMPModel(1, bad_cv),
-                GridThinningStrategy(N=1, t_max=20.0, lazy=false,
-                    bound_violation=:shrink), 0.0, SkeletonPoint([0.0], [1.0]);
+                GridThinningStrategy(N=1, t_max=20.0, bound_violation=:shrink), 0.0, SkeletonPoint([0.0], [1.0]);
                 statistic_counter=PDMPSamplers.DevelStatisticCounter)
         @test_throws ErrorException PDMPSamplers.next_event_time(bad_rng,
             bad_model, flow, bad_alg, bad_state, bad_cache, bad_stats)
@@ -573,7 +571,7 @@ end
         loose_state, loose_model, loose_alg, loose_cache, loose_stats =
             PDMPSamplers.initialize_state(loose_rng, flow,
                 PDMPModel(1, loose_cv), GridThinningStrategy(N=1, t_max=20.0,
-                    lazy=false, safety_limit=1, bound_violation=:throw), 0.0,
+                    safety_limit=1, bound_violation=:throw), 0.0,
                 SkeletonPoint([0.0], [1.0]);
                 statistic_counter=PDMPSamplers.DevelStatisticCounter)
         _, loose_event, _ = PDMPSamplers.next_event_time(loose_rng,
@@ -596,7 +594,7 @@ end
             state, model, alg, cache, stats = PDMPSamplers.initialize_state(
                 rng, BouncyParticle(1, 0.0), PDMPModel(1, cv),
                 GridThinningStrategy(N=N_grid, N_min=min(5, N_grid),
-                    t_max=1.0, lazy=false, bound_violation=:throw), 0.0,
+                    t_max=1.0, bound_violation=:throw), 0.0,
                 SkeletonPoint([0.0], [1.0]))
             alg.schedule_frozen[] = true
             subsampling_bound = alg.subsampling_bound
@@ -620,7 +618,7 @@ end
         loose_state, loose_model, loose_alg, loose_cache, loose_stats =
             PDMPSamplers.initialize_state(loose_rng, BouncyParticle(1, 0.0),
                 PDMPModel(1, loose_cv), GridThinningStrategy(N=20, N_min=5,
-                    t_max=20.0, lazy=false, bound_violation=:throw), 0.0,
+                    t_max=20.0, bound_violation=:throw), 0.0,
                 SkeletonPoint([0.0], [1.0]))
         initial_N = loose_alg.N[]
         _, loose_event, _ = PDMPSamplers.next_event_time(loose_rng,
@@ -643,8 +641,7 @@ end
         flow = BouncyParticle(1, 0.0)
         state, model, alg, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, PDMPModel(1, cv),
-            GridThinningStrategy(N=1, N_min=1, t_max=1.0, lazy=false,
-                bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]);
+            GridThinningStrategy(N=1, N_min=1, t_max=1.0, bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]);
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
         alg.schedule_frozen[] = true
 
@@ -677,8 +674,7 @@ end
         flow = BouncyParticle(1, 0.0)
         state, model, alg, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, PDMPModel(1, cv),
-            GridThinningStrategy(N=1, N_min=1, t_max=1.0, lazy=false,
-                bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]);
+            GridThinningStrategy(N=1, N_min=1, t_max=1.0, bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]);
             statistic_counter=PDMPSamplers.DevelStatisticCounter)
         alg.schedule_frozen[] = true
         alg.state_cache2.ξ.x[1] = 123.0
@@ -771,8 +767,7 @@ end
         for (flow, seed) in ((BouncyParticle(1, 0.5), 9101), (ZigZag(1), 9102))
             model = gaussian_subsampling_model(flow)
             trace, stats = only(pdmp_sample(SkeletonPoint([0.7], [1.0]), flow,
-                model, GridThinningStrategy(N=12, t_max=2.0, lazy=false,
-                    bound_violation=:throw), 0.0, 12_000.0;
+                model, GridThinningStrategy(N=12, t_max=2.0, bound_violation=:throw), 0.0, 12_000.0;
                 seed, progress=false))
             moments = mean(trace)
             @test moments[1] ≈ 0 atol=0.09
@@ -783,8 +778,7 @@ end
         for flow in (BouncyParticle(1, 0.5), ZigZag(1))
             trace, _ = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow),
-                GridThinningStrategy(N=8, t_max=1.5, lazy=false,
-                    bound=:constant, bound_violation=:throw), 0.0, 50.0;
+                GridThinningStrategy(N=8, t_max=1.5, bound=:constant, bound_violation=:throw), 0.0, 50.0;
                 seed=774, progress=false))
             @test length(trace) > 2
         end
@@ -839,8 +833,7 @@ end
             () -> AdaptiveBoomerang(2; λref=0.0),
         )
         strategy_factories = (
-            () -> GridThinningStrategy(N=4, t_max=1.0, lazy=false,
-                bound_violation=:throw),
+            () -> GridThinningStrategy(N=4, t_max=1.0, bound_violation=:throw),
             () -> ThinningStrategy(GlobalBounds(0.0, 2)),
         )
 
@@ -925,10 +918,8 @@ end
 
         for (seed, strategy_a, strategy_b) in (
                 (0xd301,
-                 GridThinningStrategy(N=12, t_max=1.0, lazy=false,
-                    bound_violation=:throw),
-                 GridThinningStrategy(N=12, t_max=1.0, lazy=false,
-                    bound_violation=:throw)),
+                 GridThinningStrategy(N=12, t_max=1.0, bound_violation=:throw),
+                 GridThinningStrategy(N=12, t_max=1.0, bound_violation=:throw)),
                 (0xd302, ThinningStrategy(GlobalBounds(0.0, 2)),
                            ThinningStrategy(GlobalBounds(0.0, 2))))
             flow = make_flow()
@@ -1020,8 +1011,7 @@ end
         for (seed, flow) in enumerate(flows)
             trace, stats = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow),
-                GridThinningStrategy(N=10, t_max=1.0, lazy=false,
-                    bound_violation=:throw), 0.0, 20.0, 2.0;
+                GridThinningStrategy(N=10, t_max=1.0, bound_violation=:throw), 0.0, 20.0, 2.0;
                 seed=8300 + seed, progress=false,
                 statistic_counter=PDMPSamplers.DevelStatisticCounter))
             @test length(trace) > 2
@@ -1046,8 +1036,7 @@ end
                 PreconditionedZigZag(1; scale=[0.8]),
                 Boomerang(reshape([1.0], 1, 1), [0.0], 0.2),
                 AdaptiveBoomerang(1; λref=0.2)))
-            alg = Sticky(GridThinningStrategy(N=8, t_max=0.8, lazy=false,
-                bound_violation=:throw), [1.0])
+            alg = Sticky(GridThinningStrategy(N=8, t_max=0.8, bound_violation=:throw), [1.0])
             trace, stats = only(pdmp_sample(SkeletonPoint([0.4], [1.0]), flow,
                 gaussian_subsampling_model(flow), alg, 0.0, 12.0;
                 seed=8400 + seed, progress=false))

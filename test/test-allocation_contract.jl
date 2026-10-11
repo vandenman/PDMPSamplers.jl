@@ -25,7 +25,7 @@ function allocation_contract_setup(flow)
     d = 4
     model = PDMPModel(d, FullGradient(allocation_contract_grad!), allocation_contract_hvp!)
     ξ = SkeletonPoint(randn(d), randn(d))
-    alg = GridThinningStrategy(; N=8, lazy=false)
+    alg = GridThinningStrategy(; N=8)
     return PDMPSamplers.initialize_state(Xoshiro(1), flow, model, alg, 0.0, ξ)
 end
 
@@ -65,8 +65,7 @@ function allocation_contract_subsampled_setup(oracle;
     flow = BouncyParticle(1, 0.0)
     state, model, alg, cache, stats = PDMPSamplers.initialize_state(
         rng, flow, PDMPModel(1, cv),
-        GridThinningStrategy(N=1, N_min=1, t_max=1.0, lazy=false,
-            bound=bound, curvature_bound=curvature_bound,
+        GridThinningStrategy(N=1, N_min=1, t_max=1.0, bound=bound, curvature_bound=curvature_bound,
             bound_violation=:throw), 0.0, SkeletonPoint([0.0], [1.0]))
     alg.schedule_frozen[] = true
     return (; rng, flow, state, model, alg, cache, stats)

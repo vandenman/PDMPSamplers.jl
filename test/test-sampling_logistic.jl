@@ -200,8 +200,7 @@ end
         full_model = PDMPModel(d_sub, FullGradient(full_gradient!), full_hvp!)
         flow = BouncyParticle(d_sub, 0.7)
         ξ = SkeletonPoint([0.2, -0.2], [1.0, 0.0])
-        alg = GridThinningStrategy(N=16, t_max=1.5, lazy=false,
-            bound_violation=:throw)
+        alg = GridThinningStrategy(N=16, t_max=1.5, bound_violation=:throw)
         full_chains = pdmp_sample(ξ, flow, full_model, alg, 0.0, 8_000.0;
             seed=809, progress=false)
         full_trace = full_chains.traces[1]

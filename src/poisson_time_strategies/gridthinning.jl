@@ -32,14 +32,10 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     α⁻::Float64
     safety_limit::Int
     curvature_backend::Symbol
-    lazy::Bool
     bound::Symbol
     curvature_bound
     bound_violation::Symbol
     max_rejections_before_tail_restart::Int
-    lazy_low_tightness_threshold::Float64
-    lazy_max_low_tightness_rejections::Int
-    lazy_max_rejections::Int
     allow_small_boomerang::Bool
     warmup_tuning
 end
@@ -108,27 +104,19 @@ end
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
     safety_limit::Int=500,
     curvature_backend=nothing,
-    lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing,
+    bound=nothing, curvature_bound=nothing, bound_violation=nothing,
     max_rejections_before_tail_restart::Int=100,
-    lazy_low_tightness_threshold::Real=0.1, lazy_max_low_tightness_rejections::Int=3,
-    lazy_max_rejections::Int=0, allow_small_boomerang::Bool=false, warmup_tuning=nothing)
+    allow_small_boomerang::Bool=false, warmup_tuning=nothing)
     bound_symbol = _normalize_grid_bound(bound)
     bound_violation_symbol = bound_violation === nothing ?
         (bound_symbol === :constant ? :count : :shrink) : Symbol(bound_violation)
-    lazy_low_tightness_threshold >= 0 ||
-        throw(ArgumentError("lazy_low_tightness_threshold must be nonnegative"))
-    lazy_max_low_tightness_rejections > 0 ||
-        throw(ArgumentError("lazy_max_low_tightness_rejections must be positive"))
-    lazy_max_rejections >= 0 ||
-        throw(ArgumentError("lazy_max_rejections must be nonnegative; use 0 for the default derived cap"))
     backend = _normalize_curvature_backend(curvature_backend)
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
         backend,
-        lazy, bound_symbol, curvature_bound, bound_violation_symbol,
+        bound_symbol, curvature_bound, bound_violation_symbol,
         max_rejections_before_tail_restart,
-        Float64(lazy_low_tightness_threshold), lazy_max_low_tightness_rejections,
-        lazy_max_rejections, allow_small_boomerang, warmup_tuning)
+        allow_small_boomerang, warmup_tuning)
 end
 
 function Base.show(io::IO, strat::GridThinningStrategy)
@@ -205,27 +193,17 @@ function _effective_grid_horizon(::GradientStrategy, t_max::Float64, τ_refresh:
     return t_max, :horizon_hit
 end
 
-_restore_lazy_after_grid!(alg, ::ContinuousDynamics) = nothing
-
-function _restore_lazy_after_grid!(alg, ::AnyBoomerang)
-    alg.lazy_enabled[] = alg.lazy
-    return nothing
-end
-
 function _return_grid_horizon!(alg, stats::AbstractStatisticCounter, flow::ContinuousDynamics, t_max::Float64, effective_horizon::Float64, horizon_event::Symbol, max_t_max::Float64, default_return)
     _inc_counter_grid_horizon_hits(stats)
     alg.has_cached_gradient[] = false
-    horizon_event === :horizon_hit || (alg.has_cached_rate_derivative[] = false)
-    if horizon_event === :horizon_hit
+    if horizon_event === :horizon_hit && effective_horizon >= t_max
         if !alg.schedule_frozen[]
             alg.t_max[] = min(t_max * alg.α⁺, max_t_max)
             recompute_time_grid!(alg)
             _inc_counter_grid_grows(stats)
         end
-        _restore_lazy_after_grid!(alg, flow)
         return t_max, :horizon_hit, default_return
     end
-    _restore_lazy_after_grid!(alg, flow)
     return effective_horizon, horizon_event, default_return
 end
 
@@ -273,12 +251,7 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         fd_w_buf,
         Float64[],
         Float64[],
-        strat.lazy,
-        Ref(strat.lazy),
         similar(state.ξ.x),
-        Ref(false),
-        Ref(NaN),
-        Ref(NaN),
         Ref(false),
         grad_provider,
         exact_provider,
@@ -286,9 +259,6 @@ function _build_grid_adaptive_state(strat::GridThinningStrategy, state::S, flow:
         strat.curvature_bound,
         strat.bound_violation,
         strat.max_rejections_before_tail_restart,
-        strat.lazy_low_tightness_threshold,
-        strat.lazy_max_low_tightness_rejections,
-        strat.lazy_max_rejections,
         strat.warmup_tuning,
     )
 end
@@ -313,22 +283,14 @@ struct GridAdaptiveState{S<:AbstractPDMPState,P,Q,B} <: PoissonTimeStrategy
     fd_w_buf::Vector{Float64}
     rate_value_buf::Vector{Float64}
     rate_derivative_buf::Vector{Float64}
-    lazy::Bool
-    lazy_enabled::Base.RefValue{Bool}
     cached_gradient::Vector{Float64}
     has_cached_gradient::Base.RefValue{Bool}
-    cached_rate::Base.RefValue{Float64}
-    cached_rate_derivative::Base.RefValue{Float64}
-    has_cached_rate_derivative::Base.RefValue{Bool}
     grad_provider::P
     exact_provider::Q
     bound::Symbol
     curvature_bound::B
     bound_violation::Symbol
     max_rejections_before_tail_restart::Int
-    lazy_low_tightness_threshold::Float64
-    lazy_max_low_tightness_rejections::Int
-    lazy_max_rejections::Int
     warmup_tuning
 end
 

@@ -389,8 +389,7 @@ end
 
         model = PDMPModel(1, FullGradient(neg_gaussian_grad!), neg_gaussian_hvp!)
         flow = BouncyParticle(1, 0.0)
-        alg = GridThinningStrategy(; N=1, N_min=1, t_max=2.0, lazy=false,
-            bound=:constant,
+        alg = GridThinningStrategy(; N=1, N_min=1, t_max=2.0, bound=:constant,
             curvature_bound=(0.0),
             bound_violation=:throw,
             max_rejections_before_tail_restart=1,
@@ -438,7 +437,7 @@ end
         @test state_copy_bytes > 0
 
         multiple_restart_alg = GridThinningStrategy(; N=1, N_min=1,
-            t_max=4.0, lazy=false, bound=:constant, curvature_bound=0.0,
+            t_max=4.0, bound=:constant, curvature_bound=0.0,
             bound_violation=:throw, max_rejections_before_tail_restart=1,
             safety_limit=50)
         multiple_rng = Xoshiro(59)
@@ -612,18 +611,15 @@ end
         generic = GridThinningStrategy(;
             N=2,
             bound=:value_quadratic,
-            curvature_bound=(1.0),
-            lazy=false)
+            curvature_bound=(1.0))
         adaptive = GridThinningStrategy(;
             N=2,
-            bound=:value_quadratic,
-            lazy=false)
+            bound=:value_quadratic)
         bounded = GridThinningStrategy(;
             N=2,
             bound=:value_quadratic,
             curvature_bound=(10.0),
-            bound_violation=:throw,
-            lazy=false)
+            bound_violation=:throw)
 
         _, generic_stats = only(pdmp_sample(
             ξ0, flow, model, generic, 0.0, 0.5;
@@ -663,8 +659,7 @@ end
             N=2,
             bound=:value_quadratic,
             curvature_bound=(0.0),
-            bound_violation=:throw,
-            lazy=false)
+            bound_violation=:throw)
         ξ0 = SkeletonPoint([0.45, -0.35], [0.25, 0.4])
         _, stats = only(pdmp_sample(
             ξ0, flow, model, alg, 0.0, 2.0;
@@ -1110,32 +1105,6 @@ end
         @test alg.N[] == 16
     end
 
-    @testset "lazy fallback disables pathological lazy searches until reset" begin
-        function x7_grad!(out, x)
-            out[1] = 7 * x[1]^6
-            return out
-        end
-
-        model = PDMPModel(1, FullGradient(x7_grad!))
-        flow = BouncyParticle(1, 0.0)
-        strat = GridThinningStrategy(; N=20, t_max=5.0, safety_limit=10, lazy=true)
-        ξ0 = SkeletonPoint([0.0], [2.0])
-        rng = Xoshiro(1004)
-
-        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, strat, 0.0, ξ0)
-
-        @test alg_.lazy_enabled[]
-
-        τ, event_type, _ = PDMPSamplers.next_event_time(rng, model_, flow, alg_, state, cache, stats, Inf, true)
-
-        @test isfinite(τ)
-        @test event_type == :reflect
-        @test !alg_.lazy_enabled[]
-
-        PDMPSamplers.reset_grid_scale!(alg_, strat.t_max)
-        @test alg_.lazy_enabled[]
-    end
-
     @testset "reset_grid_scale!" begin
         d = 3
         state_cache = PDMPState(0.0, SkeletonPoint(zeros(d), ones(d)))
@@ -1242,10 +1211,6 @@ end
             :grid_points_evaluated,
             :grid_points_skipped,
             :grid_N_current,
-            :lazy_fallback_low_tightness,
-            :lazy_fallback_bound_violation,
-            :lazy_proposal_attempts,
-            :lazy_proposal_rejections,
             :grid_resets_from_dynamics_adaptation,
         )
 
@@ -1543,8 +1508,7 @@ end
 
         model = PDMPModel(1, FullGradient(boomerang_grad_only!))
         flow = Boomerang(Diagonal([1.0]), [0.0], 0.0)
-        alg = GridThinningStrategy(; N=4, N_min=1, t_max=1.0, lazy=false,
-            bound=:constant)
+        alg = GridThinningStrategy(; N=4, N_min=1, t_max=1.0, bound=:constant)
         ξ0 = SkeletonPoint([0.25], [1.0])
         rng = Xoshiro(20260713)
 

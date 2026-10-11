@@ -40,7 +40,7 @@ function _maybe_tune_grid_after_warmup!(alg::GridAdaptiveState, stats::AbstractS
     acceptance_grad = _required_grid_counter_value(stats, :warmup_grid_acceptance_gradient_calls)
     gradients_per_event = (endpoint_grad + acceptance_grad) / events
     horizon_hits = _required_grid_counter_value(stats, :grid_horizon_hits)
-    rejections = _required_grid_counter_value(stats, :lazy_proposal_rejections)
+    rejections = _required_grid_counter_value(stats, :grid_proposal_rejections)
     horizon_rate = horizon_hits / events
     rejection_rate = rejections / events
 
@@ -96,9 +96,7 @@ end
 function reset_grid_scale!(alg::GridAdaptiveState, t_max::Float64=2.0)
     alg.t_max[] = t_max
     alg.N[] = alg.N_max
-    alg.lazy_enabled[] = alg.lazy
     alg.has_cached_gradient[] = false
-    alg.has_cached_rate_derivative[] = false
     recompute_time_grid!(alg)
 end
 
@@ -111,20 +109,9 @@ end
 
 function _invalidate_cached_gradient!(alg::GridAdaptiveState)
     alg.has_cached_gradient[] = false
-    alg.has_cached_rate_derivative[] = false
     return nothing
 end
 
-function _cache_endpoint_rate_derivative!(alg::GridAdaptiveState, y::Real, d::Real, horizon_event::Symbol)
-    if horizon_event === :horizon_hit && isfinite(y) && isfinite(d)
-        alg.cached_rate[] = Float64(y)
-        alg.cached_rate_derivative[] = Float64(d)
-        alg.has_cached_rate_derivative[] = true
-    else
-        alg.has_cached_rate_derivative[] = false
-    end
-    return nothing
-end
 
 function _adapt_grid_N!(alg::GridAdaptiveState, tightness::Float64)
     alg.schedule_frozen[] && return nothing

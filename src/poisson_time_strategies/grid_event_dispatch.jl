@@ -17,74 +17,21 @@ end
     return f(alg.exact_provider)
 end
 
-function _next_event_time_with_provider!(
-    rng::Random.AbstractRNG,
-    grad_and_hvp,
-    model::PDMPModel{<:GlobalGradientStrategy},
-    flow::FL,
-    alg::GridAdaptiveState,
-    state::AbstractPDMPState,
-    cache,
-    stats::AbstractStatisticCounter,
-    max_horizon::Float64,
-    include_refresh::Bool,
-    max_horizon_event::Symbol,
-    probe_failure_handler::GridBoundaryProbe,
-)::GridEvent where {FL<:ContinuousDynamics}
-    # A provider-owned interval certificate is already the complete cell
-    # construction.  Sending it through the derivative-based lazy builder
-    # silently discards that certificate (and was the normal full-gradient
-    # OMRF path).  Lazy endpoint construction is only applicable when no
-    # direct certificate is available.
-    if alg.lazy_enabled[] &&
-            !_can_use_signed_grid(state, flow, grad_and_hvp) &&
-            !has_direct_deterministic_rate_cell_bound(grad_and_hvp)
-        return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
-            max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-    end
-    return _next_event_time_grid!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
-        max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
-end
-
-# The lazy grid search with the selected provider, for fallbacks from the
-# value-quadratic construction.
-function _next_event_time_lazy_selected!(rng::Random.AbstractRNG,
-        model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState,
-        state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
-        max_horizon::Float64, include_refresh::Bool,
-        max_horizon_event::Symbol, probe_failure_handler::GridBoundaryProbe)
-    return _with_grid_event_provider(model, flow, alg, stats) do provider
-        _next_event_time_lazy!(rng, provider, model, flow, alg, state, cache,
-            stats, max_horizon, include_refresh, max_horizon_event,
-            probe_failure_handler)
-    end
-end
-
 function _next_event_time_resolved_provider!(rng::Random.AbstractRNG,
     provider, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
     alg::GridAdaptiveState, state::AbstractPDMPState, cache,
     stats::AbstractStatisticCounter, max_horizon::Float64,
     include_refresh::Bool, max_horizon_event::Symbol,
     probe_failure_handler::GridBoundaryProbe)::GridEvent where {FL<:ContinuousDynamics}
-    # This function barrier is important: `GridAdaptiveState.exact_provider` is
-    # intentionally type-erased, whereas the direct-certificate trait must be
-    # resolved on the concrete provider without boxing in the proposal loop.
-    if has_direct_deterministic_rate_cell_bound(provider)
-        return _next_event_time_with_provider!(rng, provider, model, flow, alg,
-            state, cache, stats, max_horizon, include_refresh,
+    if !has_direct_deterministic_rate_cell_bound(provider) &&
+            alg.bound === :value_quadratic &&
+            _can_use_global_value_quadratic_grid(flow, alg.curvature_bound)
+        return _next_event_time_grid!(rng, GradientOnlyProvider(alg.grad_provider),
+            model, flow, alg, state, cache, stats, max_horizon, include_refresh,
             max_horizon_event, probe_failure_handler)
     end
-    if alg.bound === :value_quadratic
-        return _next_event_time_value_quadratic!(
-            rng, model, flow, alg, state, cache, stats,
-            max_horizon, include_refresh, max_horizon_event,
-            probe_failure_handler)
-    end
-    state_ = alg.state_cache
-    copyto!(state_, state)
-    return _next_event_time_with_provider!(rng, provider, model, flow, alg,
-        state, cache, stats, max_horizon, include_refresh,
-        max_horizon_event, probe_failure_handler)
+    return _next_event_time_grid!(rng, provider, model, flow, alg, state, cache,
+        stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
 
 @inline function _has_exact_curvature_provider(model::PDMPModel, flow::ContinuousDynamics)
@@ -139,10 +86,14 @@ function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
         stats, (time_ns() - direct_started) * 1.0e-9)
     # Tangent cells must use the signed scalar rate or signed Zig-Zag
     # components. Clipping endpoints first can hide a positive interior.
-    use_single_pass_signed = !use_direct && _can_use_signed_grid(state, flow, provider)
+    use_value_only = !use_direct && provider isa GradientOnlyProvider &&
+        alg.bound === :value_quadratic && alg.curvature_bound !== nothing
+    use_single_pass_signed = !use_direct && !use_value_only &&
+        _can_use_signed_grid(state, flow, provider)
     return (;
         use_direct,
         direct_first,
+        use_value_only,
         use_single_pass_signed,
         use_constant_batched_signed=!use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, provider),
     )
@@ -183,6 +134,49 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
         _inc_counter_grid_builds(stats)
         _inc_counter_grid_points_evaluated(stats,
             max(0, n_cells_bounded - start_cell + 1))
+    elseif modes.use_value_only
+        copyto!(state_cache, state)
+        left = pcb.t_grid[start_cell]
+        !iszero(left) && move_forward_time!(state_cache, left, flow)
+        if start_cell == 1
+            if cached_gradient === nothing
+                _inc_counter_grid_endpoint_evaluations(stats)
+                _inc_counter_grid_endpoint_gradient_calls(stats)
+                pcb.y_vals[1] = _value_rate_at_state!(probe_failure_handler,
+                    state_cache, flow, provider.grad, 0.0, 0.0)
+            else
+                _inc_counter_grid_cached_endpoint_reuses(stats)
+                pcb.y_vals[1] = pos(λ(state_cache, cached_gradient, flow))
+            end
+        end
+        cumulative = initial_integral
+        n_cells_bounded = start_cell - 1
+        for cell in start_cell:length(pcb.Λ_vals)
+            left, right = pcb.t_grid[cell], pcb.t_grid[cell + 1]
+            left >= effective_horizon && break
+            move_forward_time!(state_cache, right - left, flow)
+            _inc_counter_grid_endpoint_evaluations(stats)
+            _inc_counter_grid_endpoint_gradient_calls(stats)
+            pcb.y_vals[cell + 1] = _value_rate_at_state!(probe_failure_handler,
+                state_cache, flow, provider.grad, left, right)
+            residual = _evaluate_curvature_bound(alg.curvature_bound,
+                state, flow, left, right, stats)
+            # In value-only mode the derivative storage holds cell curvature
+            # certificates, which also permit tightening the unvisited tail.
+            pcb.d_vals[cell] = residual === nothing ? NaN : residual
+            pcb.Λ_vals[cell] = residual === nothing ?
+                _tangent_value_cell_bound(state, flow, alg, stats, left, right,
+                    probe_failure_handler) :
+                _value_quadratic_cell_bound(pcb.y_vals[cell],
+                    pcb.y_vals[cell + 1], right - left, residual)
+            cumulative += pcb.Λ_vals[cell] * (right - left)
+            n_cells_bounded = cell
+            cumulative >= cumulative_exp && break
+        end
+        fill!(view(pcb.Λ_vals, (n_cells_bounded + 1):length(pcb.Λ_vals)), 0.0)
+        _inc_counter_grid_builds(stats)
+        _inc_counter_grid_points_evaluated(stats,
+            max(0, n_cells_bounded - start_cell + 1) + (start_cell == 1))
     elseif modes.use_single_pass_signed
         n_cells_bounded = construct_rate_bound_grid!(pcb, state, flow, provider,
             alg.bound === :value_quadratic ? alg.curvature_bound : nothing;
