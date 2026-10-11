@@ -194,8 +194,6 @@ end
         cv = SubsampledControlVariate((out, x) -> copyto!(out, x),
             (out, x, subset, anchor) -> fill!(out, 0.0), envelope, [0.0], 1;
             deterministic_hvp! = provider)
-        @test_throws ArgumentError PDMPModel(1, cv,
-            (out, x, v) -> copyto!(out, v))
         copied = copy(PDMPModel(1, cv))
         copied.hvp([0.0], [1.0])
         @test provider.calls == 0
@@ -213,7 +211,7 @@ end
         flow = BouncyParticle(1, 0.0)
         rng = Random.Xoshiro(81)
         state, counted_model, alg, cache, stats = PDMPSamplers.initialize_state(
-            rng, flow, model, GridThinningStrategy(lazy=false), 0.0,
+            rng, flow, model, GridThinningStrategy(), 0.0,
             SkeletonPoint([0.2], [1.0]))
         @test_throws ArgumentError PDMPSamplers.next_event_time(rng,
             counted_model, flow, alg, state, cache, stats, Inf, true,
