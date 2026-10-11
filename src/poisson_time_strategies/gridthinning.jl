@@ -1,3 +1,4 @@
+const GridEvent = Tuple{Float64,Symbol,GradientMeta}
 
 """
     GridThinningStrategy(; bound=:value_quadratic, kwargs...)
