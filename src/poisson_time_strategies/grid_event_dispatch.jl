@@ -37,6 +37,7 @@ function _next_event_time_with_provider!(
     # OMRF path).  Lazy endpoint construction is only applicable when no
     # direct certificate is available.
     if alg.lazy_enabled[] &&
+            !_can_use_signed_grid(state, flow, grad_and_hvp) &&
             !has_direct_deterministic_rate_cell_bound(grad_and_hvp)
         return _next_event_time_lazy!(rng, grad_and_hvp, model, flow, alg, state, cache, stats,
             max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
@@ -142,16 +143,9 @@ function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
         state, flow, alg.pcb.t_grid[1], alg.pcb.t_grid[2])) : 0.0
     use_direct && stats !== nothing && _inc_counter_grid_bound_seconds(
         stats, (time_ns() - direct_started) * 1.0e-9)
-    # Subsampled GridThinning also reaches this dispatcher.  Its historical
-    # value-quadratic path accidentally fell through to the endpoint-tangent
-    # construction, which ignores `curvature_bound`.  Use the same signed-rate
-    # flat cell construction as the global value-quadratic path for scalar-rate
-    # flows.  Correctness still requires the caller-supplied curvature value or
-    # callback to be a genuine uniform cell certificate.
-    use_value_quadratic = alg.bound === :value_quadratic &&
-        _can_use_value_quadratic_grid(flow, alg.curvature_bound) &&
-        _can_use_signed_grid_bound(alg, state, flow, provider)
-    use_single_pass_signed = !use_direct && use_value_quadratic
+    # Tangent cells must use the signed scalar rate or signed Zig-Zag
+    # components. Clipping endpoints first can hide a positive interior.
+    use_single_pass_signed = !use_direct && _can_use_signed_grid(state, flow, provider)
     return (;
         use_direct,
         direct_first,
@@ -196,7 +190,8 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
         _inc_counter_grid_points_evaluated(stats,
             max(0, n_cells_bounded - start_cell + 1))
     elseif modes.use_single_pass_signed
-        n_cells_bounded = construct_rate_bound_grid!(pcb, state, flow, provider, alg.curvature_bound;
+        n_cells_bounded = construct_rate_bound_grid!(pcb, state, flow, provider,
+            alg.bound === :value_quadratic ? alg.curvature_bound : nothing;
             cached_gradient, early_stop_threshold=cumulative_exp, state_cache, stats, max_time=effective_horizon,
             rate_value_buf=alg.rate_value_buf, rate_derivative_buf=alg.rate_derivative_buf, probe_failure_handler, start_cell, initial_integral, append)
     else
