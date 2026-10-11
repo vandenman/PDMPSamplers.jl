@@ -18,7 +18,6 @@ const gaussian_slab! = PDMPSamplers.gaussian_slab!
 const log_boundary_density_zero = PDMPSamplers.log_boundary_density_zero
 const log_model_add_odds = PDMPSamplers.log_model_add_odds
 const sample_unstick_label = PDMPSamplers.sample_unstick_label
-const slab_cache_key = PDMPSamplers.slab_cache_key
 const slab_cache_style = PDMPSamplers.slab_cache_style
 const thinning_diagnostics = PDMPSamplers.thinning_diagnostics
 const unstick_rate_constant = PDMPSamplers.unstick_rate_constant
@@ -629,7 +628,6 @@ end
         end
 
         @test slab_cache_style(provider) isa FixedCovarianceCache
-        @test slab_cache_key(provider, x, active) == active
 
         empty_active = falses(4)
         empty_weights = fill(NaN, 4)
@@ -665,9 +663,6 @@ end
         @test exch_weights ≈ dense_weights
         @test slab_cache_style(exch) isa FixedCovarianceCache
         @test slab_cache_style(zero_exch) isa FixedCovarianceCache
-        @test slab_cache_key(exch, x, active) == active
-        @test slab_cache_key(exch, x, active) !== active
-        @test slab_cache_key(zero_exch, x, active) == active
 
         exch_mean = fill(NaN, 4)
         exch_cov = fill(NaN, 4, 4)

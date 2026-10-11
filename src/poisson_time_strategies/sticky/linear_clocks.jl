@@ -457,58 +457,6 @@ sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:Abstr
 sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
     _exchangeable_sample_time(rng, clock, flow, state, horizon, can_stick)
 
-function _sample_uniform_inactive_stickable(rng::Random.AbstractRNG, indices::AbstractVector{Int}, active::BitVector, stickable::BitVector, nU::Integer)
-    nU > 0 || throw(ArgumentError("cannot sample an unstick label because there are no inactive stickable coordinates"))
-    draw = rand(rng, 1:nU)
-    seen = 0
-    @inbounds for j in eachindex(indices)
-        if stickable[j] && !active[j]
-            seen += 1
-            seen == draw && return indices[j]
-        end
-    end
-    return indices[lastindex(indices)]
-end
-
-function _sample_static_model_prior_label(rng::Random.AbstractRNG, indices::AbstractVector{Int}, prior::AbstractModelPrior, active::BitVector, stickable::BitVector, k::Integer)
-    max_logw = -Inf
-    @inbounds for j in eachindex(indices)
-        if stickable[j] && !active[j]
-            max_logw = max(max_logw, _log_model_add_odds_with_count(prior, active, j, k))
-        end
-    end
-    max_logw == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
-    if max_logw == Inf
-        logweights = fill(-Inf, length(indices))
-        @inbounds for j in eachindex(indices)
-            if stickable[j] && !active[j]
-                logweights[j] = _log_model_add_odds_with_count(prior, active, j, k)
-            end
-        end
-        return _sample_from_logweights(rng, indices, logweights)
-    end
-    total = 0.0
-    @inbounds for j in eachindex(indices)
-        if stickable[j] && !active[j]
-            logw = _log_model_add_odds_with_count(prior, active, j, k)
-            total += isfinite(logw) ? exp(logw - max_logw) : 0.0
-        end
-    end
-    draw = rand(rng) * total
-    last_candidate = 0
-    @inbounds for j in eachindex(indices)
-        if stickable[j] && !active[j]
-            logw = _log_model_add_odds_with_count(prior, active, j, k)
-            if isfinite(logw)
-                last_candidate = j
-                draw -= exp(logw - max_logw)
-                draw <= 0 && return indices[j]
-            end
-        end
-    end
-    return indices[last_candidate]
-end
-
 function _sample_velocity_weighted_model_prior_label(
         rng::Random.AbstractRNG, indices::AbstractVector{Int},
         prior::AbstractModelPrior, active::BitVector, stickable::BitVector,

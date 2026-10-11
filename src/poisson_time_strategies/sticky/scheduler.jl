@@ -13,11 +13,7 @@ function sticking_time(ξ::SkeletonPoint, ::Union{BouncyParticle,ZigZag}, i::Int
     end
 end
 
-get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_strat.κ[i]
-get_κ(sticky_strat::Sticky{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_strat.κ(i, args...)
 
-get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:AbstractVector}, i, args...) = sticky_state.κ[i]
-get_κ(sticky_state::StickyLoopState{<:PoissonTimeStrategy,<:Function}, i, args...) = sticky_state.κ(i, args...)
 
 # Sticky rates evaluated for many coordinates at one state share a context:
 # summary statistics of the state that a rate function computes once (see

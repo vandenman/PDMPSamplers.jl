@@ -12,18 +12,6 @@ end
 
 _positive_logweight(logw::Real) = logw > -Inf
 
-function _has_inactive_stickable_beta(clock::AbstractAggregateUnstickClock, state::StickyPDMPState, can_stick::BitVector)
-    provider = clock.slab_provider
-    active_beta = _active_beta_from_free(provider, state.free)
-    for (j, i) in enumerate(beta_indices(provider))
-        if can_stick[i] && !state.free[i] &&
-           log_model_add_odds(clock.model_prior, active_beta, j) > -Inf
-            return true
-        end
-    end
-    return false
-end
-
 function _has_inactive_stickable_beta(clock::SummedRateClock,
         state::StickyPDMPState, can_stick::BitVector)
     active_beta, stickable_beta = _clock_active_and_stickable(

@@ -37,18 +37,16 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         if modes.use_single_pass_signed
             alg.has_cached_gradient[] = false
             cached_gradient = had_cached_gradient ? alg.cached_gradient : nothing
-            cached_y0 = cached_d0 = cached_g0 = cached_dg0 = NaN
+            cached_y0 = cached_d0 = NaN
         elseif had_cached_gradient && !modes.use_constant_batched_signed
             cached_y0, cached_d0 = _get_rate_and_deriv_or_throw(
                 probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
                 t_valid=0.0, t_invalid=0.0)
-            cached_g0 = cached_dg0 = NaN
             alg.has_cached_gradient[] = false
             alg.has_cached_rate_derivative[] = false
             cached_gradient = nothing
         else
             cached_y0, cached_d0 = NaN, NaN
-            cached_g0, cached_dg0 = NaN, NaN
             cached_gradient = nothing
             if modes.use_constant_batched_signed
                 _invalidate_cached_gradient!(alg)
@@ -57,7 +55,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         n_cells_bounded, built_area = _build_grid_bound_prefix!(
             pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
             cumulative_exp, probe_failure_handler, modes;
-            cached_gradient, cached_y0, cached_d0, cached_g0, cached_dg0)
+            cached_gradient, cached_y0, cached_d0)
         _set_counter_grid_N_current(stats, alg.N[])
 
         # Budget-first exactness invariant:

@@ -369,10 +369,6 @@ stickable_coordinates(clock::SummedRateClock) = beta_indices(clock.slab_provider
 stickable_coordinates(clock::LinearGaussianAggregateClock) = beta_indices(clock.slab_provider)
 stickable_coordinates(clock::ExponentialSumAggregateClock) = beta_indices(clock.slab_provider)
 
-function _active_beta_from_free(provider::AbstractSlabPrior, free::BitVector)
-    active_beta = BitVector(undef, length(beta_indices(provider)))
-    return _active_beta_from_free!(active_beta, provider, free)
-end
 
 function _active_beta_from_free!(active_beta::BitVector, provider::AbstractSlabPrior, free::BitVector)
     indices = beta_indices(provider)
@@ -382,10 +378,6 @@ function _active_beta_from_free!(active_beta::BitVector, provider::AbstractSlabP
     return active_beta
 end
 
-function _stickable_beta_from_can_stick(provider::AbstractSlabPrior, can_stick::BitVector)
-    stickable_beta = BitVector(undef, length(beta_indices(provider)))
-    return _stickable_beta_from_can_stick!(stickable_beta, provider, can_stick)
-end
 
 function _stickable_beta_from_can_stick!(stickable_beta::BitVector, provider::AbstractSlabPrior, can_stick::BitVector)
     indices = beta_indices(provider)

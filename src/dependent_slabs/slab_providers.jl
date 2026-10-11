@@ -223,19 +223,9 @@ Return a cache trait for `provider`. Fixed Gaussian providers return
 """
 slab_cache_style(::AbstractSlabPrior) = NoSlabCache()
 
-"""
-    slab_cache_key(provider, x, active_beta)
-
-Return a cache key for active-face quantities, or `nothing` when the provider
-does not support active-set-only caching.
-"""
-slab_cache_key(::AbstractSlabPrior, ::AbstractVector, ::BitVector) = nothing
 slab_cache_style(::DenseGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::AbstractExchangeableGaussianSlab) = FixedCovarianceCache()
 slab_cache_style(::LogLinearGaussianScaleSlab) = NoSlabCache()
-slab_cache_key(::DenseGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
-slab_cache_key(::AbstractExchangeableGaussianSlab, ::AbstractVector, active_beta::BitVector) = copy(active_beta)
-slab_cache_key(::LogLinearGaussianScaleSlab, ::AbstractVector, ::BitVector) = nothing
 """
     gaussian_slab!(provider, mean_out, cov_out, x)
 
