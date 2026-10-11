@@ -189,7 +189,7 @@ function construct_rate_bound_grid!(
         move_forward_time!(state_t, t_grid[start_cell], flow)
     elseif used_batched_derivatives
         loaded_batched_points = _load_rate_derivatives!(
-            pcb, provider, state, flow, 1, n_time_cells + 1, loaded_batched_points, stats)
+            pcb, provider, state, flow, 1, n_time_cells + 1, loaded_batched_points, stats, state_t)
     elseif cached_gradient === nothing
         if stats !== nothing
             _inc_counter_grid_endpoint_evaluations(stats)
@@ -226,7 +226,7 @@ function construct_rate_bound_grid!(
         Δt = t_grid[i] - t_grid[i - 1]
         if used_batched_derivatives
             loaded_batched_points = _load_rate_derivatives!(
-                pcb, provider, state, flow, i, n_time_cells + 1, loaded_batched_points, stats)
+                pcb, provider, state, flow, i, n_time_cells + 1, loaded_batched_points, stats, state_t)
         else
             move_forward_time!(state_t, Δt, flow)
             if stats !== nothing

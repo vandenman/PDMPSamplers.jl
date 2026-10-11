@@ -68,7 +68,7 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     elseif used_batched_rate_derivatives
         loaded_batched_points = _load_constant_rate_derivatives!(
             pcb, grad_and_hess_or_grad_and_hvp, state, flow, 1, n_time_cells + 1,
-            loaded_batched_points, λ_refresh, stats)
+            loaded_batched_points, λ_refresh, stats, state_t)
     elseif isnan(cached_y0)
         if stats !== nothing
             _inc_counter_grid_endpoint_evaluations(stats)
@@ -105,7 +105,7 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
         if used_batched_rate_derivatives
             loaded_batched_points = _load_constant_rate_derivatives!(
                 pcb, grad_and_hess_or_grad_and_hvp, state, flow, i, n_time_cells + 1,
-                loaded_batched_points, λ_refresh, stats)
+                loaded_batched_points, λ_refresh, stats, state_t)
         else
             move_forward_time!(state_t, Δt, flow)
             if stats !== nothing
@@ -158,7 +158,7 @@ end
 _grid_rate_derivative_chunk_points() = 16
 
 function _load_rate_derivative_chunk!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing}, transform)
+    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing}, transform, state_cache::AbstractPDMPState)
     target_point <= loaded_points && return loaded_points
     start_point = loaded_points + 1
     stop_point = min(max_points, max(target_point, loaded_points + _grid_rate_derivative_chunk_points()))
@@ -170,7 +170,7 @@ function _load_rate_derivative_chunk!(pcb::PiecewiseConstantBound, provider, sta
     values = reshape(@view(pcb.y_vals[start_point:stop_point]), 1, n_points)
     derivatives = reshape(@view(pcb.d_vals[start_point:stop_point]), 1, n_points)
     _fill_rate_derivatives!(
-        values, derivatives, provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points)
+        values, derivatives, provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points, state_cache)
     for (offset, point) in enumerate(start_point:stop_point)
         pcb.y_vals[point], pcb.d_vals[point] = transform(values[1, offset], derivatives[1, offset])
     end
@@ -179,17 +179,17 @@ end
 
 function _load_constant_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState,
     flow::ContinuousDynamics, target_point::Integer, max_points::Integer, loaded_points::Integer, λ_refresh::Real,
-    stats::Union{AbstractStatisticCounter,Nothing})
+    stats::Union{AbstractStatisticCounter,Nothing}, state_cache::AbstractPDMPState)
     transform = (g, dg) -> _constant_rate_derivative_from_signed(g, dg, λ_refresh)
     return _load_rate_derivative_chunk!(
-        pcb, provider, state, flow, target_point, max_points, loaded_points, stats, transform)
+        pcb, provider, state, flow, target_point, max_points, loaded_points, stats, transform, state_cache)
 end
 
 function _load_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing})
+    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing}, state_cache::AbstractPDMPState)
     return _load_rate_derivative_chunk!(
         pcb, provider, state, flow, target_point, max_points, loaded_points, stats,
-        (g, dg) -> (g, dg))
+        (g, dg) -> (g, dg), state_cache)
 end
 
 function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d_vals::Vector, i::Int)

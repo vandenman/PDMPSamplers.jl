@@ -283,7 +283,9 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             SkeletonPoint([0.0], [1.0]),
             BouncyParticle(1, 0.0),
             checked_model,
-            GridThinningStrategy(),
+            # The zero gradient has a zero-curvature certificate. This checks
+            # the search horizon without finite-difference probes beyond it.
+            GridThinningStrategy(curvature_bound=0.0),
             0.0, 0.1;
             progress=false,
         ))
