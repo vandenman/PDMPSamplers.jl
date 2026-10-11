@@ -1,14 +1,4 @@
 """
-    active_prior_neggrad!(provider, out, x, active_beta)
-
-Compatibility name for the active slab negative-gradient contract. New
-providers should think of this as the canonical sign convention; historical
-Gaussian providers also dispatch through `active_prior_grad!`.
-"""
-active_prior_neggrad!(provider::AbstractGaussianSlabProvider, out::AbstractVector, x::AbstractVector, active_beta::BitVector) =
-    active_prior_grad!(provider, out, x, active_beta)
-
-"""
     SummedRateClock(slab_provider, model_prior; rtol=1e-8, atol=1e-10,
                     initial_bracket=1.0, bracket_multiplier=2.0,
                     diagnostics=false)

@@ -122,9 +122,9 @@ function (target::DependentSlabTarget)(out::AbstractVector, x::AbstractVector)
     end
 
     _evaluate_negative_gradient!(target.posterior_grad!, target.post_buf, x)
-    active_prior_grad!(target.slab_provider, target.all_active_slab_buf, x,
+    active_slab_potential_gradient!(target.slab_provider, target.all_active_slab_buf, x,
         target.all_active_beta)
-    active_prior_grad!(target.slab_provider, target.slab_buf, x, target.active_beta)
+    active_slab_potential_gradient!(target.slab_provider, target.slab_buf, x, target.active_beta)
     @. out = target.post_buf - target.all_active_slab_buf + target.slab_buf
     return out
 end

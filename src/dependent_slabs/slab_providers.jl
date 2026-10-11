@@ -552,12 +552,11 @@ function _cholesky_solve_spd_prefix!(A::AbstractMatrix{Float64}, b::AbstractVect
 end
 
 """
-    active_prior_grad!(provider, out, x, active_beta)
-    active_prior_neggrad!(provider, out, x, active_beta)
+    active_slab_potential_gradient!(provider, out, x, active_beta)
 
-Write the active slab prior contribution into `out`. Despite the historical
-`active_prior_grad!` name, the contract is the negative-gradient contribution
-used by `DependentSlabTarget`:
+Write the gradient of the negative log density of the active slab into `out`.
+For a Gaussian slab this is Σ_AA⁻¹(x_A - μ_A) on active coordinates.
+`DependentSlabTarget` uses this potential-gradient convention as:
 `posterior_grad - all_active_slab_buf + active_slab_buf`.
 `out` is always a full-state vector with the same length and coordinate layout
 as `x`; beta-block output is intentionally not supported.
@@ -565,7 +564,7 @@ The full posterior contains the complete coherent slab, so likelihood and
 nuisance-prior terms remain untouched.
 For dense fixed Gaussian slabs this method is allocation-free after warmup.
 """
-function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
+function active_slab_potential_gradient!(provider::DenseGaussianSlab, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     length(out) == length(x) ||
         throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
@@ -584,7 +583,7 @@ function active_prior_grad!(provider::DenseGaussianSlab, out::AbstractVector, x:
     return _write_active_gradient_full!(out, indices, active_beta, work_rhs, k)
 end
 
-function active_prior_grad!(provider::LogLinearGaussianScaleSlab,
+function active_slab_potential_gradient!(provider::LogLinearGaussianScaleSlab,
         out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
     length(out) == length(x) || throw(DimensionMismatch(
@@ -611,7 +610,7 @@ end
 """
     active_prior_hvp!(provider, out, x, direction, active_beta)
 
-Write the exact directional derivative of `active_prior_grad!` for the compact
+Write the exact directional derivative of `active_slab_potential_gradient!` for the compact
 log-linear Gaussian scale slab.  This is allocation-free and follows the same
 full-state coordinate layout as the gradient routine.
 """
@@ -650,7 +649,7 @@ end
 _fixed_exchangeable_mean(provider::ExchangeableGaussianSlab) = provider.mean
 _fixed_exchangeable_mean(::ZeroMeanExchangeableGaussianSlab) = 0.0
 
-function active_prior_grad!(provider::Union{
+function active_slab_potential_gradient!(provider::Union{
         ExchangeableGaussianSlab,ZeroMeanExchangeableGaussianSlab},
         out::AbstractVector, x::AbstractVector, active_beta::BitVector)
     indices = beta_indices(provider)
@@ -682,18 +681,4 @@ function active_prior_grad!(provider::Union{
     return out
 end
 
-function active_prior_grad!(provider::AbstractGaussianSlabProvider, out::AbstractVector, x::AbstractVector, active_beta::BitVector)
-    indices = beta_indices(provider)
-    length(out) == length(x) ||
-        throw(DimensionMismatch("full-state output length $(length(out)) does not match state length $(length(x))"))
-    A = _active_positions(active_beta, length(indices))
-    if isempty(A)
-        fill!(out, 0.0)
-        return out
-    end
-    mean, cov = _current_mean_cov(provider, x)
-    F = cholesky(Symmetric(Matrix{Float64}(cov[A, A])); check=true)
-    delta = Vector{Float64}(x[indices[A]] .- mean[A])
-    grad_active = F \ delta
-    return _write_active_gradient_full!(out, indices, active_beta, grad_active, length(A))
-end
+

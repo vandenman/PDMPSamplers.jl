@@ -7,8 +7,7 @@ const LinearGaussianAggregateClock = PDMPSamplers.LinearGaussianAggregateClock
 const NoSlabCache = PDMPSamplers.NoSlabCache
 const SummedRateClock = PDMPSamplers.SummedRateClock
 const active_logdensity = PDMPSamplers.active_logdensity
-const active_prior_grad! = PDMPSamplers.active_prior_grad!
-const active_prior_neggrad! = PDMPSamplers.active_prior_neggrad!
+const active_slab_potential_gradient! = PDMPSamplers.active_slab_potential_gradient!
 const aggregate_lograte = PDMPSamplers.aggregate_lograte
 const beta_indices = PDMPSamplers.beta_indices
 const boundary_logweights! = PDMPSamplers.boundary_logweights!
@@ -247,7 +246,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG, clock::_DeclaredStickableClock,
     first(clock.coordinates)
 
 function _active_prior_grad_alloc(provider, out, x, active)
-    return @allocated active_prior_grad!(provider, out, x, active)
+    return @allocated active_slab_potential_gradient!(provider, out, x, active)
 end
 
 function _conditional_logdensity_zero_alloc(provider, x, active, j)
@@ -366,7 +365,7 @@ end
         x = [10.0, 1.3, 20.0, -0.1, 0.8]
         active = BitVector([true, false, true])
         out = fill(NaN, length(x))
-        active_prior_grad!(provider, out, x, active)
+        active_slab_potential_gradient!(provider, out, x, active)
 
         A = [1, 3]
         expected_active = cov[A, A] \ (x[indices[A]] - mean[A])
@@ -374,22 +373,18 @@ end
         expected[indices[A]] .= expected_active
         @test out ≈ expected
 
-        out_alias = fill(NaN, length(x))
-        active_prior_neggrad!(provider, out_alias, x, active)
-        @test out_alias ≈ expected
-
-        active_prior_grad!(provider, out, x, active)
+        active_slab_potential_gradient!(provider, out, x, active)
         _active_prior_grad_alloc(provider, out, x, active)
         @test _active_prior_grad_alloc(provider, out, x, active) == 0
-        @test_throws DimensionMismatch active_prior_grad!(provider, out, x, BitVector([true, false]))
+        @test_throws DimensionMismatch active_slab_potential_gradient!(provider, out, x, BitVector([true, false]))
 
         out_block = fill(NaN, length(indices))
-        @test_throws DimensionMismatch active_prior_grad!(provider, out_block, x, active)
+        @test_throws DimensionMismatch active_slab_potential_gradient!(provider, out_block, x, active)
 
-        @test_throws DimensionMismatch active_prior_grad!(provider, fill(NaN, 4), x, active)
+        @test_throws DimensionMismatch active_slab_potential_gradient!(provider, fill(NaN, 4), x, active)
 
         all_active = trues(3)
-        active_prior_grad!(provider, out, x, all_active)
+        active_slab_potential_gradient!(provider, out, x, all_active)
         expected_all = zeros(length(x))
         expected_all[indices] .= cov \ (x[indices] - mean)
         @test out ≈ expected_all
@@ -399,18 +394,18 @@ end
         permuted = DenseGaussianSlab(zeros(3), Matrix(I, 3, 3), [3, 1, 2])
         permuted_x = [10.0, 20.0, 30.0]
         permuted_out = zeros(3)
-        active_prior_grad!(permuted, permuted_out, permuted_x, trues(3))
+        active_slab_potential_gradient!(permuted, permuted_out, permuted_x, trues(3))
         @test permuted_out == permuted_x
 
         empty_out = fill(NaN, length(x))
-        active_prior_grad!(provider, empty_out, x, falses(3))
+        active_slab_potential_gradient!(provider, empty_out, x, falses(3))
         @test empty_out == zeros(length(x))
 
         exch = ExchangeableGaussianSlab(indices, 0.2, 1.3, 0.1)
         generic_empty_out = fill(NaN, length(x))
-        active_prior_grad!(exch, generic_empty_out, x, falses(3))
+        active_slab_potential_gradient!(exch, generic_empty_out, x, falses(3))
         @test generic_empty_out == zeros(length(x))
-        active_prior_grad!(exch, generic_empty_out, x, BitVector([true, false, true]))
+        active_slab_potential_gradient!(exch, generic_empty_out, x, BitVector([true, false, true]))
         exch_mean, exch_cov = gaussian_slab(exch, x)
         expected_exch = zeros(length(x))
         expected_exch[indices[[1, 3]]] .= exch_cov[[1, 3], [1, 3]] \ (x[indices[[1, 3]]] - exch_mean[[1, 3]])
@@ -422,7 +417,7 @@ end
 
         zero_exch = ZeroMeanExchangeableGaussianSlab(indices, 1.3, 0.1)
         zero_exch_out = fill(NaN, length(x))
-        active_prior_grad!(zero_exch, zero_exch_out, x, active)
+        active_slab_potential_gradient!(zero_exch, zero_exch_out, x, active)
         zero_exch_cov = Matrix(1.3I, 3, 3) .+ 0.1
         expected_zero_exch = zeros(length(x))
         expected_zero_exch[indices[A]] .=
@@ -438,7 +433,7 @@ end
         structured = LogLinearGaussianScaleSlab(
             indices, [1, 3], log.([2.0, 3.0, 4.0]), structured_design)
         structured_out = zeros(length(logscale_x))
-        active_prior_grad!(structured, structured_out, logscale_x, logscale_active)
+        active_slab_potential_gradient!(structured, structured_out, logscale_x, logscale_active)
         expected_structured = zeros(length(logscale_x))
         for j in (1, 2)
             beta = logscale_x[indices[j]]
