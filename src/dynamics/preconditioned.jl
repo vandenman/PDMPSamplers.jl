@@ -84,7 +84,6 @@ end
 update_preconditioner!(::Random.AbstractRNG, flow::ContinuousDynamics, ::AbstractPDMPTrace, state::AbstractPDMPState) = flow
 update_preconditioner!(::Random.AbstractRNG, flow::ContinuousDynamics,
         ::AbstractPDMPTrace, ::AbstractPDMPState, args...) = flow
-update_preconditioner!(flow::ContinuousDynamics, trace::AbstractPDMPTrace, state::AbstractPDMPState, args...) = update_preconditioner!(Random.default_rng(), flow, trace, state, args...)
 
 # Output backends may keep additional online moments for final summaries, but
 # adaptation must see the same segment-wise statistic as the established dense

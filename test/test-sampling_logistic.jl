@@ -71,7 +71,7 @@ end
             end
 
             x0 = zeros(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -114,7 +114,7 @@ end
         alg = Sticky(alg0, κ)
 
         x0 = randn(d_s)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d_s)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d_s)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target_s))

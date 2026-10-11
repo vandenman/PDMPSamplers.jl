@@ -6,7 +6,7 @@ function _stopping_setup(; d::Int=3)
     grad = FullGradient(Base.Fix1(neg_gradient!, target))
     model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
     alg = GridThinningStrategy()
-    ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+    ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
     return ξ0, flow, model, alg
 end
 
@@ -388,8 +388,8 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         grad_nf = FullGradient(Base.Fix1(neg_gradient!, target))
         model_nf = PDMPModel(3, grad_nf, Base.Fix1(neg_hvp!, target))
         alg_nf = GridThinningStrategy()
-        ξ0_nf = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(flow_nf, 3))
-        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(flow_nf, model_nf, alg_nf, 0.0, ξ0_nf)
+        ξ0_nf = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(Random.default_rng(), flow_nf, 3))
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(Random.default_rng(), flow_nf, model_nf, alg_nf, 0.0, ξ0_nf)
         trace_manager = PDMPSamplers.TraceManager(state, flow_nf, alg_nf, 0.0)
 
         PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :warmup)

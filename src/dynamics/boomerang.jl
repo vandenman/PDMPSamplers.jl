@@ -190,7 +190,7 @@ function lowrank_quadform(lrp::LowRankPrecision, v::AbstractVector)
 end
 
 """
-    lowrank_sample!(θ, lrp)
+    lowrank_sample!(rng, θ, lrp)
 
 Sample θ ~ N(0, Σ) where Σ = D + VΛV'.
 Uses θ = D^{1/2}ε₁ + V Λ^{1/2}ε₂ with ε₁ ~ N(0,I_d), ε₂ ~ N(0,I_r).
@@ -206,7 +206,6 @@ function lowrank_sample!(rng::Random.AbstractRNG, θ::AbstractVector, lrp::LowRa
     mul!(θ, lrp.V, buf_r1, 1.0, 1.0)  # θ += V Λ^{1/2} ε₂
     return θ
 end
-lowrank_sample!(θ::AbstractVector, lrp::LowRankPrecision) = lowrank_sample!(Random.default_rng(), θ, lrp)
 function Boomerang(Γ, μ, λ = 0.1; ρ=0.0)
     if Γ isa Diagonal
         return Boomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L)

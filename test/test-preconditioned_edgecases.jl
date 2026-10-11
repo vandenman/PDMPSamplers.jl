@@ -225,24 +225,24 @@
         ∇ϕ = -inv(M.L') * signs
         cache = (; z=similar(ξ.x))
 
-        PDMPSamplers.reflect!(ξ, ∇ϕ, zz, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), ξ, ∇ϕ, zz, cache)
         @test all(isfinite, ξ.θ)
     end
 
     @testset "reflect! via AbstractPDMPState dispatch" begin
         d = 3
         zz = DensePreconditionedZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(zz, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), zz, d)))
         ∇ϕ = randn(d)
         cache = (; z=similar(state.ξ.x))
-        PDMPSamplers.reflect!(state, ∇ϕ, zz, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), state, ∇ϕ, zz, cache)
         @test all(isfinite, state.ξ.θ)
     end
 
     @testset "Forwarding methods" begin
         d = 3
         zz = DensePreconditionedZigZag(d)
-        ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(zz, d))
+        ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), zz, d))
         state = PDMPState(0.0, ξ)
 
         # move_forward_time!
@@ -251,7 +251,7 @@
 
         # λ forwarding (non-dense preconditioned λ uses inner dynamics)
         pzz = PreconditionedZigZag(d)
-        ξ2 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(pzz, d))
+        ξ2 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), pzz, d))
         rate = PDMPSamplers.λ(ξ2, randn(d), pzz)
         @test rate >= 0
 
@@ -274,7 +274,7 @@
 
         zz = PreconditionedDynamics(dp, ZigZag(d))
         Random.seed!(42)
-        v = PDMPSamplers.initialize_velocity(zz, d)
+        v = PDMPSamplers.initialize_velocity(Random.default_rng(), zz, d)
         @test length(v) == d
         # Velocities should be ±scale_i (not ±1)
         @test all(abs.(v) .∈ Ref([2.0, 3.0, 4.0]))
@@ -309,7 +309,7 @@
 
         bps = PreconditionedDynamics(dp, BouncyParticle(d, 1.0))
         ξ = SkeletonPoint(randn(d), randn(d))
-        PDMPSamplers.refresh_velocity!(ξ, bps)
+        PDMPSamplers.refresh_velocity!(Random.default_rng(), ξ, bps)
         @test all(isfinite, ξ.θ)
     end
 
@@ -328,7 +328,7 @@
         trace = PDMPSamplers.PDMPTrace(
             [PDMPEvent(0.0, randn(d), randn(d)), PDMPEvent(1.0, randn(d), randn(d))], flow)
         state = PDMPState(0.0, SkeletonPoint(randn(d), randn(d)))
-        result = PDMPSamplers.update_preconditioner!(flow, trace, state)
+        result = PDMPSamplers.update_preconditioner!(Random.default_rng(), flow, trace, state)
         @test result === flow
     end
 
@@ -341,15 +341,15 @@
             PDMPEvent(Float64(i), randn(d), randn(d)) for i in 0:100
         ]
         trace = PDMPSamplers.PDMPTrace(events, pzz)
-        state = PDMPState(50.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(pzz, d)))
+        state = PDMPState(50.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), pzz, d)))
 
         old_scale = copy(pzz.metric.scale)
-        PDMPSamplers.update_preconditioner!(pzz, trace, state, false)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), pzz, trace, state, false)
         @test pzz.metric.scale != old_scale
 
         # Test first_update=true branch
         pzz2 = PreconditionedZigZag(d)
-        PDMPSamplers.update_preconditioner!(pzz2, trace, state, true)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), pzz2, trace, state, true)
         @test pzz2.metric.scale != ones(d)
 
         # Later noisy estimates may shrink freely, but a single update must not
@@ -359,7 +359,7 @@
         ]
         wide_trace = PDMPSamplers.PDMPTrace(wide_events, pzz)
         fill!(pzz.metric.scale, 1.0)
-        PDMPSamplers.update_preconditioner!(pzz, wide_trace, state, false, 2.0)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), pzz, wide_trace, state, false, 2.0)
         @test pzz.metric.scale == fill(2.0, d)
     end
 
@@ -371,8 +371,8 @@
             PDMPEvent(Float64(i), [1.0, 2.0], randn(d)) for i in 0:10
         ]
         trace = PDMPSamplers.PDMPTrace(events, pzz)
-        state = PDMPState(5.0, SkeletonPoint([1.0, 2.0], PDMPSamplers.initialize_velocity(pzz, d)))
-        PDMPSamplers.update_preconditioner!(pzz, trace, state)
+        state = PDMPState(5.0, SkeletonPoint([1.0, 2.0], PDMPSamplers.initialize_velocity(Random.default_rng(), pzz, d)))
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), pzz, trace, state)
         # Should not error; zero sigma should use old_scale / 2
         @test all(isfinite, pzz.metric.scale)
         @test all(pzz.metric.scale .> 0)
@@ -390,7 +390,7 @@
         initial = copy(flow.metric.scale)
         mask = BitVector([true, false, false])
 
-        PDMPSamplers.update_preconditioner!(flow, trace, state, false, 2.0, mask)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), flow, trace, state, false, 2.0, mask)
         @test flow.metric.scale[1] == initial[1]
         @test flow.metric.scale[2] != initial[2]
         @test flow.metric.scale[3] != initial[3]
@@ -399,7 +399,7 @@
 
         # A second update while the sticky coordinate remains frozen must not
         # halve it; zero variance is not a reason to collapse its metric.
-        PDMPSamplers.update_preconditioner!(flow, trace, state, false, 2.0, mask)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), flow, trace, state, false, 2.0, mask)
         @test flow.metric.scale[1] == initial[1]
     end
 
@@ -412,7 +412,7 @@
         trace = PDMPSamplers.PDMPTrace(events, PreconditionedZigZag(d))
         flow = PreconditionedZigZag(d)
         state = PDMPState(1.0, SkeletonPoint([0.0, 0.0], [1.0, 1.0]))
-        @test_throws DomainError PDMPSamplers.update_preconditioner!(
+        @test_throws DomainError PDMPSamplers.update_preconditioner!(Random.default_rng(),
             flow, trace, state)
     end
 
@@ -433,10 +433,10 @@
             PDMPEvent(Float64(i), randn(d), randn(d)) for i in 0:50
         ]
         trace = PDMPSamplers.PDMPTrace(events, pzz)
-        ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(pzz, d))
+        ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), pzz, d))
         state = StickyPDMPState(25.0, ξ, BitVector([true, false, true]))
         state.ξ.θ[2] = 0.0
-        PDMPSamplers.update_preconditioner!(pzz, trace, state)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), pzz, trace, state)
         @test all(isfinite, pzz.metric.scale)
         @test iszero(state.ξ.θ[2])
         @test all(abs.(state.ξ.θ[state.free]) .== pzz.metric.scale[state.free])
@@ -449,10 +449,10 @@
             PDMPEvent(Float64(i), randn(d), randn(d)) for i in 0:100
         ]
         trace = PDMPSamplers.PDMPTrace(events, dzz)
-        state = PDMPState(50.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(dzz, d)))
+        state = PDMPState(50.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), dzz, d)))
 
         old_L = copy(dzz.metric.L)
-        PDMPSamplers.update_preconditioner!(dzz, trace, state)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), dzz, trace, state)
         @test dzz.metric.L != old_L
         @test all(isfinite, dzz.metric.L)
         @test dzz.metric.L_operator_norm ≈ opnorm(dzz.metric.L)
@@ -465,9 +465,9 @@
             PDMPEvent(Float64(i), randn(d), randn(d)) for i in 0:100
         ]
         trace = PDMPSamplers.PDMPTrace(events, dbps)
-        state = PDMPState(50.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(dbps, d)))
+        state = PDMPState(50.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), dbps, d)))
 
-        PDMPSamplers.update_preconditioner!(dbps, trace, state)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), dbps, trace, state)
         @test all(isfinite, dbps.metric.L)
         # BPS should get randn canonical velocity
         @test all(isfinite, state.ξ.θ)
@@ -485,9 +485,9 @@
         Statistics.cov(::_NonPDCovTrace) = [1.0 2.0; 2.0 1.0]
 
         fake_trace = _NonPDCovTrace(dzz)
-        state = PDMPState(5.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(dzz, d)))
+        state = PDMPState(5.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), dzz, d)))
         old_L = copy(dzz.metric.L)
-        PDMPSamplers.update_preconditioner!(dzz, fake_trace, state)
+        PDMPSamplers.update_preconditioner!(Random.default_rng(), dzz, fake_trace, state)
         @test dzz.metric.L == old_L
     end
 
@@ -504,7 +504,7 @@
     @testset "ab_i forwarding" begin
         d = 3
         pzz = PreconditionedZigZag(d)
-        ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(pzz, d))
+        ξ = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), pzz, d))
         c = ones(d)
         cache = (; z=similar(ξ.x), ∇ϕx=similar(ξ.x))
         for i in 1:d
@@ -524,7 +524,7 @@
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 20_000.0, 5_000.0; progress=show_progress))
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
@@ -541,7 +541,7 @@
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 20_000.0, 5_000.0; progress=show_progress))
         @test length(trace) > 50
         @test all(isfinite, mean(trace))
@@ -561,7 +561,7 @@
     @testset "∂λ∂t forwarding through PreconditionedDynamics" begin
         d = 3
         pzz = PreconditionedZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(pzz, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), pzz, d)))
         ∇U = randn(d)
         Hv = randn(d)
         result = PDMPSamplers.∂λ∂t(state, ∇U, Hv, pzz)

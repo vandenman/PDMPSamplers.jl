@@ -76,12 +76,3 @@ function _constant_bound_event_time(
     return _next_event_time_with_probe(rng, model, flow, alg, state, cache, stats,
         max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
 end
-
-function _constant_bound_event_time(model::PDMPModel{<:GlobalGradientStrategy}, flow::ContinuousDynamics, alg::GridAdaptiveState,
-    state::AbstractPDMPState, cache, stats::AbstractStatisticCounter, max_horizon::Float64, include_refresh::Bool,
-    max_horizon_event::Symbol=:horizon_hit, probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe())::GridEvent
-    return _constant_bound_event_time(
-        Random.default_rng(), model, flow, alg, state, cache, stats,
-        max_horizon, include_refresh, max_horizon_event, probe_failure_handler,
-    )
-end

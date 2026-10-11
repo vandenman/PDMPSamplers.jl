@@ -335,7 +335,7 @@
 
     @testset "NoAdaptation" begin
         na = PDMPSamplers.NoAdaptation()
-        @test PDMPSamplers.adapt!(na) === nothing
+        @test PDMPSamplers.adapt!(Random.default_rng(), na) === nothing
     end
 
     @testset "RefreshRateAdapter refresh-rate objective" begin
@@ -352,13 +352,13 @@
 
         state.t[] = 1.0
         stats.refreshment_events = 1
-        PDMPSamplers.adapt!(ad, state, flow, nothing, nothing; stats)
+        PDMPSamplers.adapt!(Random.default_rng(), ad, state, flow, nothing, nothing; stats)
         @test flow.λref > 1.0
 
         λref_after_increase = flow.λref
         state.t[] = 2.0
         stats.refreshment_events = 10
-        PDMPSamplers.adapt!(ad, state, flow, nothing, nothing; stats)
+        PDMPSamplers.adapt!(Random.default_rng(), ad, state, flow, nothing, nothing; stats)
         @test flow.λref < λref_after_increase
     end
 
@@ -538,7 +538,7 @@
         ba = PDMPSamplers.BoomerangAdapter(1.0, 0.0, d)
         boom = Boomerang(d)
         # adapt! on non-MutableBoomerang should be a no-op
-        PDMPSamplers.adapt!(ba, nothing, boom, nothing, nothing)
+        PDMPSamplers.adapt!(Random.default_rng(), ba, nothing, boom, nothing, nothing)
         @test ba.did_update == false
     end
 
@@ -554,7 +554,7 @@
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         m = mean(trace)
@@ -572,7 +572,7 @@
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         m = mean(trace)
@@ -590,7 +590,7 @@
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0, 10_000.0; progress=show_progress))
 
         m = mean(trace)
@@ -609,7 +609,7 @@
         na1 = PDMPSamplers.NoAdaptation()
         na2 = PDMPSamplers.NoAdaptation()
         seq = PDMPSamplers.SequenceAdapter((na1, na2))
-        PDMPSamplers.adapt!(seq, nothing, nothing, nothing, nothing)
+        PDMPSamplers.adapt!(Random.default_rng(), seq, nothing, nothing, nothing, nothing)
         @test !PDMPSamplers.finish_warmup!(
             seq, nothing, nothing, nothing, nothing, nothing)
     end
@@ -631,7 +631,7 @@
             (cv, state, flow, phase, stats) -> Inf,
             1.0, 0.0, false)
 
-        PDMPSamplers.adapt!(ad, state, nothing, grad, trace_mgr; phase=:main)
+        PDMPSamplers.adapt!(Random.default_rng(), ad, state, nothing, grad, trace_mgr; phase=:main)
         @test selected[] == 1
         @test updated[] == 0
         @test ad.last_update == 0.0
@@ -643,7 +643,7 @@
             (cv, state, flow, trace_mgr, stats) -> false,
             (cv, state, flow, phase, stats) -> Inf,
             1.0, 0.0, false)
-        PDMPSamplers.adapt!(changed, state, nothing, grad, trace_mgr;
+        PDMPSamplers.adapt!(Random.default_rng(), changed, state, nothing, grad, trace_mgr;
             phase=:main)
         @test PDMPSamplers.did_gradient_adapt(changed)
         grid = PDMPSamplers._build_grid_adaptive_state(

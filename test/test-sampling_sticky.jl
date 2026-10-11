@@ -97,7 +97,7 @@ end
                     end
 
                     x0 = randn(d)
-                    θ0 = PDMPSamplers.initialize_velocity(flow, d)
+                    θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
                     ξ0 = SkeletonPoint(x0, θ0)
 
                     grad = gradient_type == CoordinateWiseGradient ? CoordinateWiseGradient(Base.Fix1(neg_partial, slab_target)) : FullGradient(Base.Fix1(neg_gradient!, slab_target))

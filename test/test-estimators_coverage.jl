@@ -47,7 +47,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         m = mean(trace)
@@ -69,7 +69,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         v = var(trace)
@@ -94,7 +94,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress))
 
         ip = inclusion_probs(trace)
@@ -203,7 +203,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         for j in 1:d
@@ -224,7 +224,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         # scalar quantile
@@ -259,7 +259,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 5_000.0; progress=show_progress))
 
         for j in 1:d
@@ -298,7 +298,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
@@ -330,7 +330,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
@@ -360,7 +360,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=show_progress))
 
         @test trace isa PDMPSamplers.FactorizedTrace
@@ -407,7 +407,7 @@ end
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(μ_true .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=show_progress))
 
         e = ess(trace; n_batches=10)

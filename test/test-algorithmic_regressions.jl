@@ -33,8 +33,8 @@
         grad_a = [1.0, 2.0, -0.5, 3.0]
         grad_b = [1.0, 2_000.0, -0.5, -3_000.0]
 
-        PDMPSamplers.reflect!(state_a, grad_a, flow, cache)
-        PDMPSamplers.reflect!(state_b, grad_b, flow, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), state_a, grad_a, flow, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), state_b, grad_b, flow, cache)
 
         @test state_a.ξ.θ[free] ≈ state_b.ξ.θ[free]
         @test all(iszero, state_a.ξ.θ[.!free])
@@ -101,7 +101,7 @@
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg = Sticky(GridThinningStrategy(), fill(0.5, d))
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
 
         rng = Random.Xoshiro(1234)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)

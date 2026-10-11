@@ -104,7 +104,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         grad = FullGradient((out, x) -> out .= x)
         ξ = SkeletonPoint(copy(x), copy(θ))
         cache = PDMPSamplers.add_gradient_to_cache(
-            PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(1.0, d)), 0.0, ξ),
+            PDMPSamplers.initialize_cache(Random.default_rng(), flow, grad, ThinningStrategy(GlobalBounds(1.0, d)), 0.0, ξ),
             ξ
         )
 
@@ -112,7 +112,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         counts = zeros(Int, d)
         for _ in 1:n_samples
             ξ_test = SkeletonPoint(copy(x), ones(d))
-            PDMPSamplers.reflect!(ξ_test, copy(∇ϕ), flow, cache)
+            PDMPSamplers.reflect!(Random.default_rng(), ξ_test, copy(∇ϕ), flow, cache)
             for i in 1:d
                 if ξ_test.θ[i] != 1.0
                     counts[i] += 1
@@ -274,7 +274,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
     #     alg = GridThinningStrategy()
 
     #     Random.seed!(123)
-    #     ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+    #     ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
     #     t_warmup = 2_000.0
     #     T_run = 10_000.0
     #     trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run, t_warmup; progress=false)
@@ -301,7 +301,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
 
         @test alg.can_stick == BitVector([true, false, true, false])
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 50_000.0; progress=false))
         @test stats.sticky_events > 0
         @test length(trace) > 100
@@ -324,7 +324,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, slab_target))
         alg = Sticky(GridThinningStrategy(), κ_high)
 
-        ξ0 = SkeletonPoint(0.01 .* randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(0.01 .* randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 10_000.0; progress=false))
         @test stats.sticky_events > 0
     end

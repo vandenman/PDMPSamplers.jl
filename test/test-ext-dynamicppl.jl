@@ -45,7 +45,7 @@ import ForwardDiff
         alg = ThinningStrategy(LocalBounds(fill(1.5, d)))
 
         x0 = randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         T = 1000.0
@@ -87,7 +87,7 @@ import ForwardDiff
             alg = GridThinningStrategy()
 
             x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 1000.0; progress=false))

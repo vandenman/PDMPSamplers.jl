@@ -1,7 +1,6 @@
 # --- 1. Infrastructure ---
 struct NoAdaptation <: AbstractAdapter end
 adapt!(::Random.AbstractRNG, ::NoAdaptation, args...; kwargs...) = nothing
-adapt!(ad::AbstractAdapter, args...; kwargs...) = adapt!(Random.default_rng(), ad, args...;  kwargs...)
 finish_warmup!(::AbstractAdapter, args...) = false
 adaptation_horizon(::AbstractAdapter, args...) = Inf
 

@@ -21,6 +21,3 @@ end
 function initialize_cache(::Random.AbstractRNG, ::ContinuousDynamics, ::GradientStrategy, ::PoissonTimeStrategy, ::Real, ::SkeletonPoint)
     (;)
 end
-
-initialize_cache(flow::ContinuousDynamics, grad::GradientStrategy, alg::PoissonTimeStrategy, t::Real, ξ::SkeletonPoint) =
-    initialize_cache(Random.default_rng(), flow, grad, alg, t, ξ)

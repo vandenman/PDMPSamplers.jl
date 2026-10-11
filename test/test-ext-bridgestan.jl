@@ -61,7 +61,7 @@ else
 
             flow = ZigZag(d)
             x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             T = 1000.0
@@ -88,7 +88,7 @@ else
 
             flow = ZigZag(d)
             x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             T = 500.0
@@ -188,7 +188,7 @@ else
                 model_hvp = PDMPModel(sm_hvp; hvp=true)
                 flow_hvp = ZigZag(d)
                 x0_hvp = randn(d)
-                θ0_hvp = PDMPSamplers.initialize_velocity(flow_hvp, d)
+                θ0_hvp = PDMPSamplers.initialize_velocity(Random.default_rng(), flow_hvp, d)
                 ξ0_hvp = SkeletonPoint(x0_hvp, θ0_hvp)
                 trace_hvp, stats_hvp = only(pdmp_sample(ξ0_hvp, flow_hvp, model_hvp, alg, 0.0, 1000.0; progress=false))
                 @test length(trace_hvp) > 10

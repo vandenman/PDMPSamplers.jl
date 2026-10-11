@@ -172,9 +172,6 @@ refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
     flow::ContinuousDynamics) = draw_stratum_velocity!(rng, state, flow)
 refresh_velocity!(rng::Random.AbstractRNG, state::PDMPState, flow::ContinuousDynamics) = refresh_velocity!(rng, state.ξ, flow)
 
-# backward-compatible wrappers (no rng argument → default_rng)
-reflect!(ξ_or_state, ∇ϕ::AbstractVector, flow::ContinuousDynamics, cache) = reflect!(Random.default_rng(), ξ_or_state, ∇ϕ, flow, cache)
-refresh_velocity!(ξ_or_state, flow::ContinuousDynamics) = refresh_velocity!(Random.default_rng(), ξ_or_state, flow)
 
 move_forward_time(state::AbstractPDMPState, τ::Real, flow::ContinuousDynamics) = move_forward_time!(copy(state), τ, flow)
 

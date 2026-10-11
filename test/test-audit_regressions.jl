@@ -25,11 +25,11 @@ end
         set_dense_preconditioner!(flow.metric,
             [2.0 0.0 0.0; 0.5 3.0 0.0; -0.25 0.75 4.0])
 
-        ξ = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(flow, 3))
+        ξ = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, 3))
         θ_before = copy(ξ.θ)
         signs_before = LowerTriangular(flow.metric.L) \ ξ.θ
 
-        PDMPSamplers.refresh_velocity!(ξ, flow)
+        PDMPSamplers.refresh_velocity!(Random.default_rng(), ξ, flow)
 
         @test ξ.θ ≈ θ_before
         @test ξ.θ ≈ flow.metric.L * signs_before
@@ -52,7 +52,7 @@ end
         d = 2
         _, model, alg = _audit_target_setup(d)
         flow = ZigZag(d)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
 
         trace, stats = only(pdmp_sample(
             ξ0,

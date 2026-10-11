@@ -26,13 +26,13 @@
 
             grad = FullGradient((out, x) -> out .= x)
             cache = PDMPSamplers.add_gradient_to_cache(
-                PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(1.0, d)), 0.0, ξ),
+                PDMPSamplers.initialize_cache(Random.default_rng(), flow, grad, ThinningStrategy(GlobalBounds(1.0, d)), 0.0, ξ),
                 ξ
             )
 
             # Equation 4 of Bierkens et al., (2020), http://proceedings.mlr.press/v119/bierkens20a.html
             rhs = -dot(ξ.θ, ∇ϕx)
-            PDMPSamplers.reflect!(ξ, ∇ϕx, flow, cache)
+            PDMPSamplers.reflect!(Random.default_rng(), ξ, ∇ϕx, flow, cache)
             lhs = dot(ξ.θ, ∇ϕx)
             @test lhs ≈ rhs
 

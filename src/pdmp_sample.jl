@@ -843,4 +843,3 @@ function initialize_state(rng::Random.AbstractRNG, flow::ContinuousDynamics, mod
     alg_ = _to_internal(alg, rng, flow, model_, state, cache, stats)
     return state, model_, alg_, cache, stats
 end
-initialize_state(flow::ContinuousDynamics, model::PDMPModel, alg::PoissonTimeStrategy, t₀::Real, ξ₀::SkeletonPoint) = initialize_state(Random.default_rng(), flow, model, alg, t₀, ξ₀)

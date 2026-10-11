@@ -73,7 +73,7 @@
                     end
 
                     x0 = mean(D) + randn(d)
-                    θ0 = PDMPSamplers.initialize_velocity(flow, d)
+                    θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
                     ξ0 = SkeletonPoint(x0, θ0)
 
                     grad = if gradient_type == CoordinateWiseGradient
@@ -89,7 +89,7 @@
                     if !test_approximation(trace, D; check_only=true)
                         Random.seed!(stable_test_seed(:sampler, pdmp_type, gradient_type, algorithm, data_type, data_arg, :retry))
                         x0 = mean(D) + randn(d)
-                        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+                        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
                         ξ0 = SkeletonPoint(x0, θ0)
                         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress))
                     end

@@ -139,7 +139,7 @@ import QuadGK
         flow_immutable = Boomerang(d)
         μ_ref = flow_immutable.μ
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow_immutable, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow_immutable, d))
         target = gen_data(Distributions.MvNormal, d, 1.0)
         grad   = FullGradient(Base.Fix1(neg_gradient!, target))
         model  = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
@@ -374,7 +374,7 @@ import QuadGK
         model  = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg    = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         # Run WITHOUT adaptation (NoAdaptation) to keep reference fixed
         trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
                                progress=false, adapter=PDMPSamplers.NoAdaptation()))

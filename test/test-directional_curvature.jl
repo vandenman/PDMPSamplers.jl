@@ -40,7 +40,7 @@ end
         target = gen_data(MvNormal, d, 1.0)
         flow = pdmp_type(d)
         x = randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         state = PDMPState(0.0, SkeletonPoint(x, θ))
         move_forward_time!(state, 0.5, flow)
 
@@ -65,7 +65,7 @@ end
         target = gen_data(MvNormal, d, 1.0)
         flow = pdmp_type(d)
         x = randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         state = PDMPState(0.0, SkeletonPoint(x, θ))
         move_forward_time!(state, 0.3, flow)
 
@@ -98,7 +98,7 @@ end
         target = gen_data(MvNormal, d, 1.0)
         flow = ZigZag(d)
         x = randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         state = PDMPState(0.0, SkeletonPoint(x, θ))
         move_forward_time!(state, 0.3, flow)
 
@@ -198,7 +198,7 @@ end
         flow = pdmp_type(d)
         alg = GridThinningStrategy(; N=10, t_max=2.0)
         x0 = randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0))
@@ -213,7 +213,7 @@ end
         model = PDMPModel(d, grad, DI.AutoForwardDiff(), true)
         flow = BouncyParticle(d, 1.0)
         alg = GridThinningStrategy(; N=10, t_max=2.0)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Random.Xoshiro(2026)
         state, model_, alg_, cache, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
         provider = PDMPSamplers._grid_event_provider(model_, flow, alg_, nothing)

@@ -149,7 +149,7 @@ import QuadGK
         @testset "$pdmp_type" for pdmp_type in (ZigZag, BouncyParticle, Boomerang)
 
             flow = pdmp_type(Σ_inv, μ_unc)
-            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(flow, d))
+            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
             trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false))
 
             dt_disc = mean(diff(PDMPSamplers.event_times(trace)))
@@ -205,7 +205,7 @@ import QuadGK
             transforms_db = [DoubleBoundTransform(0.0, 1.0) for _ in 1:d]
 
             flow = BouncyParticle(Σ_inv, μ_unc)
-            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(flow, d))
+            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
             trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false))
 
             dt_disc = mean(diff(PDMPSamplers.event_times(trace)))
@@ -243,7 +243,7 @@ import QuadGK
 
         @testset "$pdmp_type" for pdmp_type in (ZigZag, BouncyParticle, Boomerang)
             flow = pdmp_type(Γ, μ)
-            ξ0 = SkeletonPoint(μ .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
+            ξ0 = SkeletonPoint(μ .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
             trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false))
 
             @test mean(trace, id_transforms) ≈ mean(trace) atol = 1e-10

@@ -21,7 +21,7 @@ function _sticky_boomerang_fixture(d, free_fraction; seed=9182)
 end
 
 @inline function _reflect_diagonal_fixture!(state, gradient, flow, cache)
-    PDMPSamplers.reflect!(state, gradient, flow, cache)
+    PDMPSamplers.reflect!(Random.default_rng(), state, gradient, flow, cache)
 end
 
 @testset "diagonal sticky Boomerang reflection" begin
@@ -33,7 +33,7 @@ end
         dense_cache = (; z=zeros(d), tmp=zeros(d))
         frozen_before = copy(fixture.theta[.!fixture.free])
 
-        PDMPSamplers.reflect!(diagonal_state, fixture.gradient,
+        PDMPSamplers.reflect!(Random.default_rng(), diagonal_state, fixture.gradient,
             fixture.diagonal_flow, diagonal_cache)
         PDMPSamplers._reflect_sticky_boomerang_generic!(dense_state,
             fixture.gradient, fixture.dense_flow, dense_cache)
@@ -55,7 +55,7 @@ end
             fixture.covariance[i] for i in eachindex(fixture.theta) if fixture.free[i])
         @test after_energy ≈ before_energy rtol=5e-12 atol=5e-12
 
-        PDMPSamplers.reflect!(diagonal_state, fixture.gradient,
+        PDMPSamplers.reflect!(Random.default_rng(), diagonal_state, fixture.gradient,
             fixture.diagonal_flow, diagonal_cache)
         @test diagonal_state.ξ.θ ≈ fixture.theta rtol=5e-12 atol=5e-12
 
@@ -80,7 +80,7 @@ end
         state = StickyPDMPState(0.0,
             SkeletonPoint(zeros(12), copy(theta)), copy(free))
         cache = (; z=zeros(12), tmp=zeros(12))
-        PDMPSamplers.reflect!(state, gradient, flow, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), state, gradient, flow, cache)
         @test state.ξ.θ[.!free] == theta[.!free]
     end
 
@@ -90,7 +90,7 @@ end
     zero_gradient = zeros(9)
     zero_cache = (; z=zeros(9), tmp=zeros(9))
     before = copy(zero_state.ξ.θ)
-    @test PDMPSamplers.reflect!(zero_state, zero_gradient, zero_flow,
+    @test PDMPSamplers.reflect!(Random.default_rng(), zero_state, zero_gradient, zero_flow,
         zero_cache) === nothing
     @test zero_state.ξ.θ == before
 

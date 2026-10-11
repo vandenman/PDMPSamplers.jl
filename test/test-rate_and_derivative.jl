@@ -197,11 +197,11 @@ import ForwardDiff
         flow = pdmp_type(inv(cov(D)), mean(D)) # TODO: Boomerang does not work in this case?
         flow = pdmp_type(d)
         x = randn(d)#mean(D) + .2 .* randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         grad = FullGradient(∇f!_real)
         ξ = SkeletonPoint(x, θ)
         state = PDMPState(0.0, ξ)
-        cache0 = PDMPSamplers.add_gradient_to_cache(PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(1.0, 5)), 0.0, ξ), ξ)
+        cache0 = PDMPSamplers.add_gradient_to_cache(PDMPSamplers.initialize_cache(Random.default_rng(), flow, grad, ThinningStrategy(GlobalBounds(1.0, 5)), 0.0, ξ), ξ)
         # Widen cache buffers to Vector{Real} so ForwardDiff Dual numbers can be stored
         cache_updates = (; ∇ϕx = Vector{Real}(cache0.∇ϕx))
         if haskey(cache0, :z)

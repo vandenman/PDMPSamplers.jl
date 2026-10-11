@@ -21,24 +21,24 @@
         chains_from_x = pdmp_sample(x0, flow, model, alg, 0.0, T_run; progress=false)
         @test n_chains(chains_from_x) == 1
 
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         chains_from_xθ = pdmp_sample(x0, θ0, flow, model, alg, 0.0, T_run; progress=false)
         @test n_chains(chains_from_xθ) == 1
     end
 
     @testset "n_chains error" begin
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         @test_throws ArgumentError pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; n_chains=0, progress=false)
     end
 
     @testset "t_warmup error" begin
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         @test_throws ArgumentError pdmp_sample(ξ0, flow, model, alg, 0.0, 100.0, 200.0; progress=false)
     end
 
     @testset "multi-chain sequential" begin
         Random.seed!(42)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; n_chains=2, threaded=false, progress=false)
         @test chains isa PDMPChains
         @test n_chains(chains) == 2
@@ -110,7 +110,7 @@
 
     @testset "multi-chain threaded" begin
         Random.seed!(42)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; n_chains=2, threaded=true, progress=false)
         @test n_chains(chains) == 2
         @test length(chains[1][1]) > 10
@@ -119,7 +119,7 @@
 
     @testset "single chain show" begin
         Random.seed!(42)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; progress=false, statistic_counter=PDMPSamplers.DevelStatisticCounter)
         chains.stats[1].lazy_fallback_low_tightness = 2
         chains.stats[1].lazy_fallback_bound_violation = 1
@@ -137,7 +137,7 @@
 
     @testset "adaptive_dt and adaptive_discretize" begin
         Random.seed!(123)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         chains = pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; progress=false)
         trace = chains.traces[1]
 
@@ -175,7 +175,7 @@
         model_ss = PDMPModel(d_sticky, grad_ss, Base.Fix1(neg_hvp!, slab_target))
         flow_ss = ZigZag(d_sticky)
         alg_ss = Sticky(GridThinningStrategy(), κ)
-        ξ0 = SkeletonPoint(randn(d_sticky), PDMPSamplers.initialize_velocity(flow_ss, d_sticky))
+        ξ0 = SkeletonPoint(randn(d_sticky), PDMPSamplers.initialize_velocity(Random.default_rng(), flow_ss, d_sticky))
         chains = pdmp_sample(ξ0, flow_ss, model_ss, alg_ss, 0.0, 50_000.0; progress=false)
         ip = inclusion_probs(chains)
         @test ip isa AbstractVector

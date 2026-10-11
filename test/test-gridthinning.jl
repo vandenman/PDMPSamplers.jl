@@ -861,7 +861,7 @@ end
         d = 3
         target = gen_data(Distributions.MvNormal, d, 2.0)
         flow = ZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)))
 
         grad_func = x -> begin
             out = similar(x)
@@ -923,7 +923,7 @@ end
         d = 3
         target = gen_data(Distributions.MvNormal, d, 2.0)
         flow = ZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)))
 
         grad_func = x -> begin
             out = similar(x)
@@ -951,7 +951,7 @@ end
         d = 3
         target = gen_data(Distributions.MvNormal, d, 2.0)
         flow = ZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)))
 
         grad_func = x -> begin
             out = similar(x)
@@ -968,7 +968,7 @@ end
         model = PDMPModel(d, grad)  # no HVP/VHV so gridthinning uses finite-diff fallback
         alg = GridThinningStrategy(; curvature_backend=:finite_difference, N=16, t_max=1.5)
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Xoshiro(1493)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, alg, 0.0, ξ0;
@@ -1336,7 +1336,7 @@ end
         target = gen_data(Distributions.MvNormal, d, 2.0)
 
         flow = ZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)))
 
         pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 21)), zeros(20))
 
@@ -1428,7 +1428,7 @@ end
         target = gen_data(Distributions.MvNormal, d, 2.0)
 
         flow = ZigZag(d)
-        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d)))
+        state = PDMPState(0.0, SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)))
         pcb = PDMPSamplers.PiecewiseConstantBound(collect(range(0.0, 2.0, 11)), zeros(10))
 
         grad_func = x -> begin
@@ -1462,7 +1462,7 @@ end
         model = PDMPModel(d, grad)  # no HVP
         alg = GridThinningStrategy(; curvature_backend=:finite_difference)
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Xoshiro(2058)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, alg, 0.0, ξ0;
@@ -1485,7 +1485,7 @@ end
         model = PDMPModel(d, grad)  # no HVP
         alg = GridThinningStrategy()  # no FD-HVP either
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Xoshiro(2074)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, alg, 0.0, ξ0;
@@ -1539,7 +1539,7 @@ end
         model = PDMPModel(d, LogDensity(f_logdensity), DI.AutoForwardDiff(), true)
         alg = GridThinningStrategy(; N=16, t_max=1.5)
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Xoshiro(2174)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, alg, 0.0, ξ0;
@@ -1562,7 +1562,7 @@ end
         model = PDMPModel(d, grad)  # no HVP
         alg = GridThinningStrategy(; curvature_backend=:finite_difference, N=16, t_max=1.5)
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Xoshiro(2191)
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, alg, 0.0, ξ0;
@@ -1616,7 +1616,7 @@ end
         flow = BouncyParticle(d, 1.0)
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
         model = PDMPModel(d, grad)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         state = PDMPState(0.0, ξ0)
 
         strat = GridThinningStrategy(; N=16, t_max=2.0, post_warmup_simplify=true,
@@ -1629,7 +1629,7 @@ end
         alg.constant_bound_rate[] = 1e6
 
         τ, event_type, meta = PDMPSamplers._constant_bound_event_time(
-            model, flow, alg, state, cache, stats, Inf, false)
+            Random.default_rng(), model, flow, alg, state, cache, stats, Inf, false)
         @test isfinite(τ)
         @test τ > 0.0
         @test event_type === :reflect
@@ -1639,7 +1639,7 @@ end
         alg2 = PDMPSamplers._build_grid_adaptive_state(strat, state, flow_refresh, model, cache, 16, 5, 16)
         alg2.constant_bound_rate[] = 1.0
         τ2, event_type2, _ = PDMPSamplers._constant_bound_event_time(
-            model, flow_refresh, alg2, state, cache, stats, Inf, true)
+            Random.default_rng(), model, flow_refresh, alg2, state, cache, stats, Inf, true)
         @test isfinite(τ2)
         @test event_type2 === :refresh
 
@@ -1657,7 +1657,7 @@ end
         alg3 = PDMPSamplers._build_grid_adaptive_state(strat, state3, flow, model3, cache, 16, 5, 16)
         alg3.constant_bound_rate[] = 10.0
         τ3, _, _ = PDMPSamplers._constant_bound_event_time(
-            model3, flow, alg3, state3, cache, stats, Inf, false)
+            Random.default_rng(), model3, flow, alg3, state3, cache, stats, Inf, false)
         @test isnan(alg3.constant_bound_rate[])
         @test isfinite(τ3)
     end
