@@ -89,8 +89,9 @@
                 # say so instead of replaying a path without events.
                 @test_throws r"write_events = false" iterate(streamed)
                 # Totals agree with the existing exact streaming moments.
-                @test vec(sum(got[1]; dims=2)) ≈ streamed.moments.sum_x
-                @test vec(sum(got[2]; dims=2)) ≈ streamed.moments.sum_x2
+                @test vec(sum(got[1]; dims=2)) ≈ mean(streamed) .* streamed.moments.total_time
+                @test vec(sum(got[2]; dims=2)) ≈
+                    (var(streamed) .+ mean(streamed).^2) .* streamed.moments.total_time
                 # Transitions and grid snapshots.
                 if dense.free_masks !== nothing
                     masks = Matrix(dense.free_masks)

@@ -1,4 +1,28 @@
 @testset "bounded typed streaming trace" begin
+    @testset "streaming variance is stable under translation" begin
+        for origin in (0.0, 1e8)
+            mktempdir() do directory
+                flow = BouncyParticle(1, 0.0)
+                state = PDMPState(0.0, SkeletonPoint([origin], [1.0]))
+                trace = PDMPSamplers.StreamingPDMPTrace(state, flow,
+                    StreamingTraceStorage(directory), "translation")
+                PDMPSamplers.begin_trace_phase!(trace, state, flow)
+                for time in (0.5, 1.0)
+                    state.t[] = time
+                    state.ξ.x[1] = origin + time
+                    PDMPSamplers._record_streaming_event!(trace, state, flow,
+                        nothing, :horizon_hit)
+                end
+                dense = PDMPTrace([0.0, 1.0], reshape([origin, origin + 1], 1, 2),
+                    ones(1, 2), flow)
+                @test mean(trace) == [origin + 0.5]
+                @test var(trace) ≈ [1/12]
+                @test var(trace) ≈ var(dense)
+                @test var(trace, [origin]) ≈ [1/3]
+            end
+        end
+    end
+
     function gaussian_model(d)
         gradient!(out, x) = (copyto!(out, x); out)
         hvp!(out, x, direction) = (copyto!(out, direction); out)

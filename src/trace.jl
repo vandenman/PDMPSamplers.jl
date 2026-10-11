@@ -401,10 +401,11 @@ function StreamingEventBuffer(d::Integer, capacity::Integer)
         Matrix{Float64}(undef, d, capacity), 0, 0)
 end
 
-mutable struct StreamingRawMoments
+mutable struct StreamingMoments
     total_time::Float64
-    sum_x::Vector{Float64}
-    sum_x2::Vector{Float64}
+    origin::Vector{Float64}
+    mean_offset::Vector{Float64}
+    centered_sum::Vector{Float64}
     free_time::Vector{Float64}
     last_time::Float64
     last_position::Vector{Float64}
@@ -412,10 +413,10 @@ mutable struct StreamingRawMoments
     last_free::BitVector
 end
 
-function StreamingRawMoments(state::AbstractPDMPState)
+function StreamingMoments(state::AbstractPDMPState)
     d = length(state.ξ.x)
     free = state isa StickyPDMPState ? copy(state.free) : trues(d)
-    StreamingRawMoments(0.0, zeros(d), zeros(d), zeros(d), Float64(state.t[]),
+    StreamingMoments(0.0, copy(state.ξ.x), zeros(d), zeros(d), zeros(d), Float64(state.t[]),
         copy(state.ξ.x), copy(state.ξ.θ), free)
 end
 
@@ -427,7 +428,7 @@ mutable struct StreamingPDMPTrace{F<:ContinuousDynamics} <: AbstractPDMPTrace
     chunks::StreamingChunkIndex
     initial_state::Any
     terminal_state::Any
-    moments::StreamingRawMoments
+    moments::StreamingMoments
     physical_events::Int
     computational_boundaries::Int
     buffer_maximum::Int
@@ -456,7 +457,7 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
     trace = StreamingPDMPTrace(flow, directory, String(prefix),
         StreamingEventBuffer(length(state.ξ.x), storage.buffer_events),
         StreamingChunkIndex(directory, 0, 0), nothing, nothing,
-        StreamingRawMoments(state), 0, 0, 0, false,
+        StreamingMoments(state), 0, 0, 0, false,
         storage.write_events || !is_main, online)
     # A zero-event (or zero-duration) warmup is still a valid source for an
     # adaptation finalizer. Main starts later and is installed explicitly at
@@ -537,6 +538,50 @@ function _stream_add_interval_integrals!(sum_x, sum_x2, sum_x4, x, velocity,
     return nothing
 end
 
+# Merge exact segment moments about a fixed origin, avoiding subtraction of
+# large raw moments both within a segment and across segments.
+function _stream_add_centered_moments!(moments, x, velocity, free, elapsed, base)
+    elapsed > 0 || return nothing
+    total = moments.total_time + elapsed
+    weight = elapsed / total
+    @inbounds for i in eachindex(x)
+        segment_mean = x[i] - moments.origin[i]
+        segment_var = 0.0
+        if free[i]
+            v = velocity[i]
+            if base isa AnyBoomerang
+                a = x[i] - base.μ[i]
+                h2 = elapsed^2
+                sine, cosine = sincos(elapsed / 2)
+                if elapsed < 0.1
+                    sinc_minus_one = h2 * (-1/6 + h2 * (1/120 + h2 * (-1/5040 + h2/362880)))
+                    var_cos = h2^2 * (1/720 + h2 * (-1/20160 + h2 * (1/1209600 - h2/119750400)))
+                    var_sin = h2 * (1/12 + h2 * (-1/240 + h2 * (1/10080 - h2/725760)))
+                else
+                    sinc_h = sin(elapsed) / elapsed
+                    sinc_minus_one = sinc_h - 1
+                    var_cos = max(0.0, (1 + sinc_h)/2 - (2sine/elapsed)^2)
+                    var_sin = (1 - sinc_h)/2
+                end
+                segment_mean += a * sinc_minus_one + v * 2sine^2 / elapsed
+                segment_var = (a*cosine + v*sine)^2 * var_cos +
+                    (v*cosine - a*sine)^2 * var_sin
+            else
+                segment_mean += v * elapsed / 2
+                segment_var = (v * elapsed)^2 / 12
+            end
+            moments.free_time[i] += elapsed
+        end
+        delta = segment_mean - moments.mean_offset[i]
+        moments.mean_offset[i] += weight * delta
+        moments.centered_sum[i] += elapsed * segment_var +
+            delta^2 * moments.total_time * weight
+    end
+    moments.total_time = total
+    return nothing
+end
+
+
 function _stream_accumulate_moments!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState)
     moments = trace.moments
@@ -544,15 +589,8 @@ function _stream_accumulate_moments!(trace::StreamingPDMPTrace,
     elapsed = current_time - moments.last_time
     elapsed >= -64eps(max(abs(current_time), 1.0)) || throw(ArgumentError(
         "streaming moment observations are not chronological"))
-    if elapsed > 0
-        _stream_add_interval_integrals!(moments.sum_x, moments.sum_x2, nothing,
-            moments.last_position, moments.last_velocity, moments.last_free,
-            elapsed, underlying_flow(trace.flow))
-        @inbounds for i in eachindex(moments.free_time)
-            moments.last_free[i] && (moments.free_time[i] += elapsed)
-        end
-        moments.total_time += elapsed
-    end
+    _stream_add_centered_moments!(moments, moments.last_position,
+        moments.last_velocity, moments.last_free, elapsed, underlying_flow(trace.flow))
     trace.online === nothing ||
         _online_advance!(trace.online, trace, current_time, state)
     moments.last_time = current_time
@@ -864,7 +902,7 @@ function begin_trace_phase!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, flow::ContinuousDynamics)
     trace.initial_state === nothing || return trace
     trace.initial_state = _stream_terminal_state(state, flow)
-    trace.moments = StreamingRawMoments(state)
+    trace.moments = StreamingMoments(state)
     trace.online === nothing || _online_begin!(trace.online, state)
     return trace
 end
@@ -928,7 +966,7 @@ compact(trace::StreamingPDMPTrace) = trace
 function Statistics.mean(trace::StreamingPDMPTrace)
     trace.moments.total_time > 0 || error(
         "Cannot compute a mean on a streaming trace without elapsed time")
-    return trace.moments.sum_x ./ trace.moments.total_time
+    return trace.moments.origin .+ trace.moments.mean_offset
 end
 
 function Statistics.mean!(out::AbstractVector, trace::StreamingPDMPTrace)
@@ -939,13 +977,15 @@ end
 function Statistics.var(trace::StreamingPDMPTrace, means::AbstractVector{<:Real})
     trace.moments.total_time > 0 || error(
         "Cannot compute a variance on a streaming trace without elapsed time")
-    result = trace.moments.sum_x2 ./ trace.moments.total_time .- means .^ 2
-    @. result = max(result, 0.0)
-    return result
+    m = trace.moments
+    return m.centered_sum ./ m.total_time .+ ((m.origin .- means) .+ m.mean_offset).^2
 end
 
-Statistics.var(trace::StreamingPDMPTrace) =
-    Statistics.var(trace, Statistics.mean(trace))
+function Statistics.var(trace::StreamingPDMPTrace)
+    trace.moments.total_time > 0 || error(
+        "Cannot compute a variance on a streaming trace without elapsed time")
+    return trace.moments.centered_sum ./ trace.moments.total_time
+end
 Statistics.std(trace::StreamingPDMPTrace) = sqrt.(Statistics.var(trace))
 Statistics.std(trace::StreamingPDMPTrace, means::AbstractVector{<:Real}) =
     sqrt.(Statistics.var(trace, means))
@@ -993,47 +1033,13 @@ end
 function _restore_streaming_moments!(trace::StreamingPDMPTrace)
     initial = trace.initial_state
     d = length(initial.position)
-    moments = StreamingRawMoments(0.0, zeros(d), zeros(d), zeros(d),
+    moments = StreamingMoments(0.0, copy(initial.position), zeros(d), zeros(d), zeros(d),
         initial.t, copy(initial.position), copy(initial.physical_velocity),
         copy(initial.free))
     base = underlying_flow(trace.flow)
     _foreach_streaming_segment(trace) do time0, time1, x0, x1,
             velocity0, velocity1, free
-        elapsed = time1 - time0
-        if base isa AnyBoomerang
-            sine, cosine = sincos(elapsed)
-            sine2 = sine * sine
-            sin2 = sin(2elapsed)
-            @inbounds for i in 1:d
-                if !free[i]
-                    moments.sum_x[i] += x0[i] * elapsed
-                    moments.sum_x2[i] += x0[i]^2 * elapsed
-                    continue
-                end
-                a = x0[i] - base.μ[i]
-                v = velocity0[i]
-                omc = 1 - cosine
-                moments.sum_x[i] += a * sine + v * omc + base.μ[i] * elapsed
-                moments.sum_x2[i] +=
-                    a^2 * (elapsed / 2 + sin2 / 4) +
-                    v^2 * (elapsed / 2 - sin2 / 4) +
-                    base.μ[i]^2 * elapsed + a * v * sine2 +
-                    2a * base.μ[i] * sine + 2v * base.μ[i] * omc
-            end
-        else
-            elapsed2 = elapsed^2
-            elapsed3 = elapsed^3
-            @inbounds for i in 1:d
-                v = free[i] ? velocity0[i] : 0.0
-                moments.sum_x[i] += x0[i] * elapsed + 0.5v * elapsed2
-                moments.sum_x2[i] += x0[i]^2 * elapsed +
-                    x0[i] * v * elapsed2 + v^2 * elapsed3 / 3
-            end
-        end
-        @inbounds for i in 1:d
-            free[i] && (moments.free_time[i] += elapsed)
-        end
-        moments.total_time += elapsed
+        _stream_add_centered_moments!(moments, x0, velocity0, free, time1 - time0, base)
     end
     terminal = trace.terminal_state
     moments.last_time = terminal.t
@@ -1099,7 +1105,7 @@ function restore_streaming_trace(directory::AbstractString,
         resolved_directory, "restored",
         StreamingEventBuffer(d, 1), index,
         initial_state, terminal_state,
-        StreamingRawMoments(0.0, zeros(d), zeros(d), zeros(d),
+        StreamingMoments(0.0, copy(initial_state.position), zeros(d), zeros(d), zeros(d),
             initial_state.t, copy(initial_state.position),
             copy(initial_state.physical_velocity), copy(initial_state.free)),
         Int(physical_events), Int(computational_boundaries),
