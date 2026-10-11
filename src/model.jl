@@ -1,13 +1,3 @@
-# TODO:
-#
-# this file needs some more thought.
-# a lot of details work only for fullgradient
-#
-#
-
-
-
-
 """
     PDMPModel{G, H, V}
 
@@ -27,10 +17,6 @@ Explicit construction.
     PDMPModel(d::LogDensity; backend, hvp = nothing)
 
 Construct from a log-density `d`. Uses `ADTypes` backend to generate a `FullGradient` and optionally an HVP.
-
-    PDMPModel(f::Function; backend, hvp = nothing)
-
-Compatibility constructor. Wraps `f` in `FullGradient`.
 """
 struct PDMPModel{G<:GradientStrategy,H,V,J}
     d::Int
@@ -38,7 +24,7 @@ struct PDMPModel{G<:GradientStrategy,H,V,J}
     hvp::H
     vhv::V
     joint::J
-    function PDMPModel(d::Integer, grad::GradientStrategy, hvp, vhv, grad_inplace::Bool, hvp_inplace::Bool, joint=nothing)
+    function PDMPModel(d::Integer, grad::GradientStrategy, hvp, vhv, hvp_inplace::Bool, joint=nothing)
 
         hvp_new = if hvp === nothing
             nothing
@@ -53,42 +39,22 @@ struct PDMPModel{G<:GradientStrategy,H,V,J}
     end
 end
 
-function PDMPModel(d::Integer, grad::GradientStrategy, hvp, grad_inplace=true, hvp_inplace=true)
-    PDMPModel(d, grad, hvp, nothing, grad_inplace, hvp_inplace)
+function PDMPModel(d::Integer, grad::GradientStrategy, hvp, hvp_inplace=true)
+    PDMPModel(d, grad, hvp, nothing, hvp_inplace)
 end
-
-function maybe_fix_grad(g::GradientStrategy, d::Integer)
-    f = g.f
-    f isa Base.Fix1 && return g
-
-    f isa Function && return FullGradient(Base.Fix1((f), zeros(d)))
-end
-
 
 const GlobalGradientModel{H} = PDMPModel{<:GlobalGradientStrategy,H}
 const CoordinateWiseGradientModel{H} = PDMPModel{<:CoordinateWiseGradientStrategy,H}
 
-function PDMPModel(f::Function, args...; kwargs...)
-    msg = "PDMPModel(f::Function, args..; kwargs...) is intentionally not implemented because it's unclear if this is a log density or gradient. " *
-        "Use PDMPModel(LogDensity(f), args..; kwargs...) or PDMPModel(FullGradient(f), args..; kwargs...) instead."
-    throw(ArgumentError(msg))
-end
-
-PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true, true)
+PDMPModel(d::Integer, grad::GradientStrategy) = PDMPModel(d, grad, nothing, nothing, true)
 
 function PDMPModel(d::Integer, cv::SubsampledControlVariate)
     length(cv.anchor) == d || throw(DimensionMismatch("anchor length must match model dimension"))
-    return PDMPModel(d, cv, cv.deterministic_hvp!, nothing, true, true)
+    return PDMPModel(d, cv, cv.deterministic_hvp!, nothing, true)
 end
 
 PDMPModel(d::Integer, cv::SubsampledControlVariate, ::Nothing,
-    grad_inplace=true, hvp_inplace=true) = PDMPModel(d, cv)
-
-function PDMPModel(::Integer, ::SubsampledControlVariate, hvp,
-    grad_inplace=true, hvp_inplace=true)
-    throw(ArgumentError(
-        "a subsampling model's deterministic HVP must be supplied through SubsampledControlVariate(deterministic_hvp! = ...), not as a separate PDMPModel HVP"))
-end
+    hvp_inplace=true) = PDMPModel(d, cv)
 
 function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADType, needs_hvp::Bool=false)
 
@@ -124,7 +90,7 @@ function PDMPModel(d::Integer, grad::FullGradient, backend::ADTypes.AbstractADTy
         nothing
     end
 
-    return PDMPModel(d, grad, hvp_f, vhv_f, true, true, joint_f)
+    return PDMPModel(d, grad, hvp_f, vhv_f, true, joint_f)
 end
 
 """
@@ -172,7 +138,7 @@ function PDMPModel(d::Integer, ldf::LogDensity, backend::ADTypes.AbstractADType=
         nothing
     end
 
-    return PDMPModel(d, FullGradient(grad_f), hvp_f, vhv_f, false, false, joint_f)
+    return PDMPModel(d, FullGradient(grad_f), hvp_f, vhv_f, false, joint_f)
 end
 
 function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
@@ -180,7 +146,7 @@ function with_stats(model::PDMPModel, stats::AbstractStatisticCounter)
     hvp_new = _model_hvp_with_stats(model, grad_new, stats)
     vhv_new = model.vhv === nothing ? nothing : WithStatsVHV(model.vhv, stats)
     joint_new = model.joint === nothing ? nothing : WithStatsJoint(model.joint, stats)
-    PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
+    PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, joint_new)
 end
 
 _model_hvp_with_stats(model::PDMPModel, grad, stats) =

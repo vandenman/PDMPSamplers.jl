@@ -19,7 +19,7 @@ import StatsBase
             1.0, 4.0, mpdfs, trues(4))
 
         # The historical constructor retains its all-stickable semantics.
-        all_κ = BetaBernoulliKappa(1.0, 4.0, fill(0.5, 3))
+        all_κ = BetaBernoulliKappa(1.0, 4.0, fill(0.5, 3), trues(3))
         @test all_κ(2, zeros(3), Bool[true, false, true]) ==
             (1 + 2) / (4 + 3 - 2 - 1) * 0.5
     end

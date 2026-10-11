@@ -378,7 +378,7 @@ function gen_data(::Type{<:SpikeAndSlabDist{<:BetaBernoulli, T}}, d, args...) wh
     slab_target = gen_data(T, d, args...)
     D = SpikeAndSlabDist(D1, slab_target.D)
     mpdfs = marginal_pdfs_at_zero(slab_target.D)
-    κ = BetaBernoulliKappa(a, b, mpdfs)
+    κ = BetaBernoulliKappa(a, b, mpdfs, trues(length(mpdfs)))
     return D, κ, slab_target
 end
 

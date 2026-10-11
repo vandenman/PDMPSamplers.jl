@@ -192,7 +192,7 @@ function PDMPModel(sm::BridgeStan.StanModel; hvp::Bool=false)
 
     if hvp
         hvp_f = BridgeStanHVP(fsm, zeros(d))
-        return PDMPModel(d, FullGradient(grad_f!), hvp_f, false, false)
+        return PDMPModel(d, FullGradient(grad_f!), hvp_f, false)
     end
 
     return PDMPModel(d, FullGradient(grad_f!))

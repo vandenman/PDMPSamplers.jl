@@ -119,15 +119,6 @@ mutable struct PreconditionerAdapter <: AbstractAdapter
     const can_stick::BitVector
 end
 
-# Keep the historical positional constructor usable for callers that do not
-# have a sticky mask.  The dimension is learned from the mask-aware factory
-# below; an empty mask means that every coordinate is continuously supported.
-PreconditionerAdapter(dt::Float64, initial_dt::Float64,
-    max_scale_expansion::Float64, last_update::Float64,
-    no_updates_done::Int, scheme::Symbol, did_update::Bool) =
-    PreconditionerAdapter(dt, initial_dt, max_scale_expansion, last_update,
-        no_updates_done, scheme, did_update, BitVector())
-
 function adapt!(rng::Random.AbstractRNG, ad::PreconditionerAdapter, state, flow, grad, trace_mgr; phase::Symbol=:warmup, kwargs...)
     ad.did_update = false
     update_dt = iszero(ad.no_updates_done) ? ad.initial_dt : ad.dt

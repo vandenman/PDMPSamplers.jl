@@ -272,7 +272,7 @@ function Base.copy(model::PDMPModel)
     hvp_new = _copy_model_hvp(model, grad_new)
     vhv_new = model.vhv === nothing ? nothing : _copy_callable(model.vhv)
     joint_new = model.joint === nothing ? nothing : _copy_callable(model.joint)
-    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, false, joint_new)
+    return PDMPModel(model.d, grad_new, hvp_new, vhv_new, false, joint_new)
 end
 
 _copy_model_hvp(model::PDMPModel, grad) =

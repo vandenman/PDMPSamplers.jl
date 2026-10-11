@@ -334,7 +334,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         μ_true = [1.0, -1.0]
         A = [2.0 0.5; 0.5 1.5]
         neg_grad!(out, x) = (mul!(out, A, x .- μ_true); out)
-        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false, false)
+        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false)
 
         flow = ZigZag(d)
         alg  = GridThinningStrategy()
@@ -350,7 +350,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         d = 2
         A = [2.0 0.5; 0.5 1.5]
         neg_grad!(out, x) = (mul!(out, A, x); out)
-        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false, false)
+        make_model() = PDMPModel(d, FullGradient(neg_grad!), nothing, nothing, false)
         ξ0 = SkeletonPoint([0.5, -0.5], [1.0, 1.0])
         phases = Symbol[]
         stages = Tuple{Symbol,Symbol}[]

@@ -71,7 +71,7 @@ function Distributions.var(d::BetaBernoulli)
 end
 
 """
-    BetaBernoulliKappa(a, b, mpdfs[, can_stick])
+    BetaBernoulliKappa(a, b, mpdfs, can_stick)
 
 Callable struct for the sticky unfreezing rate κ under a BetaBernoulli
 inclusion prior with parameters `a` and `b`.
@@ -79,8 +79,7 @@ inclusion prior with parameters `a` and `b`.
 `mpdfs[i]` is the marginal slab density at zero for coordinate `i`.
 
 `can_stick` identifies the coordinates governed by the Beta--Bernoulli model
-prior.  It defaults to every coordinate for backwards compatibility.  This
-mask matters when a target also contains always-active parameters: those
+prior. This mask matters when a target also contains always-active parameters: those
 parameters must not be counted as included model indicators.
 
 Called as `κ(i, x, γ, θ...)` where `γ` is the free/frozen indicator.
@@ -107,9 +106,6 @@ function BetaBernoulliKappa(a::Real, b::Real,
     return BetaBernoulliKappa(Float64(a), Float64(b),
         Float64.(mpdfs), BitVector(can_stick))
 end
-
-BetaBernoulliKappa(a::Real, b::Real, mpdfs::AbstractVector{<:Real}) =
-    BetaBernoulliKappa(a, b, mpdfs, trues(length(mpdfs)))
 
 function (κ::BetaBernoulliKappa)(i::Integer, x, γ, args...)
     return _kappa_value(κ, _kappa_context(κ, x, γ), i, x, γ)

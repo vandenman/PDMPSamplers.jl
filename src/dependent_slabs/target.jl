@@ -215,7 +215,7 @@ function PDMPModel(target::DependentSlabTarget; hvp::Bool=false)
             _dependent_slab_hvp(target)
         vhv = analytic ? _DependentSlabAnalyticVHV(copy(hvp!), zeros(target.d)) :
             _DependentSlabFiniteDiffVHV(copy(hvp!), zeros(target.d))
-        return PDMPModel(target.d, FullGradient(target), hvp!, vhv, true, true)
+        return PDMPModel(target.d, FullGradient(target), hvp!, vhv, true)
     end
     return PDMPModel(target.d, FullGradient(target), nothing)
 end
