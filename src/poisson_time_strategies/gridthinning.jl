@@ -10,8 +10,6 @@ Adaptive GridThinning configuration.
 uses an exact provider when available, otherwise finite differences. Finite
 differences approximate the directional derivative and therefore have
 step-size/truncation error even when the underlying gradients are exact.
-`use_fd_hvp` remains a compatibility alias for
-`curvature_backend=:finite_difference`.
 
 `bound` is `:value_quadratic` (default) or `:constant`. `:value_quadratic`
 needs a `curvature_bound`; without one, the cells use the ordinary GridThinning
@@ -32,7 +30,6 @@ struct GridThinningStrategy <: PoissonTimeStrategy
     α⁺::Float64
     α⁻::Float64
     safety_limit::Int
-    use_fd_hvp::Bool
     curvature_backend::Symbol
     post_warmup_simplify::Bool
     lazy::Bool
@@ -163,15 +160,13 @@ end
 
 _normalize_grid_bound(::Nothing) = :value_quadratic
 
-function _normalize_curvature_backend(curvature_backend, use_fd_hvp::Bool)
+function _normalize_curvature_backend(curvature_backend)
     if curvature_backend === nothing
-        return use_fd_hvp ? :finite_difference : :auto
+        return :auto
     end
     backend = Symbol(curvature_backend)
     backend in (:exact, :finite_difference, :auto) || throw(ArgumentError(
         "curvature_backend must be :exact, :finite_difference, or :auto"))
-    use_fd_hvp && backend !== :finite_difference && throw(ArgumentError(
-        "use_fd_hvp=true conflicts with curvature_backend=$(backend); use curvature_backend=:finite_difference"))
     return backend
 end
 
@@ -182,7 +177,7 @@ function _normalize_grid_bound(bound::Symbol)
 end
 
 function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺::Real=1.5, α⁻::Real=0.5,
-    safety_limit::Int=500, use_fd_hvp::Bool=false,
+    safety_limit::Int=500,
     curvature_backend=nothing, post_warmup_simplify::Bool=false,
     lazy::Bool=true, bound=nothing, curvature_bound=nothing, bound_violation=nothing,
     max_rejections_before_tail_restart::Int=100,
@@ -197,10 +192,10 @@ function GridThinningStrategy(; N::Int=20, N_min::Int=5, t_max::Real=2.0, α⁺:
         throw(ArgumentError("lazy_max_low_tightness_rejections must be positive"))
     lazy_max_rejections >= 0 ||
         throw(ArgumentError("lazy_max_rejections must be nonnegative; use 0 for the default derived cap"))
-    backend = _normalize_curvature_backend(curvature_backend, use_fd_hvp)
+    backend = _normalize_curvature_backend(curvature_backend)
     return GridThinningStrategy(
         N, N_min, Float64(t_max), Float64(α⁺), Float64(α⁻), safety_limit,
-        backend === :finite_difference, backend,
+        backend,
         post_warmup_simplify,
         lazy, bound_symbol, curvature_bound, bound_violation_symbol,
         max_rejections_before_tail_restart,
