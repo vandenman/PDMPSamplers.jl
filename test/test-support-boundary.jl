@@ -80,7 +80,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         opts = SupportBoundaryOptions()
 
         loc = @inferred PDMPSamplers.localize_support_boundary!(model, ctx, opts)
-        tau_star, tau_safe = loc
+        tau_star, tau_safe = loc.estimated_boundary_time, loc.safe_time
 
         # Boundary should be near x[1] = 1.0, i.e., t ≈ 1.0
         @test loc isa PDMPSamplers.SupportBoundaryLocalization
@@ -99,12 +99,12 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
 
         # Tight tolerance
         opts_tight = SupportBoundaryOptions(; time_rtol=1e-12, time_atol=1e-12, max_bisection_steps=60)
-        tau_tight, _ = PDMPSamplers.localize_support_boundary!(model, ctx, opts_tight)
+        tau_tight = PDMPSamplers.localize_support_boundary!(model, ctx, opts_tight).estimated_boundary_time
         @test tau_tight ≈ 1.0 atol=1e-6
 
         # Loose tolerance, few steps
         opts_loose = SupportBoundaryOptions(; time_rtol=0.1, time_atol=0.1, max_bisection_steps=5)
-        tau_loose, _ = PDMPSamplers.localize_support_boundary!(model, ctx, opts_loose)
+        tau_loose = PDMPSamplers.localize_support_boundary!(model, ctx, opts_loose).estimated_boundary_time
         @test tau_loose ≈ 1.0 atol=0.2
     end
 
@@ -117,7 +117,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         )
 
         opts = SupportBoundaryOptions(; max_bisection_steps=3, time_rtol=0.0, time_atol=0.0)
-        tau, _ = PDMPSamplers.localize_support_boundary!(model, ctx, opts)
+        tau = PDMPSamplers.localize_support_boundary!(model, ctx, opts).estimated_boundary_time
         # After only 3 bisection steps from [0, 2], range should be roughly 2.0/8 = 0.25
         @test 0.5 <= tau <= 2.0
     end
@@ -130,7 +130,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
             x0, v, 0.0, 1.0, ErrorException("test"), BouncyParticle, FullGradient,
         )
 
-        tau_star, _ = PDMPSamplers.localize_support_boundary!(model, ctx, SupportBoundaryOptions())
+        tau_star = PDMPSamplers.localize_support_boundary!(model, ctx, SupportBoundaryOptions()).estimated_boundary_time
         # Boundary should be near x[1] = 1.0 => t ≈ 0.5
         @test tau_star ≈ 0.5 atol=1e-3
     end

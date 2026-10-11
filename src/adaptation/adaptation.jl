@@ -65,7 +65,7 @@ function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
     max_ref = float(max_λref)
     min_free >= 0 || throw(ArgumentError("sticky_min_free_time must be nonnegative"))
     shrink_time >= 0 || throw(ArgumentError("sticky_free_shrink_time must be nonnegative"))
-    ispositive(min_ref) || throw(ArgumentError("min_λref must be positive"))
+    _ispositive(min_ref) || throw(ArgumentError("min_λref must be positive"))
     max_ref >= min_ref || throw(ArgumentError("max_λref must be at least min_λref"))
     refresh_objective in (:evals_per_time, :refresh_rate) ||
         throw(ArgumentError("refresh_objective must be :evals_per_time or :refresh_rate"))
@@ -73,7 +73,7 @@ function BoomerangAdaptationOptions(; sticky_aware::Bool=true,
     floor_fraction = float(initial_variance_floor_fraction)
     isfinite(floor_fraction) && floor_fraction >= 0 || throw(ArgumentError(
         "initial_variance_floor_fraction must be finite and nonnegative"))
-    if refresh_objective === :refresh_rate && !(isfinite(target) && ispositive(target))
+    if refresh_objective === :refresh_rate && !(isfinite(target) && _ispositive(target))
         throw(ArgumentError("target_refresh_rate must be positive and finite when refresh_objective=:refresh_rate"))
     end
     return BoomerangAdaptationOptions(sticky_aware, min_free, shrink_time,
@@ -539,7 +539,7 @@ end
 function stats_mean(ws::WelfordBoomerangStats)
     d = length(ws.sum_x_dt)
     μ = zeros(d)
-    ispositive(ws.total_time) || return μ
+    _ispositive(ws.total_time) || return μ
     T = ws.total_time
     @inbounds for i in 1:d
         μ[i] = ws.sum_x_dt[i] / T
@@ -550,7 +550,7 @@ end
 function stats_var(ws::WelfordBoomerangStats)
     d = length(ws.sum_x_dt)
     v = ones(d)
-    ispositive(ws.total_time) || return v
+    _ispositive(ws.total_time) || return v
     T = ws.total_time
     @inbounds for i in 1:d
         m = ws.sum_x_dt[i] / T
@@ -565,7 +565,7 @@ function stats_cov(ws::WelfordBoomerangStats)
     d = length(ws.sum_x_dt)
     sum_xy = ws.sum_xy_dt
     isempty(sum_xy) && error("WelfordBoomerangStats not initialized for fullrank (no sum_xy_dt)")
-    !ispositive(ws.total_time) && return Matrix{Float64}(I, d, d)
+    !_ispositive(ws.total_time) && return Matrix{Float64}(I, d, d)
     T = ws.total_time
     C = zeros(d, d)
     @inbounds for j in 1:d
@@ -586,7 +586,7 @@ _coord_time(stats::WelfordBoomerangStats, ::Int) = stats.total_time
 
 function stats_mean!(μ::AbstractVector, stats::WelfordBoomerangStats)
     T = stats.total_time
-    if ispositive(T)
+    if _ispositive(T)
         @inbounds for i in eachindex(μ)
             μ[i] = stats.sum_x_dt[i] / T
         end
@@ -676,7 +676,7 @@ function BoomerangAdapter(base_dt::Float64, t0::Float64, d::Integer; scheme::Sym
         Float64.(initial_variance)
     length(initial_var) == d || throw(DimensionMismatch(
         "initial_variance length $(length(initial_var)) does not match dimension $d"))
-    all(x -> isfinite(x) && ispositive(x), initial_var) || throw(ArgumentError(
+    all(x -> isfinite(x) && _ispositive(x), initial_var) || throw(ArgumentError(
         "initial_variance entries must be positive and finite"))
     floor_mask = isnothing(variance_floor_mask) ? falses(d) :
         BitVector(variance_floor_mask)
@@ -775,7 +775,7 @@ const BOOM_DIAG_FLOOR = 1e-8
 const BOOM_STICKY_MIN_FREE_TIME_DEFAULT = 10.0
 const BOOM_STICKY_FREE_SHRINK_TIME_DEFAULT = 50.0
 
-_has_data(stats::WelfordBoomerangStats) = ispositive(stats.total_time)
+_has_data(stats::WelfordBoomerangStats) = _ispositive(stats.total_time)
 _shrinkage_time(stats::WelfordBoomerangStats) = stats.total_time
 
 """
@@ -822,7 +822,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
             if !options.adapt_stickable_scales
                 # Keep the scale installed before warmup.
                 σ2 = 1.0 / flow.Γ[i, i]
-            elseif Ti_free >= options.sticky_min_free_time && ispositive(Ti_free)
+            elseif Ti_free >= options.sticky_min_free_time && _ispositive(Ti_free)
                 use_total_free_moments = isempty(stats.free_sum_x2_dt) || Ti_free == T
                 sx2_free = use_total_free_moments ?
                     stats.sum_x2_dt[i] : stats.free_sum_x2_dt[i]
@@ -840,7 +840,7 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
             sx2_free = use_total_free_moments ? stats.sum_x2_dt[i] : stats.free_sum_x2_dt[i]
             μ_free = sx_free / Ti_free
             σ2_free = max(sx2_free / Ti_free - μ_free * μ_free, BOOM_DIAG_FLOOR^2)
-            w = ispositive(options.sticky_free_shrink_time) ?
+            w = _ispositive(options.sticky_free_shrink_time) ?
                 Ti_free / (Ti_free + options.sticky_free_shrink_time) : 1.0
             μi = w * μ_free + (1 - w) * μ_total
             σ2 = w * σ2_free + (1 - w) * σ2_total
@@ -1093,7 +1093,7 @@ function RefreshRateAdapter(base_dt::Float64, min_start_time::Float64;
     objective::Symbol=:evals_per_time, target_refresh_rate::Float64=NaN)
     objective in (:evals_per_time, :refresh_rate) ||
         throw(ArgumentError("objective must be :evals_per_time or :refresh_rate"))
-    if objective === :refresh_rate && !(isfinite(target_refresh_rate) && ispositive(target_refresh_rate))
+    if objective === :refresh_rate && !(isfinite(target_refresh_rate) && _ispositive(target_refresh_rate))
         throw(ArgumentError("target_refresh_rate must be positive and finite when objective=:refresh_rate"))
     end
     RefreshRateAdapter(base_dt, min_λref, max_λref, min_start_time,
@@ -1116,7 +1116,7 @@ function adapt!(::Random.AbstractRNG, ad::RefreshRateAdapter, state, flow::Mutab
     window_refreshes = refresh_events - ad.prev_refresh_events
     window_time = state.t[] - ad.prev_pdmp_time
 
-    if !ispositive(window_time) || (ad.objective === :evals_per_time && window_evals <= 0)
+    if !_ispositive(window_time) || (ad.objective === :evals_per_time && window_evals <= 0)
         ad.prev_total_evals = total_evals
         ad.prev_refresh_events = refresh_events
         ad.prev_pdmp_time = state.t[]

@@ -152,7 +152,7 @@ _supports_constant_grid_rate_derivatives(pd::PreconditionedDynamics, provider) =
     _supports_constant_grid_rate_derivatives(pd.dynamics, provider)
 
 function _constant_rate_derivative_from_signed(g::Real, dg::Real, λ_refresh::Real)
-    return pos(g) + λ_refresh, ispositive(g) ? dg : zero(dg)
+    return pos(g) + λ_refresh, _ispositive(g) ? dg : zero(dg)
 end
 
 _grid_rate_derivative_chunk_points() = 16

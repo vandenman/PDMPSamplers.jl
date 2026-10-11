@@ -142,7 +142,7 @@ function _step!(
         τ = Float64(max_horizon)
         event_type = max_horizon_event
     end
-    @assert ispositive(τ) || (iszero(τ) && event_type in
+    @assert _ispositive(τ) || (iszero(τ) && event_type in
         (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
     # Keep the two metadata types on separate compiled paths.  Merging a
@@ -186,7 +186,7 @@ function _step!(
             τ = horizon
             event_type = max_horizon_event
         end
-        @assert ispositive(τ) || (iszero(τ) && event_type in
+        @assert _ispositive(τ) || (iszero(τ) && event_type in
             (:sticky, :horizon_hit, :anchor_selection_boundary))
         if !capped && event_type === :sticky
             needs_saving = _handle_sticky_event_no_boundary!(rng, τ,
@@ -230,7 +230,7 @@ function _step!(
         τ, event_type, meta = _cap_event_time_for_step(τ, event_type,
             meta, max_horizon, max_horizon_event)
 
-        @assert ispositive(τ) || (iszero(τ) && event_type in
+        @assert _ispositive(τ) || (iszero(τ) && event_type in
             (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
         needs_saving, saving_args = handle_event!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)

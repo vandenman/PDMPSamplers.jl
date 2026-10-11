@@ -96,7 +96,7 @@
 
                     acceptance_prob = stats.reflections_accepted / stats.reflections_events
 
-                    PDMPSamplers.ispositive(refresh_rate(flow)) && @test stats.refreshment_events > 100
+                    PDMPSamplers._ispositive(refresh_rate(flow)) && @test stats.refreshment_events > 100
 
                     if !(flow isa AnyBoomerang)
                         @test acceptance_prob > 0.4

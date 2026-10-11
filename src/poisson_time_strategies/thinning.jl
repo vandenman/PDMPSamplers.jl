@@ -34,7 +34,7 @@ _validate_unbounded_linear_scales(::Any) = throw(ArgumentError(
     "component scales on an unbounded linear trajectory"))
 _validate_unbounded_linear_scales(::CertifiedAffineComponentScales) = nothing
 function _validate_unbounded_linear_scales(provider::TrajectoryComponentScales)
-    any(ispositive, provider.growth_rates) && throw(ArgumentError(
+    any(_ispositive, provider.growth_rates) && throw(ArgumentError(
         "SubsampledControlVariate ThinningStrategy cannot dominate positive " *
         "trajectory growth on an unbounded linear path with its affine clock; " *
         "use GridThinningStrategy"))
@@ -54,19 +54,19 @@ function initialize_cache(rng::Random.AbstractRNG, flow::ZigZag, ::CoordinateWis
 end
 
 function poisson_time(a::Number, u::Number)
-    !ispositive(a) && return Inf
+    !_ispositive(a) && return Inf
     -log(u) / a
 end
 
 function poisson_time(a, b, u)
-    if ispositive(b)
-        if isnegative(a)
+    if _ispositive(b)
+        if _isnegative(a)
             return sqrt(-log(u) * 2.0 / b) - a / b
         else
             return sqrt((a / b)^2 - log(u) * 2.0 / b) - a / b
         end
     elseif iszero(b)
-        if ispositive(a)
+        if _ispositive(a)
             return -log(u) / a
         else
             return Inf
@@ -226,7 +226,7 @@ function next_event_time(rng::Random.AbstractRNG,
     all(isfinite, (roof_a, roof_b)) || throw(ArgumentError(
         "subsampling ThinningStrategy requires finite affine envelope coefficients"))
 
-    refresh = if include_refresh && ispositive(refresh_rate(flow))
+    refresh = if include_refresh && _ispositive(refresh_rate(flow))
         Random.randexp(rng) / refresh_rate(flow)
     else
         Inf
@@ -249,7 +249,7 @@ function next_event_time(rng::Random.AbstractRNG,
         roof = roof_a + roof_b * τ
         _subsampling_bound_violation(alg, stats, D + B, roof, :aggregate)
         aggregate = D + B
-        if !ispositive(aggregate) || rand(rng) * roof > aggregate
+        if !_ispositive(aggregate) || rand(rng) * roof > aggregate
             continue
         end
         _inc_counter_subsampling_aggregate_accepts(stats)
@@ -283,7 +283,7 @@ function next_event_time(rng::Random.AbstractRNG, ::PDMPModel{<:CoordinateWiseGr
     pq = cache.pq # rename for clarity
     i₀, t_event = first(pq)
     τ = t_event - state.t[]
-    ispositive(τ) || error("$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event")
+    _ispositive(τ) || error("$τ > $(zero(τ)) at t = $(state.t[]) with i₀ = $i₀ and t_event = $t_event")
     return τ, :reflect, CoordinateMeta(i₀)
 end
 

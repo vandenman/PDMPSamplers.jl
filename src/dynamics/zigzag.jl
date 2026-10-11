@@ -31,7 +31,7 @@ function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_
     vt = state.ξ.θ
     f_prime_t = zero(eltype(vt))
     for i in eachindex(∇U_xt)
-        if ispositive(vt[i] * ∇U_xt[i])
+        if _ispositive(vt[i] * ∇U_xt[i])
             f_prime_t += vt[i] * curvature_input[i]
         end
     end

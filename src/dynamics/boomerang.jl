@@ -492,7 +492,7 @@ function sticking_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     if iszero(μ)
         iszero(x) && iszero(θ) && return Inf
         iszero(θ) && return oftype(float(x), π / 2)
-        if θ * x >= 0.0 # TODO: ispositive(θ * x) or !isnegative?
+        if θ * x >= 0.0 # TODO: _ispositive(θ * x) or !_isnegative?
             return π - atan(x / θ)
         else
             return atan(-x / θ)

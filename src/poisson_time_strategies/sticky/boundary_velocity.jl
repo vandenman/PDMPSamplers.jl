@@ -143,7 +143,7 @@ function _prepare_dense_zigzag_stratum!(flow::DensePreconditionedZigZag,
         scratch.factor_generation != generation
     if factor_changed || active_changed || !scratch.active_factor_valid
         k = scratch.active_count
-        if ispositive(k)
+        if _ispositive(k)
             @inbounds for b in 1:k, a in 1:k
                 ia = scratch.active[a]
                 ib = scratch.active[b]
@@ -180,7 +180,7 @@ _prepare_stratum!(::Union{BouncyParticle,AnyBoomerang,
     activating::Integer=0) = _prepare_product_stratum!(state, activating)
 
 function _rand_abs_tilted_normal(rng::Random.AbstractRNG, σ::Real)
-    ispositive(σ) || throw(ArgumentError("σ must be positive"))
+    _ispositive(σ) || throw(ArgumentError("σ must be positive"))
     magnitude = Float64(σ) * sqrt(rand(rng, Exponential(2.0)))
     return rand(rng, Bool) ? magnitude : -magnitude
 end
@@ -564,7 +564,7 @@ function _dense_zigzag_stratum!(state::StickyPDMPState,
         flow::DensePreconditionedZigZag)
     scratch = _prepare_stratum!(flow, state)
     k = scratch.active_count
-    if ispositive(k)
+    if _ispositive(k)
         @inbounds for a in 1:k
             scratch.solved_θ[a] = state.ξ.θ[scratch.active[a]]
         end

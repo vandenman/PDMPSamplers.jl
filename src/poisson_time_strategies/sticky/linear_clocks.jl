@@ -737,7 +737,7 @@ function unsticking_time(rng::Random.AbstractRNG, alg::StickyLoopState,
         "sticky κ for frozen coordinate $i must not be NaN"))
     isfinite(κ) || throw(ArgumentError(
         "sticky κ for frozen coordinate $i must be finite"))
-    isnegative(κ) && throw(ArgumentError(
+    _isnegative(κ) && throw(ArgumentError(
         "sticky κ for frozen coordinate $i must be nonnegative"))
     iszero(κ) && return Inf
     C = _boundary_proposal_clock_constant(flow, state, i)

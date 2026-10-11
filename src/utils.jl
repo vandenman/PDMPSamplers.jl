@@ -1,10 +1,6 @@
 
-if VERSION < v"1.13.0"
-    ispositive(x::Real) = x > zero(x)
-    isnegative(x::Real) = x < zero(x)
-else
-    # code for Julia ≥ 1.13
-end
+_ispositive(x::Real) = x > zero(x)
+_isnegative(x::Real) = x < zero(x)
 
 pos(x) = max(zero(x), x)
 
@@ -21,7 +17,7 @@ end
 
 function _rand_posdot_index(rng::Random.AbstractRNG, x, y)
     total = posdot(x, y)
-    ispositive(total) || return rand(rng, eachindex(x))
+    _ispositive(total) || return rand(rng, eachindex(x))
     threshold = rand(rng) * total
     cumulative = zero(total)
     selected = firstindex(x)

@@ -1931,7 +1931,7 @@ function Base.iterate(D::PDMPDiscretize, (t_range, range_state, x_last, θ_last,
     # 4. Evolve the state from the time of the last processed event up to t_new
     Δt_final = t_new - t_current
     @assert Δt_final >= 0 "Should be impossible!"
-    if ispositive(Δt_final)
+    if _ispositive(Δt_final)
         _discretize_move_forward!(ξ, Δt_final, trace.flow, free)
     end
 

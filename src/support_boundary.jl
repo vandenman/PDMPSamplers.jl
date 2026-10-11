@@ -72,8 +72,6 @@ struct SupportBoundaryLocalization
     safe_time::Float64
 end
 
-Base.iterate(loc::SupportBoundaryLocalization) = (loc.estimated_boundary_time, 2)
-Base.iterate(loc::SupportBoundaryLocalization, state::Int) = state == 2 ? (loc.safe_time, 3) : nothing
 
 """
     SupportBoundaryError <: Exception
