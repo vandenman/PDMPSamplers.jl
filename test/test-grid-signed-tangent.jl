@@ -8,15 +8,16 @@ Random.randexp(rng::TangentScriptedRNG) = popfirst!(rng.exps)
 Random.rand(rng::TangentScriptedRNG) = popfirst!(rng.uniforms)
 
 @testset "Signed tangent bounds retain interior positive rates" begin
-    grad!(out, x) = (out[1] = (x[1]-1)*(x[1]-2)*(x[1]-10); out)
-    hvp!(out, x, v) = (out[1] = (3x[1]^2-26x[1]+32)*v[1]; out)
-    model = PDMPModel(1, FullGradient(grad!), hvp!)
-    for flow in (BouncyParticle(1, 0.0), ZigZag(1))
+    grad!(out, x) = (fill!(out, -100.0); out[1] = (x[1]-1)*(x[1]-2)*(x[1]-10); out)
+    hvp!(out, x, v) = (fill!(out, 0.0); out[1] = (3x[1]^2-26x[1]+32)*v[1]; out)
+    for flow in (BouncyParticle(1, 0.0), ZigZag(1), ZigZag(2))
+        d = length(flow.μ)
+        model = PDMPModel(d, FullGradient(grad!), hvp!)
         strategy = GridThinningStrategy(N=2, N_min=2, t_max=5.0,
             bound=:constant, curvature_backend=:exact, bound_violation=:throw)
         state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
             Random.Xoshiro(1), flow, model, strategy, 0.0,
-            SkeletonPoint([0.0], [1.0]); statistic_counter=PDMPSamplers.DevelStatisticCounter)
+            SkeletonPoint(zeros(d), ones(d)); statistic_counter=PDMPSamplers.DevelStatisticCounter)
         provider = PDMPSamplers._grid_event_provider(model_, flow, alg, stats)
         PDMPSamplers.construct_rate_bound_grid!(alg.pcb, state, flow, provider, nothing)
         maximum_x = (13-sqrt(73))/3

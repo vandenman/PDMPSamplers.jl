@@ -247,8 +247,8 @@ function construct_rate_bound_grid!(
         L_value = _prepared_or_cell_curvature_value(
             prepared, cell, curvature_bound, state, flow, a, b, stats)
         L_cell = L_value === nothing ? 0.0 : Float64(L_value)
-        M = L_value === nothing ? _tangent_intersection_bound(
-            Float64(a), Float64(b), y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1]) :
+        M = L_value === nothing ? pos(_tangent_intersection_bound(
+            Float64(a), Float64(b), y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1])) :
             _rate_flat_upper(a, b, y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1], L_cell)
         Λ_vals[cell] = M
 
@@ -355,9 +355,9 @@ function construct_rate_bound_grid!(
         left = cell - loaded_start + 1
         right = left + 1
         for channel in 1:n_channels
-            M += curvature_bound === nothing ? _tangent_intersection_bound(
+            M += curvature_bound === nothing ? pos(_tangent_intersection_bound(
                 Float64(a), Float64(b), G[channel, left], G[channel, right],
-                dG[channel, left], dG[channel, right]) :
+                dG[channel, left], dG[channel, right])) :
                 _rate_flat_upper(a, b, G[channel, left], G[channel, right],
                     dG[channel, left], dG[channel, right], L[channel, cell])
         end
