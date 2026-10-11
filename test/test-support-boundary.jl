@@ -652,7 +652,8 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
             @test false
         catch err
             @test !(err isa SupportBoundaryError)
-            @test occursin("MethodError", sprint(showerror, err))
+            @test err isa ErrorException
+            @test err.msg == "bad hvp"
         end
     end
 

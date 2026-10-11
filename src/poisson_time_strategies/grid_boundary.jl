@@ -19,9 +19,6 @@ function _get_rate_and_deriv_or_throw(probe::GridBoundaryProbeHandler, state::Ab
         return get_rate_and_deriv(state, flow, provider, add_rate, args...)
     catch err
         err isa _ProbeFailureException && rethrow()
-        if err isa ErrorException && err.msg == "bad hvp"
-            throw(MethodError(get_rate_and_deriv, (state, flow, provider, add_rate, args...)))
-        end
         if t_valid == t_invalid
             t_invalid = max(t_valid + eps(Float64), eps(Float64))
             try
