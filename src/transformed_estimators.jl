@@ -152,90 +152,54 @@ Uses closed-form formulas for common transforms on linear dynamics (ZigZag/BPS) 
 5-point Gauss-Legendre quadrature elsewhere.
 """
 function Statistics.mean(trace::AbstractPDMPTrace, transforms::AbstractVector{<:ParameterTransform})
-    flow = trace.flow
-    base = underlying_flow(flow)
-
-    iter = trace
-    next = iterate(iter)
-    isnothing(next) && error("Cannot compute statistics on an empty trace")
-
-    t₀, x_state, θ_state, _ = next[2]
-    xt₀ = copy(x_state)
-    θt₀ = copy(θ_state)
-
-    d = length(xt₀)
+    d = length(first(trace).position)
     length(transforms) == d || throw(DimensionMismatch("transforms length $(length(transforms)) ≠ dimension $d"))
-
-    start_time = t₀
-    integral = zeros(d)
-
-    next = iterate(iter, next[2])
-    isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
-
-    is_boomerang = base isa AnyBoomerang
-    while next !== nothing
-        t₁, x_state, θ_state, _ = next[2]
-        dt = t₁ - t₀
-
-        for j in 1:d
-            μj = is_boomerang ? base.μ[j] : 0.0
-            integral[j] += _transformed_mean_segment(transforms[j], base, Float64(xt₀[j]), Float64(θt₀[j]), dt, μj)
-        end
-
-        t₀ = t₁
-        copyto!(xt₀, x_state)
-        copyto!(θt₀, θ_state)
-        next = iterate(iter, next[2])
-    end
-
-    total_time = t₀ - start_time
-    return integral / total_time
+    return _integrate(trace, _transformed_mean_segment, transforms)
 end
 
 """
     Statistics.var(trace::AbstractPDMPTrace, transforms::AbstractVector{<:ParameterTransform})
 
-Compute ``\\mathrm{Var}[f_j(y_j)]`` for each coordinate.
+Compute the variance of each transformed coordinate using the trace's sticky masks.
 """
 function Statistics.var(trace::AbstractPDMPTrace, transforms::AbstractVector{<:ParameterTransform})
-    μf = Statistics.mean(trace, transforms)
+    centers = Statistics.mean(trace, transforms)
+    return _integrate(trace, _transformed_var_segment, transforms, centers)
+end
 
-    flow = trace.flow
+function _integrate_segment(
+    f::Union{typeof(_transformed_mean_segment),typeof(_transformed_var_segment)},
+    flow::ContinuousDynamics, x0, x1, v0, v1, t0, t1, args...)
+    integral = zeros(length(x0))
+    return _integrate_segment!(integral, f, flow, x0, x1, v0, v1, t0, t1, args...)
+end
+
+function _integrate_segment!(integral,
+    f::Union{typeof(_transformed_mean_segment),typeof(_transformed_var_segment)},
+    flow::ContinuousDynamics, x0, x1, v0, v1, t0, t1,
+    transforms::AbstractVector{<:ParameterTransform}, args...)
+    return _integrate_segment!(integral, f, flow, x0, x1, v0, v1, t0, t1,
+        nothing, transforms, args...)
+end
+
+function _integrate_segment!(integral,
+    f::Union{typeof(_transformed_mean_segment),typeof(_transformed_var_segment)},
+    flow::ContinuousDynamics, x0, x1, v0, v1, t0, t1,
+    free::Union{Nothing,AbstractVector{Bool}}, transforms, centers=nothing)
     base = underlying_flow(flow)
-
-    iter = trace
-    next = iterate(iter)
-    isnothing(next) && error("Cannot compute statistics on an empty trace")
-
-    t₀, x_state, θ_state, _ = next[2]
-    xt₀ = copy(x_state)
-    θt₀ = copy(θ_state)
-
-    d = length(xt₀)
-    start_time = t₀
-    integral = zeros(d)
-
-    next = iterate(iter, next[2])
-    isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
-
-    is_boomerang = base isa AnyBoomerang
-    while next !== nothing
-        t₁, x_state, θ_state, _ = next[2]
-        dt = t₁ - t₀
-
-        for j in 1:d
-            μj = is_boomerang ? base.μ[j] : 0.0
-            integral[j] += _transformed_var_segment(transforms[j], base, Float64(xt₀[j]), Float64(θt₀[j]), dt, μj, μf[j])
+    dt = Float64(t1 - t0)
+    for j in eachindex(integral)
+        if free !== nothing && !free[j]
+            value = transforms[j](x0[j])
+            integral[j] += (centers === nothing ? value : (value - centers[j])^2) * dt
+        else
+            reference = base isa AnyBoomerang ? Float64(base.μ[j]) : 0.0
+            integral[j] += centers === nothing ?
+                f(transforms[j], base, Float64(x0[j]), Float64(v0[j]), dt, reference) :
+                f(transforms[j], base, Float64(x0[j]), Float64(v0[j]), dt, reference, centers[j])
         end
-
-        t₀ = t₁
-        copyto!(xt₀, x_state)
-        copyto!(θt₀, θ_state)
-        next = iterate(iter, next[2])
     end
-
-    total_time = t₀ - start_time
-    return integral / total_time
+    return integral
 end
 
 """

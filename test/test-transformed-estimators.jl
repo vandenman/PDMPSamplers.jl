@@ -3,6 +3,15 @@
 import QuadGK
 
 @testset "Transformed estimators" begin
+    @testset "frozen Boomerang coordinates retain their transformed value" begin
+        flow = Boomerang(Diagonal([1.0]), [1.0], 0.0)
+        trace = PDMPTrace([0.0, 1.0], zeros(1, 2), zeros(1, 2),
+            flow, falses(1, 2))
+        @test mean(trace, [IdentityTransform()]) == mean(trace) == [0.0]
+        @test var(trace, [IdentityTransform()]) == var(trace) == [0.0]
+        @test mean(trace, [LowerBoundTransform(2.0)]) == [3.0]
+        @test var(trace, [LowerBoundTransform(2.0)]) == [0.0]
+    end
 
     # ──────────────────────────────────────────────────────────────────────────
     # Level 1: segment integral correctness (unit tests vs QuadGK)
