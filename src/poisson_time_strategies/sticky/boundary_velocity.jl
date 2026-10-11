@@ -418,7 +418,9 @@ function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
         flow::PreconditionedDynamics{
             <:Union{IdentityPreconditioner,DiagonalPreconditioner},
             <:Union{ZigZag,BouncyParticle,AnyBoomerang}})
-    return _refresh_preserved_sticky_velocity!(rng, state, flow)
+    return _velocity_preserving_sticky(flow) ?
+        _refresh_preserved_sticky_velocity!(rng, state, flow) :
+        draw_stratum_velocity!(rng, state, flow)
 end
 
 refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,

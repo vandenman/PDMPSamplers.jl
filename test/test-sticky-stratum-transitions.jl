@@ -13,6 +13,22 @@ function _dense_stratum_factor(state, flow)
 end
 
 @testset "Exact sticky stratum transitions" begin
+    @testset "identity wrapping preserves dense Boomerang refresh" begin
+        covariance = [1.0 0.6; 0.6 1.0]
+        dense = Boomerang(inv(covariance), zeros(2), 1.0)
+        wrapped = PDMPSamplers.PreconditionedDynamics(
+            PDMPSamplers.IdentityPreconditioner(), dense)
+        for free in (trues(2), BitVector([true, false]))
+            bare_state = StickyPDMPState(0.0,
+                SkeletonPoint(zeros(2), zeros(2)), copy(free))
+            wrapped_state = copy(bare_state)
+            PDMPSamplers.refresh_velocity!(Xoshiro(21), bare_state, dense)
+            PDMPSamplers.refresh_velocity!(Xoshiro(21), wrapped_state, wrapped)
+            @test wrapped_state.ξ.θ == bare_state.ξ.θ
+            @test all(iszero, wrapped_state.ξ.θ[.!free])
+        end
+    end
+
     @testset "dense ZigZag stratum algebra" begin
         Σ = [1.0 0.55 -0.2; 0.55 1.7 0.35; -0.2 0.35 1.3]
         flow = DensePreconditionedZigZag(3)
