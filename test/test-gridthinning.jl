@@ -87,14 +87,10 @@ end
         @test length(pcb.Λ_vals) == 10
     end
 
-    @testset "legacy grid upper bound error path and safety errors" begin
+    @testset "grid safety errors" begin
         flow = BouncyParticle(1, 0.0)
         ξ = SkeletonPoint([0.25], [1.0])
         grad!(out, x) = (out[1] = x[1]; out)
-
-        @test_throws ErrorException PDMPSamplers.construct_upper_bound!(
-            PDMPSamplers.PiecewiseConstantBound([0.0, 1.0], zeros(1)),
-            ξ, flow, grad!, false)
 
         model = PDMPModel(1, FullGradient(grad!))
         err = try
@@ -923,7 +919,7 @@ end
         @test hvp_calls[] == 1
     end
 
-    @testset "get_rate_and_deriv with FiniteDiffHVP" begin
+    @testset "get_rate_and_deriv with FiniteDiffVHV" begin
         d = 3
         target = gen_data(Distributions.MvNormal, d, 2.0)
         flow = ZigZag(d)
@@ -935,8 +931,8 @@ end
             out
         end
 
-        fd_hvp = PDMPSamplers.FiniteDiffHVP(grad_func, zeros(d))
-        rate_fd, deriv_fd = PDMPSamplers.get_rate_and_deriv(state, flow, fd_hvp)
+        fd_vhv = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d))
+        rate_fd, deriv_fd = PDMPSamplers.get_rate_and_deriv(state, flow, fd_vhv)
         @test rate_fd >= 0
         @test isfinite(deriv_fd)
 
@@ -970,7 +966,7 @@ end
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
         model = PDMPModel(d, grad)  # no HVP/VHV so gridthinning uses finite-diff fallback
-        alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
+        alg = GridThinningStrategy(; use_fd_vhv=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         rng = Xoshiro(1493)
@@ -1148,17 +1144,17 @@ end
         @test length(alg.pcb.t_grid) == 11
     end
 
-    @testset "GridThinningStrategy construction with use_fd_hvp" begin
-        strat = GridThinningStrategy(; use_fd_hvp=true, N=30)
-        @test strat.use_fd_hvp
+    @testset "GridThinningStrategy construction with use_fd_vhv" begin
+        strat = GridThinningStrategy(; use_fd_vhv=true, N=30)
+        @test strat.use_fd_vhv
         @test strat.curvature_backend === :finite_difference
         @test strat.N == 30
 
         exact_strat = GridThinningStrategy(; curvature_backend=:exact)
         @test exact_strat.curvature_backend === :exact
-        @test !exact_strat.use_fd_hvp
+        @test !exact_strat.use_fd_vhv
         @test_throws ArgumentError GridThinningStrategy(;
-            use_fd_hvp=true, curvature_backend=:exact)
+            use_fd_vhv=true, curvature_backend=:exact)
         @test_throws ArgumentError GridThinningStrategy(;
             curvature_backend=:unknown)
 
@@ -1243,7 +1239,7 @@ end
         alg = GridThinningStrategy(;
             N=30,
             t_max=2.0,
-            use_fd_hvp=false,
+            use_fd_vhv=false,
             post_warmup_simplify=true)
         @test alg.bound === :value_quadratic
 
@@ -1304,7 +1300,7 @@ end
         model = PDMPModel(2, FullGradient(tuning_grad!))
         tuning = GridWarmupTuning()
         strategy = GridThinningStrategy(;
-            N=5, N_min=2, t_max=1.0, use_fd_hvp=true, warmup_tuning=tuning)
+            N=5, N_min=2, t_max=1.0, use_fd_vhv=true, warmup_tuning=tuning)
         state0 = SkeletonPoint([0.2, -0.1], [0.4, 0.3])
         rng = Xoshiro(20260718)
         _, _, alg_noop, _, stats_noop = PDMPSamplers.initialize_state(
@@ -1462,7 +1458,7 @@ end
         flow = ZigZag(d)
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
         model = PDMPModel(d, grad)  # no HVP
-        alg = GridThinningStrategy(; use_fd_hvp=true)
+        alg = GridThinningStrategy(; use_fd_vhv=true)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         rng = Xoshiro(2058)
@@ -1560,7 +1556,7 @@ end
         flow = BouncyParticle(d, 1.0)
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
         model = PDMPModel(d, grad)  # no HVP
-        alg = GridThinningStrategy(; use_fd_hvp=true, N=16, t_max=1.5)
+        alg = GridThinningStrategy(; use_fd_vhv=true, N=16, t_max=1.5)
 
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
         rng = Xoshiro(2191)

@@ -1,5 +1,3 @@
-_grid_hvp_provider(alg::GridAdaptiveState, model::PDMPModel) = GradHVPProvider(alg.grad_provider, model.hvp)
-_grid_vhv_provider(alg::GridAdaptiveState, model::PDMPModel) = VHVProvider(alg.grad_provider, model.vhv, alg.fd_w_buf)
 _grid_fd_provider(alg::GridAdaptiveState, stats) = FiniteDiffVHV(alg.grad_provider, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf, stats)
 
 function _grid_event_provider(model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState, stats)

@@ -225,7 +225,7 @@ import ForwardDiff
 
             yvals1[i], dvals1[i] = DI.value_and_derivative(f, prep, ad_type, xvals[i])
             local state_ = move_forward_time(state, xvals[i], flow)
-            grad_func = PDMPSamplers.make_grad_U_func(state_, flow, grad, cache)
+            grad_func = PDMPSamplers.GradientProvider(state_.ξ.θ, flow, grad, cache)
             provider = PDMPSamplers.GradHVPProvider(
                 grad_func, (x, v) -> neg_hvp!(target, out, x, v))
             yvals2[i], dvals2[i] = PDMPSamplers.get_rate_and_deriv(state_, flow, provider, false)

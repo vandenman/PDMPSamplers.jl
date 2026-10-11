@@ -108,12 +108,6 @@ end
             out
         end
 
-        fd_hvp = PDMPSamplers.FiniteDiffHVP(grad_func, zeros(d))
-        rate_hvp, deriv_hvp = PDMPSamplers.get_rate_and_deriv(state, flow, fd_hvp)
-        @test iszero(rate_hvp)
-        @test iszero(deriv_hvp)
-        @test all(isfinite, fd_hvp.hvp_buf)
-
         fd_vhv = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d))
         rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(state, flow, fd_vhv)
         @test iszero(rate_vhv)

@@ -194,15 +194,6 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         @test stats.∇f_calls == 2
         @test stats.prior_gradient_calls == 1
 
-        fd_probe = PDMPSamplers.WithFDCurvatureStats(
-            PDMPSamplers.with_stats((out, x) -> copyto!(out, x), stats, Val(:ordinary_full_gradient)),
-            stats,
-        )
-        fd_probe(out, x)
-        @test stats.∇f_calls == 3
-        @test stats.full_gradient_calls == 2
-        @test stats.fd_curvature_gradient_calls == 1
-
         hvp = PDMPSamplers.WithStatsHVP((x, v) -> v, stats)
         @test hvp(x, x) == x
         @test stats.∇²f_calls == 1
@@ -237,8 +228,7 @@ PDMPSamplers._last_gradient_potential(probe::LastGradientPotentialProbe) = probe
         stats = PDMPSamplers.StatisticCounter()
         wrapped_rec = ActiveSetRecorder(3)
         PDMPSamplers.set_active_set!(PDMPSamplers.with_stats(wrapped_rec, stats), free)
-        PDMPSamplers.set_active_set!(PDMPSamplers.WithFDCurvatureStats(wrapped_rec, stats), free)
-        @test wrapped_rec.calls == 2
+        @test wrapped_rec.calls == 1
 
         vhv_rec = ActiveSetRecorder(3)
         joint_rec = ActiveSetRecorder(3)

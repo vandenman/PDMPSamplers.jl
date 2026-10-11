@@ -665,24 +665,6 @@ deterministic_rate_cell_bound(ws::WithStats,
 has_direct_deterministic_rate_cell_bound(ws::WithStats) =
     has_direct_deterministic_rate_cell_bound(ws.f)
 
-struct WithFDCurvatureStats{F,S} <: Function
-    f::F
-    stats::S
-end
-
-(ws::WithFDCurvatureStats)(args...) = begin
-    _inc_counter_fd_curvature_gradient_calls(ws.stats)
-    ws.f(args...)
-end
-set_active_set!(ws::WithFDCurvatureStats, free::BitVector) = set_active_set!(ws.f, free)
-deterministic_rate_cell_bound(ws::WithFDCurvatureStats,
-    state::AbstractPDMPState, flow::ContinuousDynamics, left::Real,
-    right::Real) = deterministic_rate_cell_bound(
-        ws.f, state, flow, left, right)
-has_direct_deterministic_rate_cell_bound(ws::WithFDCurvatureStats) =
-    has_direct_deterministic_rate_cell_bound(ws.f)
-
-
 # Gradient computation interface
 
 set_active_set!(strategy::FullGradient, free::BitVector) = set_active_set!(strategy.f, free)

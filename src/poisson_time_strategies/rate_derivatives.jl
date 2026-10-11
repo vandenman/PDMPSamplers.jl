@@ -337,50 +337,10 @@ function _get_rate_and_deriv_gradient_only(state::AbstractPDMPState, flow::Conti
     return rate, zero(rate)
 end
 
-struct FiniteDiffHVP{G} <: AbstractRateDerivativeProvider
-    grad::G
-    buf::Vector{Float64}
-    grad_buf::Vector{Float64}
-    hvp_buf::Vector{Float64}
-end
-FiniteDiffHVP(grad, buf::Vector{Float64}) = FiniteDiffHVP(grad, buf, similar(buf), similar(buf))
-
 function _fd_step_size(xt::AbstractVector, vt::AbstractVector)
     vnorm = norm(vt)
     iszero(vnorm) && return vnorm
     return oftype(vnorm, 1e-5) * max(one(vnorm), norm(xt) / vnorm)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP, add_rate::Bool=true)
-    return _get_rate_and_deriv_fd_hvp(state, flow, fd, add_rate, nothing)
-end
-
-function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, fd::FiniteDiffHVP,
-    add_rate::Bool, cached_gradient::AbstractVector)
-    return _get_rate_and_deriv_fd_hvp(state, flow, fd, add_rate, cached_gradient)
-end
-
-function _get_rate_and_deriv_fd_hvp(state::AbstractPDMPState, flow::ContinuousDynamics,
-    fd::FiniteDiffHVP, add_rate::Bool, cached_gradient)
-    if cached_gradient === nothing
-        copyto!(fd.grad_buf, fd.grad(state.ξ.x))
-    else
-        copyto!(fd.grad_buf, cached_gradient)
-    end
-    f_t = λ(state, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
-    rate = pos(f_t)
-    ispositive(f_t) || return rate, zero(f_t)
-
-    xt, vt = state.ξ.x, state.ξ.θ
-    h = _fd_step_size(xt, vt)
-    if iszero(h)
-        fill!(fd.hvp_buf, 0.0)
-    else
-        fd.buf .= xt .+ h .* vt
-        ∇U_shifted = fd.grad(fd.buf)
-        fd.hvp_buf .= (∇U_shifted .- fd.grad_buf) ./ h
-    end
-    return rate, ∂λ∂t(state, fd.grad_buf, fd.hvp_buf, flow)
 end
 
 function _fd_vhv_scalar(fd::FiniteDiffVHV, xt::AbstractVector, vt::AbstractVector, wt::AbstractVector)

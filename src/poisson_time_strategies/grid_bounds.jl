@@ -29,30 +29,6 @@ function (bound::PiecewiseConstantBound)(t::Real)
     return bound.Λ_vals[i]
 end
 
-"""
-    construct_upper_bound(x₀, v₀, flow, U, t_max, N)
-
-Constructs a piecewise-constant upper bound for the event rate λ(t)
-using the grid-based method from Andral & Kamatani (2024).
-
-# Arguments
-- `x₀`, `v₀`: Initial position and velocity.
-- `flow`: The deterministic dynamics (e.g., BouncyParticle, Boomerang).
-- `U`: The potential energy function `U(x)`.
-- `t_max`: The time horizon for the bound.
-- `N`: The number of grid segments.
-
-# Returns
-- A `PiecewiseConstantBound` object.
-"""
-function construct_upper_bound(ξ::SkeletonPoint, flow, ∇U!::Function, t_max::Real, N::Int)
-
-    pcb = PiecewiseConstantBound(Vector{eltype(ξ.x)}(undef, N + 1), Vector{eltype(ξ.x)}(undef, N))
-    recompute_time_grid!(pcb, t_max, N)
-    construct_upper_bound!(pcb, ξ, flow, ∇U!)
-    return pcb
-end
-
 function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integer)
     resize!(pcb.t_grid, N + 1)
     resize!(pcb.Λ_vals, N)
@@ -60,24 +36,6 @@ function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integ
     resize!(pcb.d_vals, N + 1)
     pcb.t_grid .= range(0.0, t_max, N + 1)
 end
-
-function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return GradientProvider(θ, flow, gradient_strategy, cache)
-end
-function make_grad_U_func(state::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return make_grad_U_func(state.ξ.θ, flow, gradient_strategy, cache)
-end
-
-function make_hvp_func(flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function (x, θ)
-        dot(compute_gradient!(x, θ, gradient_strategy, flow, cache), θ)
-        # dot(compute_gradient_uncorrected!(x, θ, gradient_strategy, flow, cache), θ)
-    end
-end
-function make_hvp_func(::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return make_hvp_func(flow, gradient_strategy, cache)
-end
-
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::FL,
     grad_and_hess_or_grad_and_hvp, add_rate::Bool=true;
@@ -248,29 +206,6 @@ function _tangent_intersection_bound(tᵢ::Float64, tᵢ₊₁::Float64, yᵢ::F
     end
     return max(yᵢ, yᵢ₊₁, mᵢ)
 end
-
-function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool=true)
-    construct_upper_bound!(pcb, PDMPState(0.0, ξ), flow, ∇U!, use_hvp)
-end
-function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, flow::ContinuousDynamics, ∇U!::Function,
-    use_hvp::Bool=true)
-
-    use_hvp || error("Only HVP mode is supported")
-
-    g = similar(state.ξ.x)
-    out = similar(g)
-    ∇U = Base.Fix1(∇U!, out)
-    f = (x, v) -> dot(∇U(x), v)
-    prep = DI.prepare_gradient(f, DI.AutoMooncake(), g, DI.Constant(copy(g)))
-
-    # Avoid boxing prep by wrapping it in a struct or passing it explicitly
-    hvp = let prep = prep, g = g, f = f
-        (x, v) -> DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
-    end
-
-    return construct_upper_bound_grad_and_hess!(pcb, state, flow, GradHVPProvider(∇U, hvp))
-end
-
 
 function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound, u::Real=rand(rng, Exponential()), refresh_rate::Real=0.0)
 

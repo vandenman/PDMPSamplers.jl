@@ -396,7 +396,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
         )
-        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model.grad, cache)
+        grad_func = PDMPSamplers.GradientProvider(state.ξ.θ, flow, model.grad, cache)
         grad_and_hvp = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d_boundary), zeros(d_boundary), zeros(d_boundary))
         probe = PDMPSamplers.GridBoundaryProbeHandler(copy(state), flow, model, GridThinningStrategy)
 
@@ -427,7 +427,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
         )
-        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model.grad, cache)
+        grad_func = PDMPSamplers.GradientProvider(state.ξ.θ, flow, model.grad, cache)
         grad_and_hvp = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d_boundary), zeros(d_boundary), zeros(d_boundary))
         probe = PDMPSamplers.GridBoundaryProbeHandler(copy(state), flow, model, GridThinningStrategy)
 
