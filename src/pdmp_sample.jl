@@ -375,9 +375,6 @@ function _run_phase!(
 ) where {FL<:ContinuousDynamics}
     initialize!(criterion, state, trace_manager, stats)
     begin_trace_phase!(trace_manager, state, flow, phase)
-    if phase === :main && !(get_main_trace(trace_manager) isa StreamingPDMPTrace)
-        record_event!(trace_manager, state, flow, nothing, phase)
-    end
     _observe_phase_start(observer, phase, state, model_, flow, alg_, cache)
 
     phase_events_start = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)

@@ -1,4 +1,30 @@
 @testset "bounded typed streaming trace" begin
+    @testset "warmup summaries include the initial segment" begin
+        for flow in (BouncyParticle(1, 0.0), ZigZag(1))
+            mktempdir() do directory
+                state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+                dense = PDMPSamplers.TraceManager(state, flow, GridThinningStrategy(), 1.0)
+                streamed = PDMPSamplers.TraceManager(state, flow, GridThinningStrategy(),
+                    1.0, StreamingTraceStorage(directory))
+                for manager in (dense, streamed)
+                    PDMPSamplers.begin_trace_phase!(manager, state, flow, :warmup)
+                end
+                state.t[] = 1.0
+                state.ξ.x[1] = 1.0
+                state.ξ.θ[1] = -1.0
+                coordinate = flow isa ZigZag ? 1 : nothing
+                for manager in (dense, streamed)
+                    PDMPSamplers.record_event!(manager, state, flow, coordinate, :warmup, :reflect)
+                    PDMPSamplers.finish_trace_phase!(manager, state, flow, :warmup)
+                    trace = PDMPSamplers.get_warmup_trace(manager)
+                    @test mean(trace) ≈ [0.5]
+                    @test var(trace) ≈ [1/12]
+                    @test PDMPSamplers._adaptation_std(trace) ≈ [sqrt(1/12)]
+                end
+            end
+        end
+    end
+
     @testset "streaming variance is stable under translation" begin
         for origin in (0.0, 1e8)
             mktempdir() do directory

@@ -906,7 +906,10 @@ function begin_trace_phase!(trace::StreamingPDMPTrace,
     trace.online === nothing || _online_begin!(trace.online, state)
     return trace
 end
-begin_trace_phase!(trace::AbstractPDMPTrace, state, flow) = trace
+function begin_trace_phase!(trace::AbstractPDMPTrace, state, flow)
+    isempty(trace) && push_trace!(trace, state, flow, nothing)
+    return trace
+end
 
 function finish_trace_phase!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, flow::ContinuousDynamics)
@@ -1404,135 +1407,7 @@ function _integrate(trace::StreamingPDMPTrace, f, args...)
     return integral ./ (last_event_time(trace) - first_event_time(trace))
 end
 
-# Match the established segment-wise centred variance used by warmup metric
-# adaptation. The online raw moments remain the constant-memory output summary
-# and are intentionally not allowed to perturb the physical sampler.
-function _streaming_adaptation_integral(trace::StreamingPDMPTrace, statistic,
-        args...)
-    # The dense warmup trace begins at its first recorded event rather than at
-    # sampler initialization. Reproduce that established adaptation view while
-    # scanning chunks; the complete streaming output still retains t0.
-    initial = iterate(trace)
-    initial === nothing && error("empty streaming adaptation trace")
-    current = iterate(trace, initial[2])
-    current === nothing && error("streaming adaptation trace has no event")
-    start_time = current[2][1]
-    time0 = start_time
-    x0 = copy(current[2][2])
-    velocity0 = copy(current[2][3])
-    free0 = copy(current[2][4].free)
-    integral = zeros(length(x0))
-    following = iterate(trace, current[2])
-    following === nothing && error(
-        "streaming adaptation trace has no integrable segment")
-    while following !== nothing
-        time1 = following[2][1]
-        if time1 > time0
-            _integrate_segment!(integral, statistic, trace.flow,
-                x0, following[2][2], velocity0, following[2][3],
-                time0, time1, free0, args...)
-        end
-        time0 = time1
-        copyto!(x0, following[2][2])
-        copyto!(velocity0, following[2][3])
-        copyto!(free0, following[2][4].free)
-        current = following
-        following = iterate(trace, current[2])
-    end
-    return integral ./ (time0 - start_time)
-end
-
-function _adaptation_std(trace::StreamingPDMPTrace)
-    if isfactorized(trace.flow)
-        means = _streaming_factorized_adaptation_moment(trace, nothing)
-        variances = _streaming_factorized_adaptation_moment(trace, means)
-        return sqrt.(variances)
-    end
-    # Non-factorized flows adapt often (the Bouncy Particle sampler every unit
-    # of time). Rescanning the whole warmup stream from disk at every update
-    # made warmup cost quadratic in its length, so use the exact running
-    # integrals of x and x^2 that the trace accumulates as it records events.
-    # They cover the phase from its start rather than from its first event,
-    # which only changes the first segment of the warmup statistics.
-    trace.moments.total_time > 0 ||
-        return sqrt.(_streaming_adaptation_integral(trace, Statistics.var,
-            _streaming_adaptation_integral(trace, Statistics.mean)))
-    means = Statistics.mean(trace)
-    return sqrt.(Statistics.var(trace, means))
-end
-
-function _streaming_factorized_adaptation_moment(
-        trace::StreamingPDMPTrace, means::Union{Nothing,AbstractVector})
-    trace.finalized || flush_streaming_trace!(trace)
-    cursor = stream_cursor(trace)
-    d = length(cursor.x)
-    integral = zeros(d)
-    last_x = zeros(d)
-    last_velocity = zeros(d)
-    last_time = zeros(d)
-    cursor_time = trace.initial_state.t
-    start_time = NaN
-    end_time = NaN
-    first_event = true
-    for chunk_meta in trace.chunks
-        chunk = load_streaming_chunk(chunk_meta)
-        @inbounds for event in eachindex(chunk.times)
-            event_time = chunk.times[event]
-            stream_move!(cursor.x, cursor.velocity, cursor.free,
-                event_time - cursor_time, trace.flow)
-            stream_apply_event!(cursor, chunk, event)
-            cursor_time = event_time
-            if first_event
-                copyto!(last_x, cursor.x)
-                copyto!(last_velocity, cursor.velocity)
-                fill!(last_time, event_time)
-                start_time = event_time
-                end_time = event_time
-                first_event = false
-                continue
-            end
-            kind = chunk.kinds[event]
-            coordinate = Int(chunk.coordinates[event])
-            touched = kind in (STREAM_EVENT_REFLECT_FULL,
-                STREAM_EVENT_REFRESH, STREAM_EVENT_DYNAMICS) ? (1:d) :
-                (coordinate:coordinate)
-            for j in touched
-                elapsed = event_time - last_time[j]
-                if means === nothing
-                    integral[j] += last_x[j] * elapsed +
-                        last_velocity[j] * elapsed^2 / 2
-                else
-                    y = last_x[j] - means[j]
-                    velocity = last_velocity[j]
-                    integral[j] += elapsed * (y^2 + y * velocity * elapsed +
-                        velocity^2 * elapsed^2 / 3)
-                end
-                last_x[j] = cursor.x[j]
-                last_velocity[j] = cursor.velocity[j]
-                last_time[j] = event_time
-            end
-            end_time = event_time
-        end
-    end
-    first_event && error("streaming adaptation trace has no event")
-    total_time = end_time - start_time
-    total_time > 0 || error("streaming adaptation trace has no elapsed time")
-    @inbounds for j in 1:d
-        elapsed = end_time - last_time[j]
-        if elapsed > 0
-            if means === nothing
-                integral[j] += last_x[j] * elapsed +
-                    last_velocity[j] * elapsed^2 / 2
-            else
-                y = last_x[j] - means[j]
-                velocity = last_velocity[j]
-                integral[j] += elapsed * (y^2 + y * velocity * elapsed +
-                    velocity^2 * elapsed^2 / 3)
-            end
-        end
-    end
-    return integral ./ total_time
-end
+_adaptation_std(trace::StreamingPDMPTrace) = Statistics.std(trace)
 
 function _integrate!(out::AbstractVector, trace::StreamingPDMPTrace, f,
         args...)
