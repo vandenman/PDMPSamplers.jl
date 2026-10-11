@@ -3,13 +3,6 @@ correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, ::
 
 rand_refresh_time(rng::Random.AbstractRNG, flow::ContinuousDynamics) = _ispositive(refresh_rate(flow)) ? rand(rng, Exponential(inv(refresh_rate(flow)))) : oftype(refresh_rate(flow), Inf)
 
-"""
-    initialize_velocity(rng, flow, d) -> Vector{Float64}
-
-Draw an initial velocity of dimension `d` from the invariant velocity
-distribution of `flow`, as `pdmp_sample` does when none is given.
-"""
-
 # Component-wise bounds not applicable
 function ab_i(i::Integer, ξ::SkeletonPoint, c::AbstractVector, flow::ContinuousDynamics, cache)
     error("Component-wise bounds not supported for type $(typeof(flow))")

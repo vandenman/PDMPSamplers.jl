@@ -13,6 +13,12 @@ ZigZag(Γ, μ, σ=(Vector(diag(Γ))).^(-0.5); λref=0.0, ρ=0.0) = ZigZag(Γ, μ
 ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
 
 refresh_rate(::ZigZag) = 0.0
+"""
+    initialize_velocity(rng, flow, d) -> Vector{Float64}
+
+Draw an initial velocity of dimension `d` from the invariant velocity
+distribution of `flow`, as `pdmp_sample` does when none is given.
+"""
 initialize_velocity(rng::Random.AbstractRNG, ::ZigZag, d::Integer) = rand(rng, (-1., 1.), d)
 refresh_velocity!(::Random.AbstractRNG, ::SkeletonPoint, ::ZigZag) = nothing
 refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
