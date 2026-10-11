@@ -102,34 +102,6 @@ end
         @test counts ./ accepted ≈ expected atol=0.045
     end
 
-    @testset "product ZigZag flux proposals" begin
-        for (seed, flow, scales) in (
-                (1, ZigZag(2), [1.0, 1.0]),
-                (2, PreconditionedZigZag(2; scale=[1.7, 0.6]), [1.7, 0.6]))
-            state = StickyPDMPState(0.0,
-                SkeletonPoint([0.0, 0.3], zeros(2)),
-                BitVector([false, true]))
-            rng = Random.Xoshiro(0x91a0 + seed)
-            positive = zeros(Int, 2)
-            n = 5_000
-            all_accepted = true
-            all_scales = true
-            for _ in 1:n
-                all_accepted &= PDMPSamplers.propose_boundary_velocity!(
-                    rng, state, flow, 1)
-                all_scales &= abs.(state.ξ.θ) ≈ scales
-                positive .+= state.ξ.θ .> 0
-                state.ξ.θ[1] = 0.0
-            end
-            @test all_accepted
-            @test all_scales
-            # This test exercises the legacy flux proposal directly. The
-            # velocity-preserving sampler path is covered separately.
-            @test PDMPSamplers.unstick_rate_constant(flow, 1) == scales[1]
-            @test positive ./ n ≈ fill(0.5, 2) atol=0.025
-        end
-    end
-
     @testset "callable sticky rates are validated when frozen" begin
         model = PDMPModel(1, FullGradient((out, x) -> fill!(out, 0.0)))
         initial = SkeletonPoint([0.5], [-1.0])

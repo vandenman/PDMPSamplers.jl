@@ -1351,9 +1351,6 @@ end
         @test PDMPSamplers.rate(clock, precond_zz, all_inactive_state, 0.0, trues(d)) ≈ pdf(Normal(), 0.0) * 2.0
         @test PDMPSamplers.rate(linear_clock, precond_zz, all_inactive_state, 0.0, trues(d)) ≈ PDMPSamplers.rate(clock, precond_zz, all_inactive_state, 0.0, trues(d))
         @test PDMPSamplers.sample_time(MersenneTwister(138), linear_clock, precond_zz, all_inactive_state, 1.0, trues(d)) isa Real
-        precond_zz_state = StickyPDMPState(Ref(0.0), SkeletonPoint([0.0, 0.5], [0.0, 0.1]), BitVector([false, true]))
-        @test PDMPSamplers.propose_boundary_velocity!(MersenneTwister(131), precond_zz_state, precond_zz, 1)
-        @test abs(precond_zz_state.ξ.θ[1]) == 2.0
         _, _, precond_zz_internal, _, _ = PDMPSamplers.initialize_state(MersenneTwister(127), precond_zz, model, alg, 0.0, ξ)
         @test precond_zz_internal isa PDMPSamplers.AggregateStickyLoopState
 

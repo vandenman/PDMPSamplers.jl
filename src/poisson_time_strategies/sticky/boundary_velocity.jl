@@ -447,28 +447,6 @@ end
 _boundary_proposal_clock_constant(flow::DensePreconditionedZigZag,
     state::StickyPDMPState, i::Integer) = first(_dense_boundary_row_bound(flow, state, i))
 
-function _propose_product_boundary!(rng::Random.AbstractRNG,
-        state::StickyPDMPState, flow, i::Integer, scale)
-    scratch = _prepare_product_stratum!(state, i)
-    fill!(state.ξ.θ, 0.0)
-    @inbounds for a in 1:scratch.active_count
-        j = scratch.active[a]
-        state.ξ.θ[j] = rand(rng, Bool) ? scale(j) : -scale(j)
-    end
-    return true
-end
-
-propose_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
-    flow::ZigZag, i::Integer) =
-    _propose_product_boundary!(rng, state, flow, i, _ -> 1.0)
-propose_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
-    flow::PreconditionedDynamics{IdentityPreconditioner,<:ZigZag}, i::Integer) =
-    _propose_product_boundary!(rng, state, flow, i, _ -> 1.0)
-propose_boundary_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
-    flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:ZigZag}, i::Integer) =
-    _propose_product_boundary!(rng, state, flow, i,
-        j -> abs(Float64(flow.metric.scale[j])))
-
 function propose_boundary_velocity!(rng::Random.AbstractRNG,
         state::StickyPDMPState, flow::DensePreconditionedZigZag, i::Integer)
     scratch = _draw_dense_zigzag!(rng, state, flow, i; proposal=true)

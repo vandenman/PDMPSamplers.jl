@@ -52,73 +52,29 @@ end
 """
     AggregateClockDiagnostics
 
-Mutable counters for residual-envelope aggregate clocks. `residual_area` is
-reserved for certified proposal-envelope implementations; exact fallback
-sampling leaves residual and envelope counters at zero and increments
-`fallbacks`.
+Proposal and rate-evaluation counters for harmonic log-linear aggregate clocks.
+
 """
 mutable struct AggregateClockDiagnostics
     enabled::Bool
     proposals::Int
     accepted::Int
     rejected::Int
-    fallbacks::Int
-    residual_area::Float64
-    envelope_hazard::Float64
     max_envelope_ratio::Float64
-    max_residual::Float64
-    min_envelope::Float64
-    rate_evaluations::Int
-    last_cells::Int
-    last_fallback_provider::Symbol
-    last_fallback_dynamics::Symbol
     aggregate_calls::Int
-    fallback_calls::Int
     point_rate_evaluations::Int
-    quadrature_evaluations::Int
-    cumulative_hazard_evaluations::Int
-    root_iterations::Int
-    frozen_coordinates::Int
-    stickable_coordinates::Int
-    state_movement_ns::UInt64
-    boundary_weight_ns::UInt64
-    quadrature_ns::UInt64
-    root_inversion_ns::UInt64
-    allocations::Int
 end
 
-AggregateClockDiagnostics(enabled::Bool=false) = AggregateClockDiagnostics(
-    enabled, 0, 0, 0, 0, 0.0, 0.0, 1.0, 0.0, Inf, 0, 0, :none, :none,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    UInt64(0), UInt64(0), UInt64(0), UInt64(0), 0)
+AggregateClockDiagnostics(enabled::Bool=false) =
+    AggregateClockDiagnostics(enabled, 0, 0, 0, 1.0, 0, 0)
 
 function reset_thinning_diagnostics!(diagnostics::AggregateClockDiagnostics)
     diagnostics.proposals = 0
     diagnostics.accepted = 0
     diagnostics.rejected = 0
-    diagnostics.fallbacks = 0
-    diagnostics.residual_area = 0.0
-    diagnostics.envelope_hazard = 0.0
     diagnostics.max_envelope_ratio = 1.0
-    diagnostics.max_residual = 0.0
-    diagnostics.min_envelope = Inf
-    diagnostics.rate_evaluations = 0
-    diagnostics.last_cells = 0
-    diagnostics.last_fallback_provider = :none
-    diagnostics.last_fallback_dynamics = :none
     diagnostics.aggregate_calls = 0
-    diagnostics.fallback_calls = 0
     diagnostics.point_rate_evaluations = 0
-    diagnostics.quadrature_evaluations = 0
-    diagnostics.cumulative_hazard_evaluations = 0
-    diagnostics.root_iterations = 0
-    diagnostics.frozen_coordinates = 0
-    diagnostics.stickable_coordinates = 0
-    diagnostics.state_movement_ns = 0
-    diagnostics.boundary_weight_ns = 0
-    diagnostics.quadrature_ns = 0
-    diagnostics.root_inversion_ns = 0
-    diagnostics.allocations = 0
     return diagnostics
 end
 
