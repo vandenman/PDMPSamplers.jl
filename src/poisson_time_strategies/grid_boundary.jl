@@ -78,15 +78,7 @@ function _throw_grid_boundary_error(current_state::AbstractPDMPState, original_s
     algorithm_type::Type=GridThinningStrategy
 )
     ctx = _grid_boundary_context(original_state, flow, err, t_valid, t_invalid, algorithm_type)
-    if _support_boundary_probe_is_valid(model, ctx, t_invalid)
-        if err isa ErrorException && occursin("Outside support", err.msg)
-            throw(_ProbeFailureException(ctx))
-        end
-        if err isa ErrorException
-            throw(_ProbeFailureException(ctx))
-        end
-        throw(MethodError(_throw_grid_boundary_error, (current_state, original_state, flow, model, err)))
-    end
+    _support_boundary_probe_is_valid(model, ctx, t_invalid) && throw(err)
     throw(_ProbeFailureException(ctx))
 end
 
