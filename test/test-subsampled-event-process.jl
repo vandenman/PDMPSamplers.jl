@@ -807,7 +807,8 @@ end
                 ThinningStrategy(GlobalBounds(100.0, 1)), 0.0, 12.0, 2.0;
                 seed=9300 + seed, progress=false))
             @test length(trace) > 1
-            @test stats.residual_oracle_calls > 0
+            # A short adapted run can have refreshes but no residual candidates.
+            @test stats.residual_oracle_calls >= stats.final_thinning_acceptances
         end
 
         sticky_trace, sticky_stats = only(pdmp_sample(
