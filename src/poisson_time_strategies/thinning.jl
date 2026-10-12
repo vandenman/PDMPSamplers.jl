@@ -34,7 +34,7 @@ _validate_unbounded_linear_scales(::Any) = throw(ArgumentError(
     "component scales on an unbounded linear trajectory"))
 _validate_unbounded_linear_scales(::CertifiedAffineComponentScales) = nothing
 function _validate_unbounded_linear_scales(provider::TrajectoryComponentScales)
-    any(_ispositive, provider.growth_rates) && throw(ArgumentError(
+    any(ispositive, provider.growth_rates) && throw(ArgumentError(
         "SubsampledControlVariate ThinningStrategy cannot dominate positive " *
         "trajectory growth on an unbounded linear path with its affine clock; " *
         "use GridThinningStrategy"))
