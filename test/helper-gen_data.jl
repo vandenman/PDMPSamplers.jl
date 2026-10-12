@@ -914,7 +914,9 @@ function test_approximation(trace, D::SpikeAndSlabDist; elapsed::Union{Real,Noth
 
     est_mean = mean(trace)
     mean_rtol = 0.15 + 3.0 * mc
-    mean_atol = 0.15 + 3.0 * mc
+    # Per-coordinate tolerance, scaled by sqrt(d) for the norm-based vector
+    # comparison, as for the inclusion probabilities above.
+    mean_atol = (0.15 + 3.0 * mc) * sqrt(d)
 
     true_full_mean = true_incl_probs .* mean(D.slab_dist)
     @test isapprox(est_mean[1:d], true_full_mean; rtol=mean_rtol, atol=mean_atol)
