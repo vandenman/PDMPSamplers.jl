@@ -1104,13 +1104,10 @@ end
         for flow in flows
             @test PDMPSamplers.rate(exch_clock, flow, state, 0.0,
                 can_stick) ≈ sum(exch_terms) rtol=1e-12
-            # Preconditioned BPS delegates labels to the exact fallback; both
-            # paths leave the log weights they sampled from in a cache.
+            # Both flows leave the sampled weights in the common clock cache.
             PDMPSamplers.sample_label(MersenneTwister(5), exch_clock, flow,
                 state, can_stick)
-            label_cache = flow.dynamics isa BouncyParticle ?
-                exch_clock.fallback.cache : exch_clock.cache
-            @test normalized(label_cache.log_weights) ≈
+            @test normalized(exch_clock.cache.log_weights) ≈
                 exch_terms ./ sum(exch_terms) rtol=1e-12
         end
     end

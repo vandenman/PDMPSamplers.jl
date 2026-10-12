@@ -344,37 +344,6 @@ function _exchangeable_log_total_weight(
     return max_logw + log(total)
 end
 
-function _exchangeable_log_total_weight(
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
-        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-        active::BitVector, stickable::BitVector, k::Integer,
-        state::StickyPDMPState)
-    indices = beta_indices(clock.slab_provider)
-    max_logw = -Inf
-    @inbounds for j in eachindex(indices, active, stickable)
-        if stickable[j] && !active[j]
-            logw = _log_model_add_odds_with_count(
-                clock.model_prior, active, j, k) +
-                log(_boundary_proposal_clock_constant(flow, state, indices[j]))
-            max_logw = max(max_logw, logw)
-        end
-    end
-    max_logw in (-Inf, Inf) && return max_logw
-    total = 0.0
-    @inbounds for j in eachindex(indices, active, stickable)
-        if stickable[j] && !active[j]
-            logw = _log_model_add_odds_with_count(
-                clock.model_prior, active, j, k) +
-                log(_boundary_proposal_clock_constant(flow, state, indices[j]))
-            total += isfinite(logw) ? exp(logw - max_logw) : 0.0
-        end
-    end
-    return max_logw + log(total)
-end
-
-const _ExchangeablePreconditionedBPS =
-    PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle}
-
 function _exchangeable_rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     @assert τ >= 0
     active, stickable, k, nU, a, b, s = _exchangeable_linear_params(clock, state, can_stick)
@@ -387,9 +356,6 @@ function _exchangeable_rate(clock::LinearGaussianAggregateClock{<:AbstractExchan
 end
 
 rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
-    _exchangeable_rate(clock, flow, state, τ, can_stick)
-
-rate(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, τ::Real, can_stick::BitVector) =
     _exchangeable_rate(clock, flow, state, τ, can_stick)
 
 function _exchangeable_cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector)
@@ -405,9 +371,6 @@ function _exchangeable_cumulative_hazard(clock::LinearGaussianAggregateClock{<:A
 end
 
 cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
-    _exchangeable_cumulative_hazard(clock, flow, state, t0, t1, can_stick)
-
-cumulative_hazard(clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, t0::Real, t1::Real, can_stick::BitVector) =
     _exchangeable_cumulative_hazard(clock, flow, state, t0, t1, can_stick)
 
 function _exchangeable_gaussian_line_total_hazard(a::Real, b::Real, s::Real, logW::Real)
@@ -453,9 +416,6 @@ end
 sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
     _exchangeable_sample_time(rng, clock, flow, state, horizon, can_stick)
 
-sample_time(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_ExchangeablePreconditionedBPS, state::StickyPDMPState, horizon::Real, can_stick::BitVector) =
-    _exchangeable_sample_time(rng, clock, flow, state, horizon, can_stick)
-
 function _sample_velocity_weighted_model_prior_label(
         rng::Random.AbstractRNG, indices::AbstractVector{Int},
         prior::AbstractModelPrior, active::BitVector, stickable::BitVector,
@@ -484,42 +444,8 @@ function sample_label(rng::Random.AbstractRNG,
         clock.cache.log_weights)
 end
 
-function sample_label(rng::Random.AbstractRNG,
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:BetaBernoulliModelPrior},
-        flow::_VelocityPreservingLinearFlow, state::StickyPDMPState,
-        can_stick::BitVector)
-    active, stickable, _, nU, _, _, _ = _exchangeable_linear_params(clock, state, can_stick)
-    return _sample_velocity_weighted_model_prior_label(rng,
-        beta_indices(clock.slab_provider), clock.model_prior, active, stickable,
-        count(active), flow, state, clock.cache.log_weights)
-end
-
 function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab}, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, τ::Real, can_stick::BitVector)
     return sample_label(rng, clock, flow, state, can_stick)
-end
-
-# Diagonal BPS preconditioning gives inactive coordinates different boundary
-# velocity constants.  Waiting times use their weighted sum above.  Label
-# selection reuses the exact O(p) fallback to retain those individual weights.
-function sample_label(rng::Random.AbstractRNG,
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
-        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-        state::StickyPDMPState, can_stick::BitVector)
-    return sample_label(rng, clock.fallback, flow, state, can_stick)
-end
-
-function sample_label(rng::Random.AbstractRNG,
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab,<:BetaBernoulliModelPrior},
-        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-        state::StickyPDMPState, can_stick::BitVector)
-    return sample_label(rng, clock.fallback, flow, state, can_stick)
-end
-
-function sample_label(rng::Random.AbstractRNG,
-        clock::LinearGaussianAggregateClock{<:AbstractExchangeableGaussianSlab},
-        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
-        state::StickyPDMPState, τ::Real, can_stick::BitVector)
-    return sample_label(rng, clock.fallback, flow, state, τ, can_stick)
 end
 
 function sample_label(rng::Random.AbstractRNG, clock::LinearGaussianAggregateClock, flow::_VelocityPreservingLinearFlow, state::StickyPDMPState, can_stick::BitVector)

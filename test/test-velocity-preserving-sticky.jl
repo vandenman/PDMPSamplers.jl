@@ -302,3 +302,27 @@ end
         end
     end
 end
+@testset "exchangeable diagonal BPS label probabilities match summed clock" begin
+    flow = PreconditionedDynamics(DiagonalPreconditioner([0.5, 2.0, 1.5, 3.0]),
+        BouncyParticle(4, 0.0))
+    provider = ExchangeableGaussianSlab(collect(1:4), 0.2, 1.0, 0.3)
+    prior = BetaBernoulliModelPrior(4, 1.0, 4.0)
+    clock = default_aggregate_unstick_clock(provider, prior, flow)
+    state = StickyPDMPState(0.0, SkeletonPoint([0.0, 0.7, 0.0, 0.0],
+        [0.0, -0.4, 0.0, 0.0]), BitVector([false, true, false, false]),
+        [1.0, 0.0, -3.0, 2.0])
+    can_stick = trues(4)
+    for elapsed in (0.0, 0.37)
+        current = PDMPSamplers._clock_state_at(state, flow, elapsed)
+        active, stickable, k, _, _, _, _ =
+            PDMPSamplers._exchangeable_linear_params(clock, current, can_stick)
+        common = zeros(4)
+        PDMPSamplers._sample_velocity_weighted_model_prior_label(Random.Xoshiro(7),
+            collect(1:4), prior, active, stickable, k, flow, current, common)
+        fallback = PDMPSamplers._boundary_logweights_with_velocity!(zeros(4),
+            clock.fallback, flow, current, can_stick)
+        probabilities(w) = exp.(w .- LogExpFunctions.logsumexp(w))
+        @test probabilities(common) ≈ probabilities(fallback) rtol=1e-14
+        @test probabilities(common) ≈ [1/6, 0, 3/6, 2/6] rtol=1e-14
+    end
+end
