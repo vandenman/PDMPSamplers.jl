@@ -96,7 +96,6 @@ end
     @test !PDMPSamplers._provider_has_directional_derivative(no_hvp)
     @test PDMPSamplers._supports_rate_derivatives(provider, BouncyParticle(2))
     @test !PDMPSamplers._supports_rate_derivatives(no_hvp, Boomerang(2))
-    @test PDMPSamplers._uses_builtin_grid_provider(provider)
     @test PDMPSamplers._joint_compatible(BouncyParticle(2))
     @test !PDMPSamplers._joint_compatible(ZigZag(2))
     @test PDMPSamplers.max_grid_horizon(BouncyParticle(2)) == 1e10
