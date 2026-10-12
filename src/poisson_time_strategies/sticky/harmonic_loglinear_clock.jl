@@ -92,7 +92,7 @@ end
 
 @inline function _prepare_harmonic_boundary_constants!(
         clock::HarmonicLogLinearAggregateClock,
-        flow::PreconditionedDynamics{<:DiagonalPreconditioner,<:AnyBoomerang},
+        flow::_CertifiedHarmonicBoomerang,
         state::StickyPDMPState)
     workspace = clock.workspace
     # Under the velocity-preserving sticky kernel the release constant is the
@@ -114,22 +114,6 @@ end
     return workspace.boundary_constants
 end
 
-@inline function _prepare_harmonic_boundary_constants!(
-        clock::HarmonicLogLinearAggregateClock, flow::AnyBoomerang,
-        state::StickyPDMPState)
-    workspace = clock.workspace
-    indices = beta_indices(clock.slab_provider)
-    @inbounds for j in eachindex(indices)
-        workspace.boundary_constants[j] =
-            _checked_boomerang_boundary_constant(
-                _boundary_proposal_clock_constant(
-                    flow, state, indices[j]), indices[j])
-        workspace.log_boundary_constants[j] =
-            iszero(workspace.boundary_constants[j]) ? -Inf :
-            log(workspace.boundary_constants[j]) - _LOG_SQRT_2PI
-    end
-    return workspace.boundary_constants
-end
 
 function _harmonic_loglinear_cell_upper!(
         clock::HarmonicLogLinearAggregateClock,

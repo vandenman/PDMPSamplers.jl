@@ -930,18 +930,17 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov), ::Un
 end
 
 # --- Boomerang integration methods ---
-# For the immutable Boomerang (calibrated, μ_ref = μ_true), use the exact sinusoidal
-# integral which is precise and converges correctly when μ_ref = μ_true.
+# Exact harmonic integral for the resolved flow stored with the trace.
 # Trajectory: x_i(s) = Δ_i cos(s) + θ_i sin(s) + μ_i, where Δ_i = x0_i - μ_i
 # ∫₀^Δt x_i(s) ds = Δ_i sin(Δt) + θ_i (1 - cos(Δt)) + μ_i Δt
-function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+function _integrate_segment(::typeof(Statistics.mean), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
     s, c = sincos(dt)
     μ = flow.μ
     return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
 end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::Boomerang, x0, x1, θ0, θ1, t0, t1)
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1)
     dt = t1 - t0
     s, c = sincos(dt)
     μ = flow.μ
@@ -949,26 +948,7 @@ function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flo
     return buf
 end
 
-# MutableBoomerang has the same harmonic path as Boomerang between events.
-# Its reference mean may be adapted during warmup, but a retained trace stores
-# the resolved flow that generated its segments.  Consequently the exact
-# sinusoidal integral is required here as well; trapezoidal integration is a
-# discretisation error and can disagree with a materialised trace even when the
-# trace records every event and its terminal endpoint.
-function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
-    dt = t1 - t0
-    s, c = sincos(dt)
-    μ = flow.μ
-    return @. (x0 - μ) * s + θ0 * (1 - c) + μ * dt
-end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::MutableBoomerang, x0, x1, θ0, θ1, t0, t1)
-    dt = t1 - t0
-    s, c = sincos(dt)
-    μ = flow.μ
-    @. buf += (x0 - μ) * s + θ0 * (1 - c) + μ * dt
-    return buf
-end
 
 function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang, x0, x1, θ0, θ1, t0, t1, μ_est)
     dt = t1 - t0
@@ -1117,14 +1097,14 @@ function _integrate_segment!(buf::AbstractMatrix, ::typeof(Statistics.cov),
     return buf
 end
 
-function _integrate_segment(::typeof(Statistics.mean), flow::Boomerang,
+function _integrate_segment(::typeof(Statistics.mean), flow::AnyBoomerang,
                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
     result = similar(x0)
     fill!(result, zero(eltype(result)))
     return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
 end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::Boomerang,
+function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::AnyBoomerang,
                              x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
     dt = t1 - t0
     s, c = sincos(dt)
@@ -1136,24 +1116,7 @@ function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flo
     return buf
 end
 
-function _integrate_segment(::typeof(Statistics.mean), flow::MutableBoomerang,
-                            x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
-    result = similar(x0)
-    fill!(result, zero(eltype(result)))
-    return _integrate_segment!(result, Statistics.mean, flow, x0, x1, θ0, θ1, t0, t1, free)
-end
 
-function _integrate_segment!(buf::AbstractVector, ::typeof(Statistics.mean), flow::MutableBoomerang,
-                             x0, x1, θ0, θ1, t0, t1, free::AbstractVector{Bool})
-    dt = t1 - t0
-    s, c = sincos(dt)
-    @inbounds for i in eachindex(x0, free)
-        buf[i] += free[i] ?
-            (x0[i] - flow.μ[i]) * s + θ0[i] * (1 - c) + flow.μ[i] * dt :
-            x0[i] * dt
-    end
-    return buf
-end
 
 function _integrate_segment(::typeof(Statistics.var), flow::AnyBoomerang,
                             x0, x1, θ0, θ1, t0, t1,
