@@ -37,11 +37,15 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         modes = _grid_bound_modes(alg, state, flow, grad_and_hvp, stats)
         had_cached_gradient = alg.has_cached_gradient[]
-        if modes.use_single_pass_signed || modes.use_value_only
+        if modes.use_direct
+            _invalidate_cached_gradient!(alg)
+            cached_gradient = nothing
+            cached_y0 = cached_d0 = NaN
+        elseif modes.use_single_pass_signed || modes.use_value_only
             alg.has_cached_gradient[] = false
             cached_gradient = had_cached_gradient ? alg.cached_gradient : nothing
             cached_y0 = cached_d0 = NaN
-        elseif had_cached_gradient && !modes.use_constant_batched_signed
+        elseif had_cached_gradient
             cached_y0, cached_d0 = _get_rate_and_deriv_or_throw(
                 probe_failure_handler, state_, flow, grad_and_hvp, false, alg.cached_gradient;
                 t_valid=0.0, t_invalid=0.0)
@@ -50,9 +54,6 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         else
             cached_y0, cached_d0 = NaN, NaN
             cached_gradient = nothing
-            if modes.use_constant_batched_signed
-                _invalidate_cached_gradient!(alg)
-            end
         end
         n_cells_bounded, built_area = _build_grid_bound_prefix!(
             pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
@@ -150,9 +151,6 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 effective_horizon, horizon_event =
                     _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
                 modes = _grid_bound_modes(alg, state, flow, grad_and_hvp, stats)
-                if modes.use_constant_batched_signed
-                    alg.has_cached_gradient[] = false
-                end
                 n_cells_bounded, built_area = _build_grid_bound_prefix!(
                     pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
                     cumulative_exp, probe_failure_handler, modes;

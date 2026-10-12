@@ -32,6 +32,25 @@ function _direct_instrumentation_fixture()
     return PDMPModel(1, cv), BouncyParticle(1, 0.5)
 end
 
+@testset "direct certificates discard cached gradients without derivatives" begin
+    model = PDMPModel(1, FullGradient(_DirectInstrumentedGradient()),
+        (out, x, v) -> error("direct-only provider has no derivatives"))
+    flow = BouncyParticle(1, 0.0)
+    state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
+        Random.Xoshiro(1), flow, model,
+        GridThinningStrategy(N=2, t_max=1.0, curvature_backend=:exact),
+        0.0, SkeletonPoint([0.4], [1.0]);
+        statistic_counter=PDMPSamplers.DevelStatisticCounter)
+    alg.has_cached_gradient[] = true
+    fill!(alg.cached_gradient, 0.0)
+    time, event, _ = PDMPSamplers.next_event_time(
+        Random.Xoshiro(2), model_, flow, alg, state, cache, stats, 0.5, false)
+    @test event === :horizon_hit
+    @test time == 0.5
+    @test !alg.has_cached_gradient[]
+    @test stats.grid_endpoint_hessian_calls == 0
+end
+
 @testset "statistics preserve direct-certificate event dispatch" begin
     model_a, flow_a = _direct_instrumentation_fixture()
     model_b, flow_b = _direct_instrumentation_fixture()

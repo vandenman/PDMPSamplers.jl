@@ -1299,15 +1299,15 @@ end
         @test stats.grid_builds == 1
     end
 
-    @testset "constant BPS grid uses batched rate derivatives when available" begin
+    @testset "signed BPS grid uses batched rate derivatives when available" begin
         flow = BouncyParticle(1, 0.0)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
         pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 0.5, 1.0], zeros(2))
         stats = PDMPSamplers.DevelStatisticCounter()
         provider = TestGridRateDerivatives(Ref(0))
 
-        n = PDMPSamplers.construct_upper_bound_grad_and_hess!(
-            pcb, state, flow, provider, false;
+        n = PDMPSamplers.construct_rate_bound_grid!(
+            pcb, state, flow, provider, nothing;
             stats,
         )
 
@@ -1317,12 +1317,12 @@ end
         @test stats.grid_endpoint_evaluations == 0
         @test stats.grid_endpoint_gradient_calls == 0
         @test stats.grid_endpoint_hessian_calls == 0
-        @test pcb.y_vals[1:3] ≈ [0.0, 0.0, 0.5]
-        @test pcb.d_vals[1:3] ≈ [0.0, 0.0, 1.0]
+        @test pcb.y_vals[1:3] ≈ [-0.5, 0.0, 0.5]
+        @test pcb.d_vals[1:3] ≈ [1.0, 1.0, 1.0]
         @test pcb.Λ_vals ≈ [0.0, 0.5]
     end
 
-    @testset "append-only constant budget extension matches full construction" begin
+    @testset "append-only signed budget extension matches full construction" begin
         flow = BouncyParticle(1, 0.0)
         state = PDMPState(0.0, SkeletonPoint([-0.5], [1.0]))
         provider_full = TestGridRateDerivatives(Ref(0))
@@ -1330,19 +1330,19 @@ end
         t_grid = collect(range(0.0, 1.0, 11))
 
         full = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
-        n_full = PDMPSamplers.construct_upper_bound_grad_and_hess!(
-            full, state, flow, provider_full, false; early_stop_threshold=0.08)
+        n_full = PDMPSamplers.construct_rate_bound_grid!(
+            full, state, flow, provider_full, nothing; early_stop_threshold=0.08)
 
         appended = PDMPSamplers.PiecewiseConstantBound(t_grid, zeros(10))
-        n_first = PDMPSamplers.construct_upper_bound_grad_and_hess!(
-            appended, state, flow, provider_append, false; early_stop_threshold=0.01)
+        n_first = PDMPSamplers.construct_rate_bound_grid!(
+            appended, state, flow, provider_append, nothing; early_stop_threshold=0.01)
         prefix_Λ = copy(appended.Λ_vals[1:n_first])
         prefix_y = copy(appended.y_vals[1:(n_first + 1)])
         prefix_d = copy(appended.d_vals[1:(n_first + 1)])
         built_area = PDMPSamplers._piecewise_constant_area(appended)
 
-        n_appended = PDMPSamplers.construct_upper_bound_grad_and_hess!(
-            appended, state, flow, provider_append, false;
+        n_appended = PDMPSamplers.construct_rate_bound_grid!(
+            appended, state, flow, provider_append, nothing;
             early_stop_threshold=0.08,
             start_cell=n_first + 1,
             initial_integral=built_area)

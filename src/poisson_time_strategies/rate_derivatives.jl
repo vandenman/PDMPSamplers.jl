@@ -113,9 +113,6 @@ function _can_use_signed_grid(state::AbstractPDMPState, flow::ContinuousDynamics
     return _supports_rate_derivatives(provider, flow)
 end
 
-_uses_builtin_grid_provider(_) = false
-_uses_builtin_grid_provider(::AbstractRateDerivativeProvider) = true
-
 function _fill_rate_derivatives!(values::AbstractMatrix, derivatives::AbstractMatrix, provider, state, flow, t_grid, n_points)
     return rate_derivatives_for_grid!(values, derivatives, provider, state, flow, t_grid, n_points)
 end

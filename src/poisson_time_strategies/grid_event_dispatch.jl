@@ -95,7 +95,6 @@ function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
         direct_first,
         use_value_only,
         use_single_pass_signed,
-        use_constant_batched_signed=!use_single_pass_signed && _supports_constant_grid_rate_derivatives(flow, provider),
     )
 end
 
