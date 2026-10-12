@@ -497,39 +497,6 @@ function boundary_logweights!(
     return out
 end
 
-"""
-    aggregate_lograte(provider, model_prior, log_Cv, x, active_beta, stickable_beta)
-
-Return the log aggregate unstick rate, equal to `log_Cv` plus the log-sum of
-inactive stickable boundary weights.
-"""
-function aggregate_lograte(
-    provider::AbstractSlabPrior,
-    model_prior::AbstractModelPrior,
-    log_Cv::Real,
-    x::AbstractVector,
-    active_beta::BitVector,
-    stickable_beta::BitVector,
-)
-    weights = Vector{Float64}(undef, length(beta_indices(provider)))
-    return aggregate_lograte!(weights, provider, model_prior, log_Cv, x, active_beta, stickable_beta)
-end
-
-function aggregate_lograte!(
-    weights::AbstractVector{Float64},
-    provider::AbstractSlabPrior,
-    model_prior::AbstractModelPrior,
-    log_Cv::Real,
-    x::AbstractVector,
-    active_beta::BitVector,
-    stickable_beta::BitVector,
-)
-    boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
-    lse = LogExpFunctions.logsumexp(weights)
-    lse == -Inf && return -Inf
-    return Float64(log_Cv) + lse
-end
-
 function _sample_from_logweights(rng::Random.AbstractRNG, indices::AbstractVector{Int}, logweights::AbstractVector{Float64})
     maxv = maximum(logweights)
     maxv == -Inf && throw(ArgumentError("cannot sample an unstick label because all inactive stickable rates are zero"))
@@ -558,23 +525,4 @@ function _sample_from_logweights(rng::Random.AbstractRNG, indices::AbstractVecto
         end
     end
     return indices[last_candidate]
-end
-
-"""
-    sample_unstick_label(rng, provider, model_prior, x, active_beta, stickable_beta)
-
-Sample a full-state coordinate label from the inactive stickable beta
-coordinates, with probabilities proportional to the boundary weights.
-"""
-function sample_unstick_label(
-    rng::Random.AbstractRNG,
-    provider::AbstractSlabPrior,
-    model_prior::AbstractModelPrior,
-    x::AbstractVector,
-    active_beta::BitVector,
-    stickable_beta::BitVector,
-)
-    weights = Vector{Float64}(undef, length(beta_indices(provider)))
-    boundary_logweights!(weights, provider, model_prior, x, active_beta, stickable_beta)
-    return _sample_from_logweights(rng, beta_indices(provider), weights)
 end

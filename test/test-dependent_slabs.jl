@@ -8,7 +8,6 @@ const NoSlabCache = PDMPSamplers.NoSlabCache
 const SummedRateClock = PDMPSamplers.SummedRateClock
 const active_logdensity = PDMPSamplers.active_logdensity
 const active_slab_potential_gradient! = PDMPSamplers.active_slab_potential_gradient!
-const aggregate_lograte = PDMPSamplers.aggregate_lograte
 const beta_indices = PDMPSamplers.beta_indices
 const boundary_logweights! = PDMPSamplers.boundary_logweights!
 const conditional_density_zero = PDMPSamplers.conditional_density_zero
@@ -17,7 +16,6 @@ const gaussian_slab = PDMPSamplers.gaussian_slab
 const gaussian_slab! = PDMPSamplers.gaussian_slab!
 const log_boundary_density_zero = PDMPSamplers.log_boundary_density_zero
 const log_model_add_odds = PDMPSamplers.log_model_add_odds
-const sample_unstick_label = PDMPSamplers.sample_unstick_label
 const slab_cache_style = PDMPSamplers.slab_cache_style
 const thinning_diagnostics = PDMPSamplers.thinning_diagnostics
 const unstick_rate_constant = PDMPSamplers.unstick_rate_constant
@@ -40,7 +38,7 @@ struct _AlwaysAdaptedAdapter <: PDMPSamplers.AbstractAdapter end
 PDMPSamplers.did_dynamics_adapt(::_AlwaysAdaptedAdapter) = true
 
 struct _FutureContinuousDynamics <: ContinuousDynamics end
-PDMPSamplers.unstick_rate_constant(::_FutureContinuousDynamics, ::Integer) = 1.0
+PDMPSamplers._boundary_proposal_clock_constant(::_FutureContinuousDynamics, ::StickyPDMPState, ::Integer) = 1.0
 function PDMPSamplers.move_forward_time!(state::PDMPSamplers.AbstractPDMPState,
         τ::Real, ::_FutureContinuousDynamics)
     state.t[] += τ
@@ -307,9 +305,8 @@ end
         endpoint_weights = fill(NaN, 1)
         boundary_logweights!(endpoint_weights, endpoint_provider, endpoint_prior_one, zeros(1), endpoint_active, endpoint_stickable)
         @test endpoint_weights == [Inf]
-        @test aggregate_lograte(endpoint_provider, endpoint_prior_one, 0.0, zeros(1), endpoint_active, endpoint_stickable) == Inf
-        @test aggregate_lograte(endpoint_provider, endpoint_prior_zero, 0.0, zeros(1), endpoint_active, endpoint_stickable) == -Inf
-        @test sample_unstick_label(MersenneTwister(101), endpoint_provider, endpoint_prior_one, zeros(1), endpoint_active, endpoint_stickable) == 1
+        boundary_logweights!(endpoint_weights, endpoint_provider, endpoint_prior_zero, zeros(1), endpoint_active, endpoint_stickable)
+        @test endpoint_weights == [-Inf]
     end
 
     @testset "Dense Gaussian slab conditioning" begin
@@ -615,15 +612,6 @@ end
         end
         @test weights ≈ expected
 
-        lograte = aggregate_lograte(provider, odds, log(2.0), x, active, stickable)
-        @test lograte ≈ log(2.0 * sum(exp, expected[isfinite.(expected)]))
-
-        rng = MersenneTwister(7)
-        @test sample_unstick_label(rng, provider, odds, x, active, stickable) in (2, 5)
-        stickable_only4 = BitVector([false, false, false, true])
-        for _ in 1:20
-            @test sample_unstick_label(rng, provider, odds, x, active, stickable_only4) == 5
-        end
 
         @test slab_cache_style(provider) isa FixedCovarianceCache
 
@@ -688,13 +676,9 @@ end
         @test log_q1 ≈ log_q2
 
         short_prior = BernoulliModelPrior(fill(0.4, 2))
-        @test_throws DimensionMismatch aggregate_lograte(exch, short_prior, log(1.0), x, active, stickable)
         @test_throws DimensionMismatch SummedRateClock(exch, short_prior)
         @test_throws DimensionMismatch LinearGaussianAggregateClock(exch, short_prior)
 
-        rng = MersenneTwister(11)
-        labels = [sample_unstick_label(rng, exch, odds, x, active, stickable) for _ in 1:50]
-        @test all(in((2, 4)), labels)
     end
 
     @testset "Linear Gaussian aggregate clock" begin

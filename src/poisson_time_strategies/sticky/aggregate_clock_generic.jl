@@ -37,11 +37,6 @@ function _boundary_logweights_with_velocity!(weights::AbstractVector{Float64}, c
     return weights
 end
 
-_uses_coordinate_velocity_constants(flow::ContinuousDynamics) =
-    _velocity_preserving_sticky(flow)
-_uses_coordinate_velocity_constants(::AnyBoomerang) = true
-_uses_coordinate_velocity_constants(::PreconditionedDynamics) = true
-
 """
     rate(clock, flow, state, τ, can_stick)
 
@@ -58,16 +53,6 @@ function rate(clock::SummedRateClock, flow::ContinuousDynamics, state::StickyPDM
         (diagnostics.state_movement_ns += time_ns() - movement_started)
     cache = clock.cache
     boundary_started = diagnostics.enabled ? time_ns() : UInt64(0)
-    if !_uses_coordinate_velocity_constants(flow)
-        active_beta, stickable_beta = _clock_active_and_stickable(clock, state_at, can_stick)
-        lograte = aggregate_lograte!(cache.log_weights, clock.slab_provider, clock.model_prior, log(unstick_rate_constant(flow, 1)), state_at.ξ.x, active_beta, stickable_beta)
-        lograte == -Inf && return 0.0
-        lograte == Inf && return Inf
-        result = exp(lograte)
-        diagnostics.enabled &&
-            (diagnostics.boundary_weight_ns += time_ns() - boundary_started)
-        return result
-    end
     lograte = LogExpFunctions.logsumexp(_boundary_logweights_with_velocity!(cache.log_weights, clock, flow, state_at, can_stick))
     lograte == -Inf && return 0.0
     lograte == Inf && return Inf
@@ -186,11 +171,6 @@ at elapsed time `τ` from `state`.
 """
 function sample_label(rng::Random.AbstractRNG, clock::SummedRateClock, flow::ContinuousDynamics, state::StickyPDMPState, can_stick::BitVector)
     cache = clock.cache
-    if !_uses_coordinate_velocity_constants(flow)
-        active_beta, stickable_beta = _clock_active_and_stickable(clock, state, can_stick)
-        boundary_logweights!(cache.log_weights, clock.slab_provider, clock.model_prior, state.ξ.x, active_beta, stickable_beta)
-        return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
-    end
     _boundary_logweights_with_velocity!(cache.log_weights, clock, flow, state, can_stick)
     return _sample_from_logweights(rng, beta_indices(clock.slab_provider), cache.log_weights)
 end
