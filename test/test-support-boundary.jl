@@ -256,14 +256,15 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         model = _make_boundary_model()
         flow = _make_boundary_flow()
         public_alg = Sticky(_make_boundary_alg(; N=8, t_max=0.5), fill(0.5, d_boundary))
-        initial = SkeletonPoint([0.2, -0.3], [-1.0, 1.0])
+        # The first sticky deadline (3.0) lies beyond the support boundary (0.8).
+        initial = SkeletonPoint([0.2, -3.0], [1.0, 1.0])
         state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
             rng, flow, model, public_alg, 0.0, initial,
         )
         trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
         old_deadlines = copy(alg.sticky_times)
         ctx = PDMPSamplers.BoundaryContext(
-            copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0, eps(Float64),
+            copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0, 1.0,
             ErrorException("test"), BouncyParticle, GridThinningStrategy,
         )
         opts = SupportBoundaryOptions(;
@@ -273,8 +274,10 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
             refresh_probe_time=0.0,
         )
 
-        result = PDMPSamplers._line_search_truncated_refresh_from_current_state!(
-            rng, state, model_, flow, alg, cache, stats, trace_manager, ctx, opts;
+        localization = PDMPSamplers.localize_support_boundary!(model_, ctx, opts)
+        @test localization.safe_time > 0.0
+        result = PDMPSamplers._boundary_refresh_from_localization!(
+            rng, state, model_, flow, alg, cache, stats, trace_manager, ctx, localization, opts;
             phase=:main,
         )
 
@@ -287,7 +290,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
 
     @testset "aggregate BPS boundary refresh rebuilds both schedules" begin
         function aggregate_boundary_grad!(out, x)
-            x[1] >= 1.0 && error("outside support")
+            x[2] >= 1.0 && error("outside support")
             out .= x
             return out
         end
@@ -302,7 +305,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
             clock = _RecordingAggregateClock(collect(1:d), Float64[])
             public_alg = AggregateSticky(
                 _make_boundary_alg(; N=8, t_max=0.5), clock, trues(d))
-            initial = SkeletonPoint([0.0, -0.3, 0.4], [0.0, 1.0, -1.0])
+            initial = SkeletonPoint([0.0, 0.3, -0.4], [0.0, 1.0, -1.0])
             state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
                 rng, flow, model, public_alg, 0.0, initial)
             trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
@@ -311,15 +314,17 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
             old_horizon_calls = length(alg.clock.horizons)
             ctx = PDMPSamplers.BoundaryContext(
                 copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0,
-                eps(Float64), ErrorException("test"), typeof(flow),
+                1.0, ErrorException("test"), typeof(flow),
                 GridThinningStrategy)
             opts = SupportBoundaryOptions(; detect_boundaries=true,
                 mode=:line_search_truncated_refresh, max_refresh_attempts=1,
                 refresh_probe_time=0.0)
 
-            result = PDMPSamplers._line_search_truncated_refresh_from_current_state!(
+            localization = PDMPSamplers.localize_support_boundary!(model_, ctx, opts)
+            @test localization.safe_time > 0.0
+            result = PDMPSamplers._boundary_refresh_from_localization!(
                 rng, state, model_, flow, alg, cache, stats, trace_manager,
-                ctx, opts; phase=:main)
+                ctx, localization, opts; phase=:main)
 
             @test result === :refresh
             @test alg.sticky_times != old_deadlines
@@ -539,7 +544,7 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         @test state.ξ.x[1] ≈ 0.375
     end
 
-    @testset "line_search_truncated_refresh shrinks refresh probe time" begin
+    @testset "support-boundary refresh validates the forward probe" begin
         function _probe_grad!(out, x)
             x[1] >= 0.5 && error("Outside support: x[1] = $(x[1])")
             out .= x
@@ -553,66 +558,9 @@ PDMPSamplers.sample_label(::Random.AbstractRNG,
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
         )
-        opts = SupportBoundaryOptions(; refresh_probe_time=0.02, max_bisection_steps=10)
 
-        @test !PDMPSamplers._short_forward_probe_is_valid(state, model, flow, cache, opts.refresh_probe_time)
-        @test PDMPSamplers._short_forward_probe_is_valid(state, model, flow, cache, opts)
-    end
-
-    @testset "grid safety limit routes through support-boundary handling" begin
-        rng = PDMPSamplers.Random.Xoshiro(42)
-        model = _make_boundary_model()
-        flow = _make_boundary_flow()
-        alg = _make_boundary_alg(; N=20, t_max=2.0)
-        state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
-        trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
-        cache = PDMPSamplers.add_gradient_to_cache(
-            PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
-        )
-        stats = PDMPSamplers.StatisticCounter()
-        ctx = PDMPSamplers.BoundaryContext(
-            copy(state.ξ.x), copy(state.ξ.θ), state.t[],
-            0.0, 2.0, ErrorException("Safety limit reached"), BouncyParticle, GridThinningStrategy,
-        )
-
-        try
-            PDMPSamplers._handle_grid_safety_limit!(
-                rng, state, model, flow, alg, cache, stats, trace_manager, ctx,
-                SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search); phase=:main,
-            )
-            @test false
-        catch err
-            @test err isa SupportBoundaryError
-            @test err.localized
-            @test occursin("Grid thinning", err.message)
-        end
-
-        ctx_valid_horizon = PDMPSamplers.BoundaryContext(
-            copy(state.ξ.x), copy(state.ξ.θ), state.t[],
-            0.0, 0.5, ErrorException("Safety limit reached"), BouncyParticle, GridThinningStrategy,
-        )
-        try
-            PDMPSamplers._handle_grid_safety_limit!(
-                rng, state, model, flow, alg, cache, stats, trace_manager, ctx_valid_horizon,
-                SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search); phase=:main,
-            )
-            @test false
-        catch err
-            @test err isa SupportBoundaryError
-            @test !err.localized
-            io = IOBuffer()
-            showerror(io, err)
-            @test !occursin("Hint: use support_boundary_options", String(take!(io)))
-        end
-
-        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=1, refresh_probe_time=0.0)
-        result = PDMPSamplers._handle_grid_safety_limit!(
-            rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase=:main,
-        )
-
-        @test result === :refresh
-        @test stats.support_boundary_events == 1
-        @test stats.support_boundary_refresh_attempts == 1
+        @test !PDMPSamplers._short_forward_probe_is_valid!(copy(state), state, model, flow, cache, 0.02)
+        @test PDMPSamplers._short_forward_probe_is_valid!(copy(state), state, model, flow, cache, 0.005)
     end
 
     @testset "pdmp_sample — line_search_truncated_refresh unsupported flow" begin

@@ -241,8 +241,6 @@ function _step!(
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
-        elseif err isa _GridSafetyLimitException
-            return _handle_grid_safety_limit!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
         elseif err isa SupportBoundaryError
             rethrow(err)
         else
@@ -273,105 +271,6 @@ function _handle_step_boundary!(
     else
         _handle_boundary!(model, ctx, opts)
     end
-end
-
-function _throw_grid_safety_support_error(model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions; message::String)
-    if !_support_boundary_probe_is_valid(model, ctx, ctx.t_invalid)
-        localization = localize_support_boundary!(model, ctx, opts)
-        throw(_build_boundary_error(ctx, opts; localized=true, localization,
-            message="Grid thinning reached its safety limit after entering an invalid support region."))
-    end
-
-    throw(_build_boundary_error(ctx, opts; message))
-end
-
-function _line_search_truncated_refresh_from_current_state!(
-    rng::Random.AbstractRNG,
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
-    cache::NamedTuple,
-    stats::AbstractStatisticCounter,
-    trace_manager::TraceManager,
-    ctx::BoundaryContext,
-    opts::SupportBoundaryOptions;
-    phase::Symbol
-)
-    if !_supports_line_search_truncated_refresh_state(state, flow)
-        _throw_grid_safety_support_error(model, ctx, opts;
-            message="Grid thinning reached its safety limit; :line_search_truncated_refresh is only implemented for BPS-family flows.")
-    end
-
-    x_current = copy(state.ξ.x)
-    θ_current = copy(state.ξ.θ)
-    t_current = state.t[]
-    state_probe = _boundary_probe_state(alg, state)
-
-    for _ in 1:opts.max_refresh_attempts
-        copyto!(state.ξ.x, x_current)
-        copyto!(state.ξ.θ, θ_current)
-        state.t[] = t_current
-
-        try
-            _check_gradient_probe_finite(compute_gradient!(state, model.grad, flow, cache))
-        catch
-            _throw_grid_safety_support_error(model, ctx, opts;
-                message="Grid thinning reached its safety limit, and the current state is not a valid refresh point.")
-        end
-
-        refresh_velocity!(rng, state, flow)
-        _inc_counter_support_boundary_refresh_attempts(stats)
-
-        if _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, opts)
-            _inc_counter_support_boundary_events(stats)
-            _inc_counter_refreshment_events(stats)
-            _set_counter_last_rejected(stats, false)
-            _invalidate_cached_gradient!(alg)
-            if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
-                _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
-            end
-            record_event!(trace_manager, state, flow, nothing, phase, :refresh)
-            return :refresh
-        end
-
-        _inc_counter_support_boundary_refresh_failures(stats)
-    end
-
-    copyto!(state.ξ.x, x_current)
-    copyto!(state.ξ.θ, θ_current)
-    state.t[] = t_current
-    _throw_grid_safety_support_error(model, ctx, opts;
-        message="Grid thinning reached its safety limit, and no valid refreshed direction was found.")
-end
-
-function _handle_grid_safety_limit!(
-    rng::Random.AbstractRNG,
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
-    cache::NamedTuple,
-    stats::AbstractStatisticCounter,
-    trace_manager::TraceManager,
-    ctx::BoundaryContext,
-    opts::SupportBoundaryOptions;
-    phase::Symbol
-)
-    opts.detect_boundaries || throw(ctx.original_error)
-    if opts.mode === :error
-        throw(ctx.original_error)
-    elseif opts.mode === :line_search_truncated_refresh
-        return _line_search_truncated_refresh_from_current_state!(rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase)
-    elseif opts.mode === :line_search
-        if _linear_boundary_flow(flow)
-            _throw_grid_safety_support_error(model, ctx, opts;
-                message="Grid thinning reached its safety limit while support-boundary diagnostics were enabled.")
-        else
-            throw(ctx.original_error)
-        end
-    end
-    throw(ArgumentError("Unknown support-boundary mode: $(opts.mode)"))
 end
 
 _public_algorithm_type(alg::PoissonTimeStrategy) = typeof(alg)
@@ -435,17 +334,6 @@ function _move_to_boundary_safe_point!(state::AbstractPDMPState, flow::Continuou
     return state
 end
 
-function _short_forward_probe_is_valid(
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    cache::NamedTuple,
-    probe_time::Float64
-)
-    state_probe = copy(state)
-    return _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, probe_time)
-end
-
 function _short_forward_probe_is_valid!(
     state_probe::AbstractPDMPState,
     state::AbstractPDMPState,
@@ -463,34 +351,6 @@ function _short_forward_probe_is_valid!(
     catch
         return false
     end
-end
-
-function _short_forward_probe_is_valid(
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    cache::NamedTuple,
-    opts::SupportBoundaryOptions,
-)
-    state_probe = copy(state)
-    return _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, opts)
-end
-
-function _short_forward_probe_is_valid!(
-    state_probe::AbstractPDMPState,
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    cache::NamedTuple,
-    opts::SupportBoundaryOptions,
-)
-    probe_time = opts.refresh_probe_time
-    for _ in 0:opts.max_bisection_steps
-        _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, probe_time) && return true
-        probe_time *= 0.5
-        probe_time > 0.0 || break
-    end
-    return false
 end
 
 function _try_move_to_valid_boundary_safe_point!(
@@ -707,8 +567,6 @@ function _handle_capped_boundary_event!(
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
-        elseif err isa _GridSafetyLimitException
-            return _handle_grid_safety_limit!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
         elseif err isa SupportBoundaryError
             rethrow(err)
         else
@@ -799,7 +657,7 @@ function _line_search_truncated_refresh_boundary!(
         τ, event_type, meta = try
             next_event_time(rng, model, flow, alg, state, cache, stats, safe_time, true, :support_boundary, true)
         catch err
-            if err isa _ProbeFailureException || err isa _GridSafetyLimitException
+            if err isa _ProbeFailureException
                 0.0, :support_boundary, _gradient_meta(cache)
             else
                 rethrow()
