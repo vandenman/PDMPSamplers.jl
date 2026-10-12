@@ -10,11 +10,12 @@ Random.rand(rng::TangentScriptedRNG) = popfirst!(rng.uniforms)
 @testset "Signed tangent bounds retain interior positive rates" begin
     grad!(out, x) = (fill!(out, -100.0); out[1] = (x[1]-1)*(x[1]-2)*(x[1]-10); out)
     hvp!(out, x, v) = (fill!(out, 0.0); out[1] = (3x[1]^2-26x[1]+32)*v[1]; out)
-    for flow in (BouncyParticle(1, 0.0), ZigZag(1), ZigZag(2))
+    for backend in (:exact, :finite_difference),
+            flow in (BouncyParticle(1, 0.0), ZigZag(1), ZigZag(2))
         d = length(flow.μ)
         model = PDMPModel(d, FullGradient(grad!), hvp!)
         strategy = GridThinningStrategy(N=2, N_min=2, t_max=5.0,
-            bound=:constant, curvature_backend=:exact, bound_violation=:throw)
+            bound=:constant, curvature_backend=backend, bound_violation=:throw)
         state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
             Random.Xoshiro(1), flow, model, strategy, 0.0,
             SkeletonPoint(zeros(d), ones(d)); statistic_counter=PDMPSamplers.DevelStatisticCounter)

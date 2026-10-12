@@ -473,16 +473,10 @@ function _finite_diff_vhv_zigzag_rate_derivatives_for_grid_unchecked!(
         h = _fd_step_size(fd.buf, θ)
         ∇U = fd.grad(fd.buf)
         copyto!(fd.grad_buf, ∇U)
-        any_active = false
         @inbounds for j in 1:n_channels
             values[j, k] = θ[j] * fd.grad_buf[j]
-            any_active |= _ispositive(values[j, k])
         end
         if iszero(h)
-            @inbounds for j in 1:n_channels
-                derivatives[j, k] = 0.0
-            end
-        elseif !any_active
             @inbounds for j in 1:n_channels
                 derivatives[j, k] = 0.0
             end
