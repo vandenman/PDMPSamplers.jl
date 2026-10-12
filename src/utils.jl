@@ -1,9 +1,9 @@
 
 @static if VERSION < v"1.13"
-    import Base: ispositive, isnegative
-else
     ispositive(x::Real) = x > zero(x)
     isnegative(x::Real) = x < zero(x)
+else
+    import Base: ispositive, isnegative
 end
 
 pos(x) = max(zero(x), x)
