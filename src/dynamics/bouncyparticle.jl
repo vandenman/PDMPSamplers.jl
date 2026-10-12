@@ -204,7 +204,7 @@ function ab(ξ::SkeletonPoint, c::AbstractVector, flow::BouncyParticle, cache)
     b = pos(B)
 
     refresh_time = rand_refresh_time(Random.default_rng(), flow)
-    # refresh_time = _ispositive(refresh_rate(flow)) ? rand(Exponential(inv(refresh_rate(flow)))) : Inf
+    # refresh_time = ispositive(refresh_rate(flow)) ? rand(Exponential(inv(refresh_rate(flow)))) : Inf
     # refresh_time = flow.λref > 0 ? flow.λref : Inf
     return (a, b, refresh_time)
 end

@@ -294,7 +294,7 @@ function construct_rate_bound_grid!(
             for point in start_point:stop_point
                 offset = point - start_point + 1
                 y_vals[point] = sum(pos(G[j, offset]) for j in 1:n_channels)
-                d_vals[point] = sum(_ispositive(G[j, offset]) ? dG[j, offset] : 0.0 for j in 1:n_channels)
+                d_vals[point] = sum(ispositive(G[j, offset]) ? dG[j, offset] : 0.0 for j in 1:n_channels)
             end
             loaded_start = start_point
             loaded_stop = stop_point

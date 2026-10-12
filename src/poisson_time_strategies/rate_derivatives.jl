@@ -256,7 +256,7 @@ function _get_rate_and_deriv_hvp(state::AbstractPDMPState, flow::ContinuousDynam
     ∇U_xt = _rate_gradient(provider, state, cached_gradient)
     f_t = λ(state, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     rate = pos(f_t)
-    _ispositive(f_t) || return rate, zero(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
     f_prime_t = ∂λ∂t(state, ∇U_xt, _provider_hvp(provider)(xt, vt), flow)
     return rate, f_prime_t
 end
@@ -270,7 +270,7 @@ function _compute_vhv_scalar(provider::VHVProvider, state::AbstractPDMPState, �
     xt, vt = state.ξ.x, state.ξ.θ
     w = provider.w_buf === nothing ? similar(vt) : provider.w_buf
     for i in eachindex(vt)
-        w[i] = _ispositive(vt[i] * ∇U_xt[i]) ? vt[i] : zero(eltype(vt))
+        w[i] = ispositive(vt[i] * ∇U_xt[i]) ? vt[i] : zero(eltype(vt))
     end
     return provider.vhv(xt, vt, w)
 end
@@ -295,7 +295,7 @@ function _get_rate_and_deriv_vhv(state::AbstractPDMPState, flow::ContinuousDynam
     ∇U_xt = _rate_gradient(provider, state, cached_gradient)
     f_t = λ(state, ∇U_xt, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     rate = pos(f_t)
-    _ispositive(f_t) || return rate, zero(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
     f_prime_t = ∂λ∂t(state, ∇U_xt, _compute_vhv_scalar(provider, state, ∇U_xt, flow), flow)
     return rate, f_prime_t
 end
@@ -308,7 +308,7 @@ function get_rate_and_deriv(state::AbstractPDMPState, flow::ContinuousDynamics, 
     f_prime_t = d2phi
 
     rate = pos(f_t)
-    rate_deriv = _ispositive(f_t) ? f_prime_t : zero(f_prime_t)
+    rate_deriv = ispositive(f_t) ? f_prime_t : zero(f_prime_t)
 
     return rate, rate_deriv
 end
@@ -375,7 +375,7 @@ function _get_rate_and_deriv_fd_vhv(state::AbstractPDMPState, flow::ContinuousDy
     cached_gradient === nothing ? copyto!(fd.grad_buf, fd.grad(xt)) : copyto!(fd.grad_buf, cached_gradient)
     f_t = λ(state, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     rate = pos(f_t)
-    _ispositive(f_t) || return rate, zero(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
 
     vhv_scalar = _restore_reference_vhv(_fd_vhv_scalar(fd, xt, vt, vt), vt, flow)
     return rate, ∂λ∂t(state, fd.grad_buf, vhv_scalar, flow)
@@ -418,11 +418,11 @@ function _get_rate_and_deriv_fd_vhv_zigzag(state::AbstractPDMPState, flow::ZigZa
     cached_gradient === nothing ? copyto!(fd.grad_buf, fd.grad(xt)) : copyto!(fd.grad_buf, cached_gradient)
     f_t = λ(state, fd.grad_buf, flow) + (add_rate ? refresh_rate(flow) : 0.0)
     rate = pos(f_t)
-    _ispositive(f_t) || return rate, zero(f_t)
+    ispositive(f_t) || return rate, zero(f_t)
 
     w = fd.w_buf
     for i in eachindex(vt)
-        w[i] = _ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
+        w[i] = ispositive(vt[i] * fd.grad_buf[i]) ? vt[i] : zero(eltype(vt))
     end
     return rate, _fd_vhv_scalar(fd, xt, vt, w)
 end

@@ -140,7 +140,7 @@ function SeparableResidualEnvelope(weights::AbstractMatrix, component_scales!;
     stored_weights = Matrix{Float64}(weights)
     totals = vec(sum(stored_weights; dims=2))
     tables = Union{Nothing,AliasTables.AliasTable{UInt64,Int}}[
-        _ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
+        ispositive(totals[r]) ? AliasTables.AliasTable(view(stored_weights, r, :)) : nothing
         for r in axes(stored_weights, 1)
     ]
     component_cell_scales! === nothing && !certified_affine && throw(ArgumentError(

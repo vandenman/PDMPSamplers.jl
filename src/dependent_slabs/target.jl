@@ -46,7 +46,7 @@ function DependentSlabTarget(
     posterior_hvp=nothing,
 )
     d_int = Int(d)
-    _ispositive(d_int) || throw(ArgumentError("d must be positive"))
+    ispositive(d_int) || throw(ArgumentError("d must be positive"))
     length(initial_free) == d_int || throw(DimensionMismatch("initial_free length $(length(initial_free)) does not match dimension $d_int"))
     indices = beta_indices(slab_provider)
     all(i -> 1 <= i <= d_int, indices) || throw(ArgumentError("slab beta indices must be valid coordinates in 1:$d_int"))

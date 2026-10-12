@@ -444,7 +444,7 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
         end
 
         λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
-        τ_refresh = _ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
+        τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
         effective_horizon, horizon_event = _effective_grid_horizon(
             cv, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
         cumulative_exp = Random.randexp(rng)
@@ -511,7 +511,7 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
             # bound. Thin from the roof to that pointwise aggregate before any
             # gradient or residual work.
             aggregate = D + B
-            if _ispositive(aggregate) && rand(rng) * bar_M <= aggregate
+            if ispositive(aggregate) && rand(rng) * bar_M <= aggregate
                 _inc_counter_subsampling_aggregate_accepts(stats)
                 _inc_counter_pointwise_screen_passes(stats)
                 result = joint ? _evaluate_joint_signed_candidate!(rng, cv,
@@ -525,7 +525,7 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
                     break
                 end
                 if result.accepted
-                    if _ispositive(D)
+                    if ispositive(D)
                         _adapt_grid_N!(alg,
                             min(result.deterministic_actual / D, 1.0))
                     end

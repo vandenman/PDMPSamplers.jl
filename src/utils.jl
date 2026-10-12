@@ -1,6 +1,10 @@
 
-_ispositive(x::Real) = x > zero(x)
-_isnegative(x::Real) = x < zero(x)
+@static if VERSION < v"1.13"
+    import Base: ispositive, isnegative
+else
+    ispositive(x::Real) = x > zero(x)
+    isnegative(x::Real) = x < zero(x)
+end
 
 pos(x) = max(zero(x), x)
 
@@ -8,6 +12,10 @@ pos(x) = max(zero(x), x)
     max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
 
 @inline function posdot(x, y)
+    # TODO:
+    # a Vector{Float64} method could perhaps use signbit(x) * signbit(y) * x * y?
+    # same goes for pos(x::Float64 = signbit(x) * x?
+    # need to benchmark if this is faster though
     value = zero(promote_type(eltype(x), eltype(y)))
     @inbounds for i in eachindex(x, y)
         value += pos(x[i] * y[i])
@@ -17,7 +25,7 @@ end
 
 function _rand_posdot_index(rng::Random.AbstractRNG, x, y)
     total = posdot(x, y)
-    _ispositive(total) || return rand(rng, eachindex(x))
+    ispositive(total) || return rand(rng, eachindex(x))
     threshold = rand(rng) * total
     cumulative = zero(total)
     selected = firstindex(x)

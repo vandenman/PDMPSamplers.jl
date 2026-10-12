@@ -22,7 +22,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
         λ_refresh = include_refresh ? refresh_rate(flow) : zero(refresh_rate(flow))
 
         # Draw refresh time first so we can cap grid construction.
-        τ_refresh = _ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
+        τ_refresh = ispositive(λ_refresh) ? Random.randexp(rng) / λ_refresh : Inf
         effective_horizon, horizon_event =
             _effective_grid_horizon(model.grad, alg.t_max[], τ_refresh, max_horizon, max_horizon_event)
 
@@ -166,7 +166,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 alg.has_cached_gradient[] = false
 
                 remaining_horizon = effective_horizon - last_rejected_time
-                if !_ispositive(remaining_horizon)
+                if !ispositive(remaining_horizon)
                     return time_offset + last_rejected_time, horizon_event, default_return
                 end
 

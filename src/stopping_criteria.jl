@@ -46,7 +46,7 @@ mutable struct EventCountCriterion <: StoppingCriterion
     const max_events::Int
     baseline::Int
     function EventCountCriterion(max_events::Integer)
-        _ispositive(max_events) || throw(ArgumentError("max_events must be > 0, got $max_events"))
+        ispositive(max_events) || throw(ArgumentError("max_events must be > 0, got $max_events"))
         return new(max_events, 0)
     end
 end
@@ -126,7 +126,7 @@ end
 
 function WallTimeCriterion(seconds::Real)
     sec = seconds
-    isfinite(sec) && _ispositive(sec) || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
+    isfinite(sec) && ispositive(sec) || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
     return WallTimeCriterion(sec, zero(UInt64))
 end
 
@@ -156,7 +156,7 @@ end
 
 function TotalWallTimeCriterion(seconds::Real)
     sec = seconds
-    isfinite(sec) && _ispositive(sec) || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
+    isfinite(sec) && ispositive(sec) || throw(ArgumentError("seconds must be finite and > 0, got $seconds"))
     return TotalWallTimeCriterion(sec, Ref(zero(UInt64)))
 end
 
@@ -198,8 +198,8 @@ function ESSCriterion(
     trace_selector::Symbol=:main
 )
     target = target_ess
-    isfinite(target) && _ispositive(target) || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
-    _ispositive(check_every) || throw(ArgumentError("check_every must be > 0, got $check_every"))
+    isfinite(target) && ispositive(target) || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
+    ispositive(check_every) || throw(ArgumentError("check_every must be > 0, got $check_every"))
     min_trace_length >= 2 || throw(ArgumentError("min_trace_length must be >= 2, got $min_trace_length"))
     trace_selector in (:main, :warmup) || throw(ArgumentError("trace_selector must be :main or :warmup, got $trace_selector"))
     return ESSCriterion(target, check_every, min_trace_length, 0, false, trace_selector)
@@ -268,10 +268,10 @@ function OnlineESSCriterion(
     batch_size::Integer=50
 )
     target = target_ess
-    isfinite(target) && _ispositive(target) || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
-    _ispositive(check_every) || throw(ArgumentError("check_every must be > 0, got $check_every"))
+    isfinite(target) && ispositive(target) || throw(ArgumentError("target_ess must be finite and > 0, got $target_ess"))
+    ispositive(check_every) || throw(ArgumentError("check_every must be > 0, got $check_every"))
     min_samples >= 2 || throw(ArgumentError("min_samples must be >= 2, got $min_samples"))
-    _ispositive(batch_size) || throw(ArgumentError("batch_size must be > 0, got $batch_size"))
+    ispositive(batch_size) || throw(ArgumentError("batch_size must be > 0, got $batch_size"))
     return OnlineESSCriterion(
         target,
         Int(check_every),
@@ -366,7 +366,7 @@ function is_satisfied(c::OnlineESSCriterion, state, trace_manager, stats)
     @inbounds for i in eachindex(c.scratch_ess)
         overall_var = c.m2_samples[i] / sample_denom
         batch_var = c.m2_batches[i] / batch_denom
-        if _ispositive(overall_var) && _ispositive(batch_var)
+        if ispositive(overall_var) && ispositive(batch_var)
             c.scratch_ess[i] = c.n_batches * overall_var / batch_var
         else
             c.scratch_ess[i] = c.n_batches
@@ -417,7 +417,7 @@ function AdaptiveWarmupCriterion(; min_time::Real, max_time::Real,
     isfinite(stable_t) && stable_t >= 0 ||
         throw(ArgumentError("stable_time must be finite and nonnegative"))
     min_events >= 0 || throw(ArgumentError("min_events must be nonnegative"))
-    _ispositive(check_every) || throw(ArgumentError("check_every must be positive"))
+    ispositive(check_every) || throw(ArgumentError("check_every must be positive"))
     return AdaptiveWarmupCriterion(min_t, max_t, stable_t, Int(min_events),
         Int(check_every), 0.0, 0, 0, 0, 0.0, false, :none)
 end
