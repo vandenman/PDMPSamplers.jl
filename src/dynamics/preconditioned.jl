@@ -261,23 +261,7 @@ function reflect!(::Random.AbstractRNG, state::StickyPDMPState,
         ∇ϕ::AbstractVector,
         pd::PreconditionedDynamics{<:DiagonalPreconditioner,<:BouncyParticle},
         cache)
-    Σg = cache.z
-    numerator = zero(eltype(state.ξ.θ))
-    denominator = zero(eltype(state.ξ.θ))
-    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ,
-                                  pd.metric.scale)
-        if state.free[i]
-            numerator += state.ξ.θ[i] * ∇ϕ[i]
-            Σg[i] = abs2(pd.metric.scale[i]) * ∇ϕ[i]
-            denominator += ∇ϕ[i] * Σg[i]
-        end
-    end
-    iszero(denominator) && return nothing
-    coefficient = 2 * numerator / denominator
-    @inbounds for i in eachindex(state.free, state.ξ.θ, Σg)
-        state.free[i] && (state.ξ.θ[i] -= coefficient * Σg[i])
-    end
-    return nothing
+    return _reflect_sticky_diagonal!(state, ∇ϕ, pd.metric.scale, cache)
 end
 
 function reflect!(::Random.AbstractRNG, ξ::SkeletonPoint,

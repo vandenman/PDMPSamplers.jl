@@ -346,12 +346,11 @@ reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
     flow::AnyBoomerang, cache) =
     _reflect_sticky_boomerang_generic!(state, ∇ϕ, flow, cache)
 
-@inline function _reflect_sticky_diagonal_boomerang!(
+@inline function _reflect_sticky_diagonal!(
         state::StickyPDMPState, ∇ϕ::AbstractVector,
-        flow::AnyBoomerang, cache)
+        diagonal::AbstractVector, cache)
     θ = state.ξ.θ
     free = state.free
-    diagonal = flow.ΣL.diag
     z = cache.z
     numerator = zero(promote_type(eltype(θ), eltype(∇ϕ), eltype(diagonal)))
     denominator = zero(typeof(numerator))
@@ -376,12 +375,12 @@ end
 # Boolean matrix views and the two generic matrix products are unnecessary.
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
         flow::Boomerang{U,T,S,LT}, cache) where {U,T,S,LT<:Diagonal}
-    return _reflect_sticky_diagonal_boomerang!(state, ∇ϕ, flow, cache)
+    return _reflect_sticky_diagonal!(state, ∇ϕ, flow.ΣL.diag, cache)
 end
 
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
         flow::MutableBoomerang{U,T,S,LT}, cache) where {U,T,S,LT<:Diagonal}
-    return _reflect_sticky_diagonal_boomerang!(state, ∇ϕ, flow, cache)
+    return _reflect_sticky_diagonal!(state, ∇ϕ, flow.ΣL.diag, cache)
 end
 
 
