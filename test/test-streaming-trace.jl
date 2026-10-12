@@ -20,6 +20,13 @@
                     @test mean(trace) ≈ [0.5]
                     @test var(trace) ≈ [1/12]
                     @test PDMPSamplers._adaptation_std(trace) ≈ [sqrt(1/12)]
+                    if trace isa PDMPSamplers.StreamingPDMPTrace
+                        for fraction in (0.5, 1.0)
+                            @test PDMPSamplers.streaming_dense_time_uniform_states(
+                                trace, fraction, 5) ≈ reshape(
+                                    collect(range(1 - fraction, 1; length=5)), 1, :)
+                        end
+                    end
                 end
             end
         end
@@ -45,6 +52,9 @@
                 @test var(trace) ≈ [1/12]
                 @test var(trace) ≈ var(dense)
                 @test var(trace, [origin]) ≈ [1/3]
+                # No physical events: the initial flight still supplies the grid.
+                @test PDMPSamplers.streaming_dense_time_uniform_states(
+                    trace, 1.0, 5) ≈ reshape(origin .+ collect(0:0.25:1), 1, :)
             end
         end
     end

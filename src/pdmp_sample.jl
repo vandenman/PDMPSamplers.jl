@@ -477,36 +477,8 @@ function _handle_dynamics_adaptation!(
     return nothing
 end
 
-function _run_phase_with_boundary_policy!(
-    rng::Random.AbstractRNG,
-    criterion::StoppingCriterion,
-    state::AbstractPDMPState,
-    model_::PDMPModel,
-    flow::ContinuousDynamics,
-    alg_::PoissonTimeStrategy,
-    cache::NamedTuple,
-    trace_manager::TraceManager,
-    stats::AbstractStatisticCounter,
-    health::HealthMonitor,
-    phase::Symbol,
-    adapter::AbstractAdapter,
-    progress::Bool,
-    prg,
-    tstop::Base.RefValue{Float64},
-    T::Float64,
-    progress_stops::Int,
-    boundary_policy::NoBoundaryHandling,
-    original_model::PDMPModel,
-    support_boundary_options::SupportBoundaryOptions;
-    adaptation_grad=model_.grad,
-    observer=nothing,
-)
-    return _run_phase!(rng, criterion, state, model_, flow, alg_, cache, trace_manager, stats, health,
-        phase, adapter, progress, prg, tstop, T, progress_stops, boundary_policy;
-        adaptation_grad, observer)
-end
 
-function _run_phase_with_boundary_policy!(
+function _run_phase_for_policy!(
     rng::Random.AbstractRNG,
     criterion::StoppingCriterion,
     state::AbstractPDMPState,
@@ -572,34 +544,6 @@ function _run_phase_for_policy!(
         adaptation_grad, observer)
 end
 
-function _run_phase_for_policy!(
-    rng::Random.AbstractRNG,
-    criterion::StoppingCriterion,
-    state::AbstractPDMPState,
-    model_::PDMPModel,
-    flow::ContinuousDynamics,
-    alg_::PoissonTimeStrategy,
-    cache::NamedTuple,
-    trace_manager::TraceManager,
-    stats::AbstractStatisticCounter,
-    health::HealthMonitor,
-    phase::Symbol,
-    adapter::AbstractAdapter,
-    progress::Bool,
-    prg,
-    tstop::Base.RefValue{Float64},
-    T::Float64,
-    progress_stops::Int,
-    boundary_policy::BoundaryHandling,
-    original_model::PDMPModel,
-    support_boundary_options::SupportBoundaryOptions;
-    adaptation_grad=model_.grad,
-    observer=nothing,
-)
-    return _run_phase_with_boundary_policy!(rng, criterion, state, model_, flow, alg_, cache,
-        trace_manager, stats, health, phase, adapter, progress, prg, tstop, T, progress_stops,
-        boundary_policy, original_model, support_boundary_options; adaptation_grad, observer)
-end
 
 _phase_criterion(::Nothing, T::Real) = _CommonPhaseCriterion(; T)
 _phase_criterion(c::FixedTimeCriterion, ::Real) = _CommonPhaseCriterion(; T=c.T)

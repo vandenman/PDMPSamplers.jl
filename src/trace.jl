@@ -1322,21 +1322,14 @@ function streaming_dense_time_uniform_states(trace::StreamingPDMPTrace,
         "retained fraction must lie in (0, 1]"))
     n_grid >= 1 || throw(ArgumentError("grid size must be positive"))
     final_time = last_event_time(trace)
-    initial_iteration = iterate(trace)
-    initial_iteration === nothing && throw(ArgumentError("empty streaming trace"))
-    first_physical = iterate(trace, initial_iteration[2])
-    first_physical === nothing && throw(ArgumentError(
-        "streaming trace has no physical warmup event"))
-    # The established dense warmup trace installs its first record at this
-    # event, not at sampler initialization.
-    initial_time = first_physical[2][1]
+    first_iteration = iterate(trace)
+    first_iteration === nothing && throw(ArgumentError("empty streaming trace"))
+    initial_time = first_iteration[2][1]
     requested = collect(range(final_time - retained_fraction *
         (final_time - initial_time), final_time; length=n_grid))
     positions = Matrix{Float64}(undef,
         length(trace.initial_state.position), n_grid)
 
-    first_iteration = iterate(trace)
-    first_iteration === nothing && throw(ArgumentError("empty streaming trace"))
     current_time = first_iteration[2][1]
     current_x = copy(first_iteration[2][2])
     current_velocity = copy(first_iteration[2][3])
