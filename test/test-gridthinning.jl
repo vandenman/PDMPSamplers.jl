@@ -283,29 +283,25 @@ end
         set_dense_preconditioner!(dense_zz.metric, [4.0 0.0; 0.2 1.5])
         @test PDMPSamplers._metric_scale_extrema(dense_zz) == (1.5, 4.0)
 
-        t_grid = [0.0, 0.5, 1.0]
-        stats = PDMPSamplers.DevelStatisticCounter()
-        L_none = PDMPSamplers._channel_curvature_matrix(nothing, state, flow, t_grid, 2, 2, stats)
-        @test L_none == zeros(2, 2)
-        @test stats.grid_certificate_fallbacks == 4
+    end
 
-        L_real = PDMPSamplers._channel_curvature_matrix(1.25, state, flow, t_grid, 2, 2, nothing)
-        @test L_real == fill(1.25, 2, 2)
-
-        calls = Ref(0)
-        cert = (state, flow, a, b) -> begin
-            calls[] += 1
-            calls[] == 1 ? 2.0 : 3.0
+    @testset "curvature callbacks visit only needed cells and may decline" begin
+        provider = PDMPSamplers.GradHVPProvider(x -> copy(x), (x, v) -> copy(v))
+        state = PDMPState(0.0, SkeletonPoint([1.0], [1.0]))
+        for flow in (BouncyParticle(1, 0.0), ZigZag(1))
+            pcb = PDMPSamplers.PiecewiseConstantBound([0.0, 0.5, 1.0], zeros(2))
+            stats = PDMPSamplers.DevelStatisticCounter()
+            cells = Tuple{Float64,Float64}[]
+            certificate = (state, flow, a, b) -> (push!(cells, (a, b)); nothing)
+            n = PDMPSamplers.construct_rate_bound_grid!(
+                pcb, state, flow, provider, certificate;
+                stats, early_stop_threshold=0.01)
+            @test n == 1
+            @test cells == [(0.0, 0.5)]
+            @test pcb.Λ_vals == [1.5, 0.0]
+            @test stats.grid_certificate_calls == 1
+            @test stats.grid_certificate_fallbacks == 1
         end
-        stats2 = PDMPSamplers.DevelStatisticCounter()
-        L_callable = PDMPSamplers._channel_curvature_matrix(cert, state, flow, t_grid, 2, 2, stats2)
-        @test L_callable == [2.0 3.0; 2.0 3.0]
-        @test calls[] == 2
-        @test stats2.grid_certificate_calls == 2
-
-        prepared = (global_value=nothing, first_value=nothing, has_first=false, cell_values=[4.0, 5.0])
-        @test PDMPSamplers._prepared_or_cell_curvature_value(
-            prepared, 2, cert, state, flow, 0.5, 1.0, nothing) == 5.0
     end
 
     @testset "signed Gaussian one-cell flat bound dominates dense grid" begin

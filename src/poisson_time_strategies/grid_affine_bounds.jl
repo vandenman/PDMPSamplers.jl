@@ -16,63 +16,6 @@ function _evaluate_curvature_bound(curvature_bound, state::AbstractPDMPState, fl
     return value
 end
 
-function _prepare_grid_curvature_bound(curvature_bound, state::AbstractPDMPState, flow::ContinuousDynamics,
-    t_grid::AbstractVector, n_cells::Integer, stats::Union{AbstractStatisticCounter,Nothing})
-    if curvature_bound === nothing
-        stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_cells))
-        return (global_value=nothing, first_value=nothing, has_first=true, cell_values=nothing)
-    elseif curvature_bound isa Real
-        return (global_value=Float64(curvature_bound), first_value=nothing,
-            has_first=false, cell_values=nothing)
-    end
-
-    value = _evaluate_curvature_bound(curvature_bound, state, flow, t_grid[1], t_grid[n_cells + 1], stats)
-    return (global_value=nothing, first_value=value, has_first=true, cell_values=nothing)
-end
-
-function _prepared_or_cell_curvature_value(prepared, cell::Integer, curvature_bound,
-    state::AbstractPDMPState, flow::ContinuousDynamics, a::Real, b::Real,
-    stats::Union{AbstractStatisticCounter,Nothing})
-    prepared.global_value !== nothing && return prepared.global_value
-    curvature_bound === nothing && return nothing
-    if prepared.cell_values !== nothing
-        return prepared.cell_values[cell]
-    end
-    if cell == 1 && prepared.has_first
-        return prepared.first_value
-    end
-    return _evaluate_curvature_bound(curvature_bound, state, flow, a, b, stats)
-end
-
-function _channel_curvature_matrix(
-    curvature_bound,
-    state::AbstractPDMPState,
-    flow::ContinuousDynamics,
-    t_grid::AbstractVector,
-    n_channels::Integer,
-    n_cells::Integer,
-    stats::Union{AbstractStatisticCounter,Nothing},
-)
-    if curvature_bound === nothing
-        stats !== nothing && (_inc_counter_grid_certificate_fallbacks(stats, n_channels * n_cells))
-        return zeros(Float64, n_channels, n_cells)
-    elseif curvature_bound isa Real
-        return fill(Float64(curvature_bound), n_channels, n_cells)
-    end
-    prepared = _prepare_grid_curvature_bound(
-        curvature_bound, state, flow, t_grid, n_cells, stats)
-    L = Matrix{Float64}(undef, n_channels, n_cells)
-    for cell in 1:n_cells
-        a = t_grid[cell]
-        b = t_grid[cell + 1]
-        value = _prepared_or_cell_curvature_value(
-            prepared, cell, curvature_bound, state, flow, a, b, stats)
-        L[:, cell] .= value === nothing ? 0.0 : Float64(value)
-    end
-    return L
-end
-
-
 function _affine_cell_tolerances(a::Real, b::Real, y_a::Real, y_b::Real, d_a::Real, d_b::Real, M::Real)
     h = b - a
     rate_scale = max(1.0, abs(float(y_a)), abs(float(y_b)), abs(float(M)))
@@ -209,8 +152,6 @@ function construct_rate_bound_grid!(
 
     cumulative_integral = initial_integral
     N_evaluated = N
-    prepared = _prepare_grid_curvature_bound(
-        curvature_bound, state, flow, t_grid, N, stats)
     for i in (start_cell + 1):(N + 1)
         if t_grid[i - 1] >= max_time
             for j in (i - 1):N
@@ -241,12 +182,11 @@ function construct_rate_bound_grid!(
         cell = i - 1
         a = t_grid[cell]
         b = t_grid[cell + 1]
-        L_value = _prepared_or_cell_curvature_value(
-            prepared, cell, curvature_bound, state, flow, a, b, stats)
-        L_cell = L_value === nothing ? 0.0 : Float64(L_value)
+        L_value = _evaluate_curvature_bound(
+            curvature_bound, state, flow, a, b, stats)
         M = L_value === nothing ? pos(_tangent_intersection_bound(
             Float64(a), Float64(b), y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1])) :
-            _rate_flat_upper(a, b, y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1], L_cell)
+            _rate_flat_upper(a, b, y_vals[cell], y_vals[cell + 1], d_vals[cell], d_vals[cell + 1], L_value)
         Λ_vals[cell] = M
 
         cell_area = M * Δt
@@ -313,8 +253,6 @@ function construct_rate_bound_grid!(
     G = Matrix{Float64}(undef, n_channels, 0)
     dG = similar(G)
 
-    L = _channel_curvature_matrix(
-        curvature_bound, state, flow, t_grid, n_channels, N, stats)
     cumulative_integral = initial_integral
     N_evaluated = start_cell - 1
     for cell in start_cell:n_time_cells
@@ -365,15 +303,17 @@ function construct_rate_bound_grid!(
         end
         a = t_grid[cell]
         b = t_grid[cell + 1]
+        L_value = _evaluate_curvature_bound(
+            curvature_bound, state, flow, a, b, stats)
         M = 0.0
         left = cell - loaded_start + 1
         right = left + 1
         for channel in 1:n_channels
-            M += curvature_bound === nothing ? pos(_tangent_intersection_bound(
+            M += L_value === nothing ? pos(_tangent_intersection_bound(
                 Float64(a), Float64(b), G[channel, left], G[channel, right],
                 dG[channel, left], dG[channel, right])) :
                 _rate_flat_upper(a, b, G[channel, left], G[channel, right],
-                    dG[channel, left], dG[channel, right], L[channel, cell])
+                    dG[channel, left], dG[channel, right], L_value)
         end
         Λ_vals[cell] = M
         cell_area = M * (b - a)
