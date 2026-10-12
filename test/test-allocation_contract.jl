@@ -81,11 +81,11 @@ function allocation_contract_draw_subset!(fixture)
     return nothing
 end
 
-function allocation_contract_candidate!(fixture, D, B, roof)
+function allocation_contract_candidate!(fixture, D, B)
     PDMPSamplers._evaluate_subsampling_candidate!(fixture.rng,
         fixture.model.grad, fixture.flow, fixture.state,
         fixture.alg.state_cache2, fixture.cache, fixture.stats,
-        fixture.alg, 0.25, D, B, roof)
+        fixture.alg, 0.25, D, B)
     return nothing
 end
 
@@ -163,9 +163,9 @@ end
             allocation_contract_draw_subset!(fixture)
         end
         for _ in 1:5
-            allocation_contract_candidate!(fixtures.selected_reject, 0.0, 4.0, 4.0)
-            allocation_contract_candidate!(fixtures.final_reject, 0.0, 4.0, 4.0)
-            allocation_contract_candidate!(fixtures.accepted, 0.0, 4.0, 4.0)
+            allocation_contract_candidate!(fixtures.selected_reject, 0.0, 4.0)
+            allocation_contract_candidate!(fixtures.final_reject, 0.0, 4.0)
+            allocation_contract_candidate!(fixtures.accepted, 0.0, 4.0)
             allocation_contract_subsampled_event!(fixtures.aggregate_reject)
             allocation_contract_subsampled_event!(fixtures.horizon)
         end
@@ -173,11 +173,11 @@ end
         @test @allocated(allocation_contract_draw_subset!(fixtures.accepted)) == 0
         @test @allocated(allocation_contract_clear_grid!(fixtures.horizon)) == 0
         @test @allocated(allocation_contract_candidate!(
-            fixtures.selected_reject, 0.0, 4.0, 4.0)) == 0
+            fixtures.selected_reject, 0.0, 4.0)) == 0
         @test @allocated(allocation_contract_candidate!(
-            fixtures.final_reject, 0.0, 4.0, 4.0)) == 0
+            fixtures.final_reject, 0.0, 4.0)) == 0
         @test @allocated(allocation_contract_candidate!(
-            fixtures.accepted, 0.0, 4.0, 4.0)) == 0
+            fixtures.accepted, 0.0, 4.0)) == 0
         @test @allocated(allocation_contract_subsampled_event!(
             fixtures.aggregate_reject)) == 0
         @test @allocated(allocation_contract_subsampled_event!(

@@ -147,21 +147,12 @@ function signed_subset_bound(state, gradient,
     signed_deterministic = dot(state.ξ.θ, gradient)
     return max(0.0, signed_deterministic + residual_bound)
 end
-function signed_subset_bound(state, gradient,
-        flow::PreconditionedDynamics, D, M)
-    dynamics = flow.dynamics
-    if dynamics isa BouncyParticle || dynamics isa AnyBoomerang
-        residual_bound = max(0.0, M - D)
-        signed_deterministic = dot(state.ξ.θ, gradient)
-        return max(0.0, signed_deterministic + residual_bound)
-    end
-    return M
-end
+signed_subset_bound(state, gradient, flow::PreconditionedDynamics, D, M) =
+    signed_subset_bound(state, gradient, flow.dynamics, D, M)
 
 struct SubsamplingCandidateResult
     accepted::Bool
     deterministic_actual::Float64
-    actual::Float64
 end
 
 """Evaluate one aggregate-accepted subsampling proposal without advancing the live state."""
@@ -169,7 +160,7 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
         cv::SubsampledControlVariate, flow::ContinuousDynamics,
         state::AbstractPDMPState, candidate::AbstractPDMPState, cache,
         stats::AbstractStatisticCounter, violation_policy,
-        τ::Real, D::Real, B::Real, cell_roof::Real, provider=nothing)
+        τ::Real, D::Real, B::Real)
     _copy_t0 = time_ns()
     copyto!(candidate, state)
     _inc_counter_candidate_state_copies(stats)
@@ -201,7 +192,7 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
              rand(rng) * M_subset > residual_subset_bound)
         _inc_counter_selected_subset_refinement_seconds(stats,
             (time_ns() - _refine_t0) * 1.0e-9)
-        return SubsamplingCandidateResult(false, 0.0, 0.0)
+        return SubsamplingCandidateResult(false, 0.0)
     end
 
     deferred_rate = subsampling_deterministic_signed_rate(
@@ -230,7 +221,7 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     if iszero(tight_subset_bound) ||
             (tight_subset_bound < residual_subset_bound &&
              rand(rng) * residual_subset_bound > tight_subset_bound)
-        return SubsamplingCandidateResult(false, deterministic_actual, 0.0)
+        return SubsamplingCandidateResult(false, deterministic_actual)
     end
     _inc_counter_selected_subset_bound_passes(stats)
     _inc_counter_subsampling_subset_evaluations(stats)
@@ -277,7 +268,7 @@ function _evaluate_subsampling_candidate!(rng::Random.AbstractRNG,
     _inc_counter_statistic_recordings(stats)
     _inc_counter_statistic_recording_seconds(stats,
         (time_ns() - _record_t0) * 1.0e-9)
-    return SubsamplingCandidateResult(accepted, deterministic_actual, actual)
+    return SubsamplingCandidateResult(accepted, deterministic_actual)
 end
 
 """
@@ -306,7 +297,7 @@ function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
         cv::SubsampledControlVariate, flow::ContinuousDynamics,
         state::AbstractPDMPState, candidate::AbstractPDMPState, cache,
         stats::AbstractStatisticCounter, violation_policy,
-        τ::Real, cell_roof::Real, provider)
+        τ::Real)
     _copy_t0 = time_ns()
     copyto!(candidate, state)
     _inc_counter_candidate_state_copies(stats)
@@ -326,7 +317,7 @@ function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
     cv.m = length(cv.subset)
     _inc_counter_subset_draw_seconds(stats,
         (time_ns() - _subset_t0) * 1.0e-9)
-    cap > 0 || return SubsamplingCandidateResult(false, 0.0, 0.0)
+    cap > 0 || return SubsamplingCandidateResult(false, 0.0)
     _inc_counter_grid_acceptance_gradient_calls(stats)
     gradient = compute_gradient!(candidate, cv, flow, cache)
     _inc_counter_subsampling_subset_evaluations(stats)
@@ -346,7 +337,7 @@ function _evaluate_joint_signed_candidate!(rng::Random.AbstractRNG,
     _inc_counter_final_thinning_seconds(stats,
         (time_ns() - _final_t0) * 1.0e-9)
     accepted && _inc_counter_final_thinning_acceptances(stats)
-    return SubsamplingCandidateResult(accepted, 0.0, actual)
+    return SubsamplingCandidateResult(accepted, 0.0)
 end
 
 function _append_subsampling_segment!(combined::PiecewiseAffineBound,
@@ -377,7 +368,7 @@ end
 function _append_subsampling_prefix!(combined::PiecewiseAffineBound,
     cv::SubsampledControlVariate, alg::GridAdaptiveState, state::AbstractPDMPState,
     flow::ContinuousDynamics,
-    effective_horizon::Float64, modes, first_cell::Int, last_cell::Int)
+    effective_horizon::Float64, first_cell::Int, last_cell::Int)
     if joint_signed_group_enabled(cv.envelope)
         pcb = alg.pcb
         for j in first_cell:last_cell
@@ -428,7 +419,7 @@ end
             start_cell=first_cell, initial_integral=deterministic_area,
             append=first_cell > 1)
         _append_subsampling_prefix!(combined, cv, alg, state, flow, effective_horizon,
-            modes, first_cell, n_cells_bounded)
+            first_cell, n_cells_bounded)
     end
     return (n_cells_bounded, deterministic_area)::Tuple{Int,Float64}
 end
@@ -526,10 +517,10 @@ function _next_subsampled_event_time_with_provider!(rng::Random.AbstractRNG,
                 _inc_counter_pointwise_screen_passes(stats)
                 result = joint ? _evaluate_joint_signed_candidate!(rng, cv,
                     flow, state, alg.state_cache2, cache, stats, alg,
-                    τ_proposal, bar_M, provider) :
+                    τ_proposal) :
                     _evaluate_subsampling_candidate!(rng, cv, flow, state,
                         alg.state_cache2, cache, stats, alg, τ_proposal,
-                        D, B, bar_M, provider)
+                        D, B)
                 if result === nothing
                     _shrink_grid_after_bound_violation!(alg, stats)
                     break
