@@ -200,11 +200,6 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
 
         tail_restart && continue
 
-        if isfinite(τ_refresh) && τ_refresh <= min(alg.t_max[], max_horizon)
-            alg.has_cached_gradient[] = false
-            return time_offset + τ_refresh, :refresh, default_return
-        end
-
         _throw_grid_safety_limit_error(state, flow, model;
             t_invalid=effective_horizon, message="Safety limit reached")
     end
