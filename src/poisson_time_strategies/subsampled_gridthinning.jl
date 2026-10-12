@@ -416,8 +416,7 @@ end
         n_cells_bounded, deterministic_area = _build_grid_bound_prefix!(alg.pcb, state, flow,
             provider, alg, stats, alg.state_cache, cell_horizon, Inf,
             NoGridBoundaryProbe(), modes;
-            start_cell=first_cell, initial_integral=deterministic_area,
-            append=first_cell > 1)
+            start_cell=first_cell, initial_integral=deterministic_area)
         _append_subsampling_prefix!(combined, cv, alg, state, flow, effective_horizon,
             first_cell, n_cells_bounded)
     end

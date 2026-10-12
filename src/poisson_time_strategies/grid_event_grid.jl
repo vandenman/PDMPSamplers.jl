@@ -154,7 +154,7 @@ function _next_event_time_grid!(rng::Random.AbstractRNG, grad_and_hvp::P, model:
                 n_cells_bounded, built_area = _build_grid_bound_prefix!(
                     pcb, state, flow, grad_and_hvp, alg, stats, state_, effective_horizon,
                     cumulative_exp, probe_failure_handler, modes;
-                    start_cell, initial_integral=built_area, append=true)
+                    start_cell, initial_integral=built_area)
             end
             if rejection_count >= max_rejections && !alg.schedule_frozen[]
                 _increase_grid_N!(alg)

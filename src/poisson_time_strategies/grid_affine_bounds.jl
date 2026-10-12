@@ -110,7 +110,6 @@ function construct_rate_bound_grid!(
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
     start_cell::Integer=1,
     initial_integral::Float64=0.0,
-    append::Bool=false,
     rate_value_buf::Union{Vector{Float64},Nothing}=nothing,
     rate_derivative_buf::Union{Vector{Float64},Nothing}=nothing,
 )
@@ -231,7 +230,6 @@ function construct_rate_bound_grid!(
     probe_failure_handler::GridBoundaryProbe=NoGridBoundaryProbe(),
     start_cell::Integer=1,
     initial_integral::Float64=0.0,
-    append::Bool=false,
     rate_value_buf::Union{Vector{Float64},Nothing}=nothing,
     rate_derivative_buf::Union{Vector{Float64},Nothing}=nothing,
 )

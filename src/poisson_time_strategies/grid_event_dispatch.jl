@@ -101,7 +101,7 @@ end
 function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics, provider, alg::GridAdaptiveState,
     stats::AbstractStatisticCounter, state_cache::AbstractPDMPState, effective_horizon::Float64, cumulative_exp::Float64,
     probe_failure_handler::GridBoundaryProbe, modes; cached_gradient=nothing, cached_y0::Float64=NaN, cached_d0::Float64=NaN,
-    start_cell::Integer=1, initial_integral::Float64=0.0, append::Bool=false)
+    start_cell::Integer=1, initial_integral::Float64=0.0)
 
     _inc_counter_grid_bound_evaluations(stats)
     _grid_t0 = time_ns()
@@ -180,7 +180,7 @@ function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractP
         n_cells_bounded = construct_rate_bound_grid!(pcb, state, flow, provider,
             alg.bound === :value_quadratic ? alg.curvature_bound : nothing;
             cached_gradient, early_stop_threshold=cumulative_exp, state_cache, stats, max_time=effective_horizon,
-            rate_value_buf=alg.rate_value_buf, rate_derivative_buf=alg.rate_derivative_buf, probe_failure_handler, start_cell, initial_integral, append)
+            rate_value_buf=alg.rate_value_buf, rate_derivative_buf=alg.rate_derivative_buf, probe_failure_handler, start_cell, initial_integral)
     else
         n_cells_bounded = construct_upper_bound_grad_and_hess!(pcb, state, flow, provider, false;
             cached_y0, cached_d0, early_stop_threshold=cumulative_exp, stats, state_cache, max_time=effective_horizon,
