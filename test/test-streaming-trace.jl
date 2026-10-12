@@ -19,7 +19,7 @@
                     trace = PDMPSamplers.get_warmup_trace(manager)
                     @test mean(trace) ≈ [0.5]
                     @test var(trace) ≈ [1/12]
-                    @test PDMPSamplers._adaptation_std(trace) ≈ [sqrt(1/12)]
+                    @test Statistics.std(trace) ≈ [sqrt(1/12)]
                     if trace isa PDMPSamplers.StreamingPDMPTrace
                         for fraction in (0.5, 1.0)
                             @test PDMPSamplers.streaming_dense_time_uniform_states(

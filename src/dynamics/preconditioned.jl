@@ -87,15 +87,13 @@ update_preconditioner!(::Random.AbstractRNG, flow::ContinuousDynamics,
 
 # Output backends may keep additional online moments for final summaries, but
 # adaptation must see the same segment-wise statistic as the established dense
-# trace. A streaming specialization is defined after its trace integrator.
-_adaptation_std(trace::AbstractPDMPTrace) = Statistics.std(trace)
-
+# trace.
 function update_preconditioner!(rng::Random.AbstractRNG,
         flow::PreconditionedDynamics{<:DiagonalPreconditioner},
         trace::AbstractPDMPTrace, state::AbstractPDMPState,
         first_update::Bool=false, max_scale_expansion::Real=Inf,
         can_stick::Union{Nothing,AbstractVector{Bool}}=nothing)
-    sigmas = _adaptation_std(trace)
+    sigmas = Statistics.std(trace)
     if can_stick !== nothing
         length(can_stick) == length(sigmas) || throw(DimensionMismatch(
             "can_stick length $(length(can_stick)) does not match trace dimension $(length(sigmas))"))

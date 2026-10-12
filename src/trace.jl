@@ -450,15 +450,11 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
     # adaptation finalizer. Main starts later and is installed explicitly at
     # retained-phase entry, so it must not capture the pre-warmup state here.
     warmup_end === nothing || (trace.initial_state =
-        _stream_terminal_state(state, flow))
+        PDMPTerminalState(state, flow))
     warmup_end === nothing || online === nothing || _online_begin!(online, state)
     return trace
 end
 
-@inline function _stream_terminal_state(state::AbstractPDMPState,
-        flow::ContinuousDynamics)
-    return PDMPTerminalState(state, flow)
-end
 
 """
     stream_move!(x, velocity, free, elapsed, flow)
@@ -888,7 +884,7 @@ end
 function begin_trace_phase!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, flow::ContinuousDynamics)
     trace.initial_state === nothing || return trace
-    trace.initial_state = _stream_terminal_state(state, flow)
+    trace.initial_state = PDMPTerminalState(state, flow)
     trace.moments = StreamingMoments(state)
     trace.online === nothing || _online_begin!(trace.online, state)
     return trace
@@ -901,7 +897,7 @@ end
 function finish_trace_phase!(trace::StreamingPDMPTrace,
         state::AbstractPDMPState, flow::ContinuousDynamics)
     _stream_accumulate_moments!(trace, state)
-    trace.terminal_state = _stream_terminal_state(state, flow)
+    trace.terminal_state = PDMPTerminalState(state, flow)
     flush_streaming_trace!(trace)
     trace.online === nothing ||
         _online_finish!(trace.online, state, trace.directory)
@@ -1387,7 +1383,6 @@ function _integrate(trace::StreamingPDMPTrace, f, args...)
     return integral ./ (last_event_time(trace) - first_event_time(trace))
 end
 
-_adaptation_std(trace::StreamingPDMPTrace) = Statistics.std(trace)
 
 function _integrate!(out::AbstractVector, trace::StreamingPDMPTrace, f,
         args...)
