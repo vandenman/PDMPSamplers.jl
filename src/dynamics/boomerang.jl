@@ -2,26 +2,25 @@ struct Boomerang{U, T, S, LT} <: NonFactorizedDynamics
     Γ::U
     μ::T
     λref::S
-    ρ::S  # reserved for partial-refreshment features
+    ρ::S  # velocity persistence at refreshment
     L::LT
     ΣL::LT  # cholesky(Symmetric(Γ)).L
 end
 
 """
-    MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+    MutableBoomerang{U, T, S, LT} <: NonFactorizedDynamics
 
 Mutable version of `Boomerang` for adaptation during warmup.
-Same fields as `Boomerang` plus `eigen_cache` for dense/low-rank Γ (Phase 2+).
+Same fields as `Boomerang`.
 Created via the `AdaptiveBoomerang` convenience constructors.
 """
-mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+mutable struct MutableBoomerang{U, T, S, LT} <: NonFactorizedDynamics
     Γ::U
     μ::T
     λref::S
     const ρ::S
     L::LT
     ΣL::LT
-    eigen_cache::ET  # nothing for diagonal Γ; reserved for Phase 2+
 end
 
 """
@@ -228,17 +227,16 @@ function Base.copy(flow::MutableBoomerang)
     MutableBoomerang(
         copy(flow.Γ), copy(flow.μ), flow.λref, flow.ρ,
         flow.L === nothing ? nothing : copy(flow.L),
-        flow.ΣL === nothing ? nothing : copy(flow.ΣL),
-        flow.eigen_cache === nothing ? nothing : deepcopy(flow.eigen_cache)
+        flow.ΣL === nothing ? nothing : copy(flow.ΣL)
     )
 end
 
 function MutableBoomerang(Γ, μ, λ = 0.1; ρ=0.0)
     if Γ isa Diagonal
-        return MutableBoomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L, nothing)
+        return MutableBoomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L)
     else
         Γs = Symmetric(Γ)
-        return MutableBoomerang(Γs, μ, λ, ρ, cholesky(Γs).L, cholesky(inv(Γs)).L, nothing)
+        return MutableBoomerang(Γs, μ, λ, ρ, cholesky(Γs).L, cholesky(inv(Γs)).L)
     end
 end
 
@@ -263,14 +261,14 @@ function AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0, scheme=:diagonal, rank
         μ = zeros(d)
         L = LowerTriangular(Matrix{Float64}(I, d, d))
         ΣL = LowerTriangular(Matrix{Float64}(I, d, d))
-        MutableBoomerang(Γ, μ, Float64(λref), Float64(ρ), L, ΣL, nothing)
+        MutableBoomerang(Γ, μ, Float64(λref), Float64(ρ), L, ΣL)
     elseif scheme == :lowrank
         r = min(rank, d - 1)
         r < 1 && error("Low-rank scheme requires d ≥ 2 and rank ≥ 1.")
         lrp = LowRankPrecision(d, r)
         lowrank_precompute!(lrp)
         μ = zeros(d)
-        MutableBoomerang(lrp, μ, Float64(λref), Float64(ρ), nothing, nothing, nothing)
+        MutableBoomerang(lrp, μ, Float64(λref), Float64(ρ), nothing, nothing)
     else
         error("Unknown adaptation scheme: $scheme. Use :diagonal, :fullrank, or :lowrank.")
     end
@@ -382,7 +380,7 @@ function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
 end
 
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
-        flow::MutableBoomerang{U,T,S,LT,ET}, cache) where {U,T,S,LT<:Diagonal,ET}
+        flow::MutableBoomerang{U,T,S,LT}, cache) where {U,T,S,LT<:Diagonal}
     return _reflect_sticky_diagonal_boomerang!(state, ∇ϕ, flow, cache)
 end
 
@@ -587,7 +585,7 @@ refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
 # Low-rank flows carry no Cholesky factor, so the diagonal-ΣL fast paths never
 # apply; these methods only resolve the dispatch ambiguity with them.
 refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
-    flow::MutableBoomerang{U,T,S,LT,ET}) where {U<:LowRankPrecision,T,S,LT<:Diagonal,ET} =
+    flow::MutableBoomerang{U,T,S,LT}) where {U<:LowRankPrecision,T,S,LT<:Diagonal} =
     draw_stratum_velocity!(rng, state, flow)
 
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::LowRankMutableBoomerang, cache)
@@ -641,7 +639,7 @@ function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::LowRankMu
 end
 
 reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
-        flow::MutableBoomerang{U,T,S,LT,ET}, cache) where {U<:LowRankPrecision,T,S,LT<:Diagonal,ET} =
+        flow::MutableBoomerang{U,T,S,LT}, cache) where {U<:LowRankPrecision,T,S,LT<:Diagonal} =
     invoke(reflect!, Tuple{StickyPDMPState,AbstractVector,LowRankMutableBoomerang,Any},
         state, ∇ϕ, flow, cache)
 

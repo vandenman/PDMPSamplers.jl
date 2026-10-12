@@ -385,10 +385,10 @@
         state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, -1.0]))
         manager = PDMPSamplers.TraceManager(
             state, flow, GridThinningStrategy(), 2.0)
-        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup, :reflect)
         state.t[] = 1.0
         state.ξ.x .= [1.0, -1.0]
-        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup, :reflect)
         state.t[] = 2.0
         adapter = PDMPSamplers.default_dynamics_adapter(
             flow, 1.0, 0.0; can_stick=falses(2))
@@ -444,18 +444,18 @@
         state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
         manager = PDMPSamplers.TraceManager(
             state, flow, GridThinningStrategy(), 3.0)
-        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup, :reflect)
         state.t[] = 1.0
         state.ξ.x[1] = 1.0
         state.ξ.θ[1] = -1.0
-        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup, :reflect)
         state.ξ.θ[1] = 2.0
         PDMPSamplers.record_dynamics_adaptation!(
             manager, state, flow, :warmup)
         state.t[] = 2.0
         state.ξ.x[1] = 3.0
         state.ξ.θ[1] = -2.0
-        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup)
+        PDMPSamplers.record_event!(manager, state, flow, nothing, :warmup, :reflect)
         trace = PDMPSamplers.get_warmup_trace(manager)
         @test trace.times == [0.0, 1.0, 1.0, 2.0]
         @test Statistics.mean(trace)[1] ≈ 1.25
@@ -616,7 +616,7 @@
 
     @testset "subsampling anchor-bank selection continues after warmup" begin
         state = PDMPState(10.0, SkeletonPoint([1.0], [0.0]))
-        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing, 5.0)
+        trace_mgr = PDMPSamplers.TraceManager(nothing, nothing)
         envelope = TrajectoryResidualEnvelope(ones(1, 1), [0.0])
         grad = SubsampledControlVariate(
             (out, x) -> fill!(out, 0.0),

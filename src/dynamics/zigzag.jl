@@ -1,15 +1,10 @@
 # TODO: these fields are not necessarily part of the dynamics, but rather used in the thinning algorithm...
 # maybe they belong there?
 
-struct ZigZag{T,S,S2,R} <: FactorizedDynamics
+struct ZigZag{T,S} <: FactorizedDynamics
     Γ::T
     μ::S
-    σ::S2       # reserved for partial-refreshment features
-    λref::Float64
-    ρ::Float64  # reserved for partial-refreshment features
-    ρ̄::R        # reserved for partial-refreshment features
 end
-ZigZag(Γ, μ, σ=(Vector(diag(Γ))).^(-0.5); λref=0.0, ρ=0.0) = ZigZag(Γ, μ, σ, λref, ρ, sqrt(1-ρ^2))
 ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
 
 refresh_rate(::ZigZag) = 0.0

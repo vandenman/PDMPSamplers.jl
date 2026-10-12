@@ -69,7 +69,7 @@ end
     lowrank.V[:, 1] .= [0.25, -0.5]
     lowrank.Λ[1] = 0.75
     PDMPSamplers.lowrank_precompute!(lowrank)
-    lowrank_flow = PDMPSamplers.MutableBoomerang(lowrank, zeros(2), 0.0, 0.0, nothing, nothing, nothing)
+    lowrank_flow = PDMPSamplers.MutableBoomerang(lowrank, zeros(2), 0.0, 0.0, nothing, nothing)
     fill!(out, NaN)
     @test PDMPSamplers._reference_mul!(out, lowrank_flow, x) === out
     expected = similar(x)

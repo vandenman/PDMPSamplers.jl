@@ -853,7 +853,6 @@ function update_boomerang!(flow::MutableBoomerang, stats::WelfordBoomerangStats,
         flow.L[i, i] = s
         flow.ΣL[i, i] = 1.0 / s
     end
-    flow.eigen_cache = nothing
     return flow
 end
 

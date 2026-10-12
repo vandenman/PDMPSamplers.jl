@@ -1,21 +1,8 @@
-# _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
-# _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
-# is this type stable? isfactorized depends only on the type of flow though
-_trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = isfactorized(flow) ? FactorizedTrace : PDMPTrace
-_trace_type(flow::ContinuousDynamics, ::Union{Sticky,AggregateSticky}) =
-    isfactorized(flow) ? FactorizedTrace : PDMPTrace
 # Sticky ZigZag events still alter only one coordinate at a time.  Preserve
 # that coordinate in the event handler and use the sparse factorized trace;
 # forcing this case through PDMPTrace stores two dense d-vectors (and a mask)
 # per event and then copies both matrices again in `compact`.
-# _trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = PDMPTrace
-# _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = FactorizedTrace
-
-# _trace_type(flow::FactorizedDynamics, alg::PoissonTimeStrategy) = PDMPTrace
-# _trace_type(flow::FactorizedDynamics, alg::Sticky)              = FactorizedTrace
-
-
-
+_trace_type(flow::ContinuousDynamics, alg::PoissonTimeStrategy) = isfactorized(flow) ? FactorizedTrace : PDMPTrace
 
 struct PDMPEvent{T,X,V} <: AbstractPDMPEvent
     time::T
@@ -1558,7 +1545,6 @@ last_event_time(trace::FactorizedTrace) = isempty(trace.events) ? trace.initial_
 struct TraceManager{T}
     main_trace::T
     warmup_trace::T
-    t_warmup::Float64
 end
 function prepare_trace_storage_boundary!(mgr::TraceManager, phase::Symbol)
     trace = phase === :warmup ? mgr.warmup_trace : mgr.main_trace
@@ -1577,7 +1563,7 @@ function prepare_dynamics_adaptation_storage_boundary!(mgr::TraceManager,
 end
 function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics, alg::PoissonTimeStrategy, t_warmup::Real)
     TT = _trace_type(flow, alg)
-    _build_trace_manager(TT, state, flow, t_warmup)
+    _build_trace_manager(TT, state, flow)
 end
 
 function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics,
@@ -1586,13 +1572,13 @@ function TraceManager(state::AbstractPDMPState, flow::ContinuousDynamics,
     main_trace = StreamingPDMPTrace(state, flow, storage, "main")
     warmup_trace = StreamingPDMPTrace(state, flow, storage, "warmup";
         warmup_end=t_warmup)
-    return TraceManager(main_trace, warmup_trace, float(t_warmup))
+    return TraceManager(main_trace, warmup_trace)
 end
 
-function _build_trace_manager(::Type{TT}, state::AbstractPDMPState, flow::ContinuousDynamics, t_warmup::Real) where TT
+function _build_trace_manager(::Type{TT}, state::AbstractPDMPState, flow::ContinuousDynamics) where TT
     main_trace = make_empty_trace(TT, state, flow)
     warmup_trace = make_empty_trace(TT, state, flow)
-    TraceManager(main_trace, warmup_trace, float(t_warmup))
+    TraceManager(main_trace, warmup_trace)
 end
 
 """
@@ -1605,14 +1591,8 @@ get_warmup_trace(mgr::TraceManager) = mgr.warmup_trace
 get_main_trace(mgr::TraceManager)   = mgr.main_trace
 
 function record_event!(mgr::TraceManager, state, flow, args, phase::Symbol,
-        event_type::Symbol=:legacy)
-    trace = if phase === :warmup
-        get_warmup_trace(mgr)
-    elseif phase === :main
-        get_main_trace(mgr)
-    else
-        state.t[] < mgr.t_warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
-    end
+        event_type::Symbol)
+    trace = phase === :warmup ? get_warmup_trace(mgr) : get_main_trace(mgr)
     if trace isa StreamingPDMPTrace
         _record_streaming_event!(trace, state, flow, args, event_type)
     else

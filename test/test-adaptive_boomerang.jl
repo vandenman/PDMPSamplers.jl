@@ -14,7 +14,6 @@
         @test flow.Γ == Diagonal(ones(d))
         @test flow.λref == 0.1
         @test flow.ρ == 0.0
-        @test flow.eigen_cache === nothing
 
         # Custom initial guess
         Γ0 = Diagonal([2.0, 3.0])
@@ -310,7 +309,6 @@ end
         @test flow.Γ ≈ I(d)
         @test flow.L isa LowerTriangular
         @test flow.ΣL isa LowerTriangular
-        @test flow.eigen_cache === nothing
 
         # Dynamics methods work with dense types
         θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)

@@ -13,8 +13,8 @@ _velocity_preserving_sticky(::PreconditionedDynamics{
 _velocity_preserving_sticky(::PreconditionedDynamics{
     <:Union{IdentityPreconditioner,DiagonalPreconditioner},<:BouncyParticle}) = true
 _velocity_preserving_sticky(::Boomerang{U,T,S,LT}) where {U,T,S,LT<:Diagonal} = true
-_velocity_preserving_sticky(::MutableBoomerang{U,T,S,LT,ET}) where
-    {U,T,S,LT<:Diagonal,ET} = true
+_velocity_preserving_sticky(::MutableBoomerang{U,T,S,LT}) where
+    {U,T,S,LT<:Diagonal} = true
 _velocity_preserving_sticky(flow::PreconditionedDynamics{
     <:Union{IdentityPreconditioner,DiagonalPreconditioner},<:AnyBoomerang}) =
     _velocity_preserving_sticky(flow.dynamics)
@@ -36,8 +36,8 @@ end
 end
 
 @inline function _boomerang_covariance_entry(
-        flow::MutableBoomerang{U,T,S,LT,ET}, i::Integer, j::Integer) where
-        {U,T,S,LT<:Diagonal,ET}
+        flow::MutableBoomerang{U,T,S,LT}, i::Integer, j::Integer) where
+        {U,T,S,LT<:Diagonal}
     return i == j ? abs2(flow.ΣL.diag[i]) : zero(eltype(flow.ΣL.diag))
 end
 
@@ -61,8 +61,8 @@ _boomerang_covariance_entry(
 # two representation-specific methods above otherwise intersect ambiguously.
 # The precision representation is authoritative for this subtype.
 @inline function _boomerang_covariance_entry(
-        flow::MutableBoomerang{U,T,S,LT,ET}, i::Integer, j::Integer) where
-        {U<:LowRankPrecision,T,S,LT<:Diagonal,ET}
+        flow::MutableBoomerang{U,T,S,LT}, i::Integer, j::Integer) where
+        {U<:LowRankPrecision,T,S,LT<:Diagonal}
     return _lowrank_boomerang_covariance_entry(flow, i, j)
 end
 
@@ -430,7 +430,7 @@ refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
     flow::Boomerang{U,T,S,LT}) where {U,T,S,LT<:Diagonal} =
     _refresh_preserved_sticky_velocity!(rng, state, flow)
 refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
-    flow::MutableBoomerang{U,T,S,LT,ET}) where {U,T,S,LT<:Diagonal,ET} =
+    flow::MutableBoomerang{U,T,S,LT}) where {U,T,S,LT<:Diagonal} =
     _refresh_preserved_sticky_velocity!(rng, state, flow)
 
 _boundary_proposal_clock_constant(flow::Union{ZigZag,BouncyParticle,AnyBoomerang,

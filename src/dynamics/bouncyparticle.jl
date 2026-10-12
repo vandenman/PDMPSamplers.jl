@@ -1,24 +1,20 @@
 """
-    BouncyParticle(λ) <: ContinuousDynamics
-Input: argument `Γ`, a sparse precision matrix approximating target precision.
-Bouncy particle sampler,  `λ` is the refreshment rate, which has to be
-strictly positive.
+    BouncyParticle(Γ, μ, λref=0.1) <: ContinuousDynamics
+
+Bouncy particle sampler with reference precision `Γ`, reference mean `μ`,
+and refreshment rate `λref`.
 """
-struct BouncyParticle{T, S, R, V, LT} <: NonFactorizedDynamics
+struct BouncyParticle{T, S, R} <: NonFactorizedDynamics
     Γ::T
     μ::S
     λref::R
-    ρ::R  # reserved for partial-refreshment features
-    U::V  # reserved for partial-refreshment features
-    L::LT
+    function BouncyParticle(Γ::T, μ::S, λref::R) where {T,S,R}
+        cholesky(Symmetric(Γ)) # Validate the precision used by analytic bounds.
+        return new{T,S,R}(Γ, μ, λref)
+    end
 end
 
-function BouncyParticle(Γ, μ, λref = 0.1; ρ=0.0)
-    L = cholesky(Symmetric(Γ)).L
-    σ = Vector(diag(Γ)).^(-0.5)
-    return BouncyParticle(Γ, μ, λref, ρ, σ, L)
-end
-
+BouncyParticle(Γ, μ) = BouncyParticle(Γ, μ, 0.1)
 BouncyParticle(d::Integer) = BouncyParticle(I(d), zeros(d), 0.1)
 BouncyParticle(d::Integer, λref::Real) = BouncyParticle(I(d), zeros(d), λref)
 

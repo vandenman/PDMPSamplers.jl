@@ -2,6 +2,11 @@
 
 @testset "Algorithmic regressions" begin
 
+    @testset "BPS validates its reference precision" begin
+        @test_throws PosDefException BouncyParticle(Diagonal([1.0, -1.0]), zeros(2))
+        @test_throws PosDefException BouncyParticle([1.0 2.0; 2.0 1.0], zeros(2), 0.1)
+    end
+
     @testset "Boomerang boundary root at zero advances to the next crossing" begin
         flow = Boomerang(Diagonal([2.0]), [0.5], 0.0)
         # x(t) = 0.5 - 0.5 cos(t) + v sin(t).  At x=0 the root at
@@ -55,7 +60,7 @@
 
         mutable_diagonal_flow = MutableBoomerang(
             Diagonal([0.25, 1.0, 4.0]), zeros(3), 0.0, 0.0,
-            diagonal_flow.L, diagonal_flow.ΣL, nothing)
+            diagonal_flow.L, diagonal_flow.ΣL)
         @test PDMPSamplers._boomerang_covariance_entry(
             mutable_diagonal_flow, 3, 3) ≈ 0.25
         @test PDMPSamplers._boomerang_covariance_entry(
@@ -87,7 +92,7 @@
         # LowRankPrecision with a Diagonal stored factor must use the
         # low-rank covariance representation, not the diagonal-factor method.
         lowrank_diagonal_storage = MutableBoomerang(lrp, zeros(3), 0.0, 0.0,
-            Diagonal(ones(3)), Diagonal(ones(3)), nothing)
+            Diagonal(ones(3)), Diagonal(ones(3)))
         @test PDMPSamplers._boomerang_covariance_entry(
             lowrank_diagonal_storage, 1, 2) ≈ lowrank_cov[1, 2]
         @test @allocated(PDMPSamplers._boomerang_covariance_entry(

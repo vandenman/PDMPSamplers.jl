@@ -394,8 +394,8 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(Random.default_rng(), flow_nf, model_nf, alg_nf, 0.0, ξ0_nf)
         trace_manager = PDMPSamplers.TraceManager(state, flow_nf, alg_nf, 0.0)
 
-        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :warmup)
-        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :main)
+        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :warmup, :reflect)
+        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :main, :reflect)
 
         @test isone(length(PDMPSamplers.get_warmup_trace(trace_manager)))
         @test isone(length(PDMPSamplers.get_main_trace(trace_manager)))
