@@ -96,7 +96,9 @@
 
                     acceptance_prob = stats.reflections_accepted / stats.reflections_events
 
-                    PDMPSamplers._ispositive(refresh_rate(flow)) && @test stats.refreshment_events > 100
+                    # avoid ispositive here since this may run on Julia < 1.13, which doesn't have ispositive defined
+                    # then > 1.13 can use ispositive but < 1.13 needs PDMPSamplers.ispositive, which ugly (and not intended)
+                    (refresh_rate(flow) > 0) && @test stats.refreshment_events > 100
 
                     if !(flow isa AnyBoomerang)
                         @test acceptance_prob > 0.4
