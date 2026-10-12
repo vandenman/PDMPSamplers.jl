@@ -1444,65 +1444,11 @@ function _integrate(trace::PDMPTrace, f, args...)
     if trace.free_masks !== nothing
         return _integrate_masked(trace, f, args...)
     end
-    return _integrate_unmasked(trace, f, args...)
+    return _integrate_unmasked!(nothing, trace, f, args...)
 end
 
-_integrate(trace::AbstractPDMPTrace, f, args...) = _integrate_unmasked(trace, f, args...)
+_integrate(trace::AbstractPDMPTrace, f, args...) = _integrate_unmasked!(nothing, trace, f, args...)
 
-function _integrate_unmasked(trace::AbstractPDMPTrace, f, args...)
-
-    flow = trace.flow
-
-    # the stuff below works for both traces, but has a few duplications
-    # this should be easier to adapt to avoid allocations though
-
-    iter = trace
-    next = iterate(iter)
-    isnothing(next) && error("Cannot compute statistics on an empty trace")
-
-    t₀, x_state, θ_state, _ = next[2]
-    xt₀ = copy(x_state)
-    θt₀ = copy(θ_state)
-
-    start_time = t₀
-    next = iterate(iter, next[2])
-    isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
-    t₁, x_state, θ_state, _ = next[2]
-    xt₁ = copy(x_state) # Copy for safety, though strictly only xt0 needs to be frozen
-    θt₁ = copy(θ_state)
-
-    integral = _integrate_segment(
-        f,
-        flow,
-        xt₀, xt₁,
-        θt₀, θt₁,
-        t₀,  t₁,
-        args...
-    )
-    t₀ = t₁
-    copyto!(xt₀, xt₁)
-    copyto!(θt₀, θt₁)
-    has_inplace = hasmethod(_integrate_segment!, Tuple{typeof(integral), typeof(f), typeof(flow), typeof(xt₀), typeof(xt₁), typeof(θt₀), typeof(θt₁), typeof(t₀), typeof(t₁), map(typeof, args)...})
-    next = iterate(iter, next[2])
-    while next !== nothing
-        t₁, x_state, θ_state, _ = next[2]
-        copyto!(xt₁, x_state)
-        copyto!(θt₁, θ_state)
-        if has_inplace
-            _integrate_segment!(integral, f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
-        else
-            integral .+= _integrate_segment(f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
-        end
-        t₀ = t₁
-        copyto!(xt₀, xt₁)
-        copyto!(θt₀, θt₁)
-        next = iterate(iter, next[2])
-    end
-    end_time = t₁
-    total_time = end_time - start_time
-
-    return integral / total_time
-end
 
 function _integrate!(out::AbstractVector, trace::PDMPTrace, f, args...)
     if trace.free_masks !== nothing
@@ -1515,7 +1461,7 @@ end
 _integrate!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...) =
     _integrate_unmasked!(out, trace, f, args...)
 
-function _integrate_unmasked!(out::AbstractVector, trace::AbstractPDMPTrace, f, args...)
+function _integrate_unmasked!(out::Union{AbstractArray,Nothing}, trace::AbstractPDMPTrace, f, args...)
 
     flow = trace.flow
 
@@ -1531,25 +1477,24 @@ function _integrate_unmasked!(out::AbstractVector, trace::AbstractPDMPTrace, f, 
     next = iterate(iter, next[2])
     isnothing(next) && error("Cannot compute statistics on a trace with fewer than 2 events")
 
-    fill!(out, 0)
-
     t₁, x_state, θ_state, _ = next[2]
     xt₁ = copy(x_state)
     θt₁ = copy(θ_state)
 
+    allocate_output = out === nothing
+    if allocate_output
+        out = _integrate_segment(f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
+    else
+        fill!(out, 0)
+    end
     has_inplace = hasmethod(_integrate_segment!, Tuple{typeof(out), typeof(f), typeof(flow), typeof(xt₀), typeof(xt₁), typeof(θt₀), typeof(θt₁), typeof(t₀), typeof(t₁), map(typeof, args)...})
 
-    if has_inplace
-        _integrate_segment!(out, f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
-    else
-        out .+= _integrate_segment(f, flow, xt₀, xt₁, θt₀, θt₁, t₀, t₁, args...)
+    if allocate_output
+        t₀ = t₁
+        copyto!(xt₀, xt₁)
+        copyto!(θt₀, θt₁)
+        next = iterate(iter, next[2])
     end
-
-    t₀ = t₁
-    copyto!(xt₀, xt₁)
-    copyto!(θt₀, θt₁)
-
-    next = iterate(iter, next[2])
     while next !== nothing
         t₁, x_state, θ_state, _ = next[2]
         copyto!(xt₁, x_state)
@@ -1567,6 +1512,7 @@ function _integrate_unmasked!(out::AbstractVector, trace::AbstractPDMPTrace, f, 
 
     end_time = t₁
     total_time = end_time - start_time
+    allocate_output && return out / total_time
     out ./= total_time
     return out
 end
