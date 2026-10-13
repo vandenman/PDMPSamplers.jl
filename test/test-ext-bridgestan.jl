@@ -55,18 +55,19 @@ else
             JSON.json(data_file, data_dict)
 
             model = PDMPModel(stan_file, data_file)
+            @test model.hvp === nothing
 
             alg = GridThinningStrategy()
 
             flow = ZigZag(d)
             x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             T = 1000.0
 
             # Run sampler
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
+            trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false))
 
             # Basic checks
             @test length(trace) > 10
@@ -87,13 +88,13 @@ else
 
             flow = ZigZag(d)
             x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             T = 500.0
 
             # Run sampler
-            trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false)
+            trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, progress=false))
 
             # Basic checks
             @test length(trace) > 10
@@ -122,11 +123,52 @@ else
                 PDMPSamplers.compute_gradient!(model_unit.grad, x_test, out)
                 @test norm(out - x_test) < 1e-8
 
-                model_copy = PDMPSamplers._copy_model(model_unit)
+                model_copy = copy(model_unit)
                 @test model_copy.grad.f.model.stanmodel != model_unit.grad.f.model.stanmodel
                 out_copy = zeros(d)
                 PDMPSamplers.compute_gradient!(model_copy.grad, x_test, out_copy)
                 @test out_copy ≈ out
+            end
+
+            @testset "potential-only capability" begin
+                sm_potential = BridgeStan.StanModel(stan_file, data_file)
+                model_potential = PDMPModel(sm_potential; hvp=false)
+                out = zeros(d)
+                PDMPSamplers.compute_gradient!(model_potential.grad, x_test, out)
+                gradient_potential = PDMPSamplers._last_gradient_potential(model_potential)
+                gradient_snapshot = copy(out)
+
+                @test PDMPSamplers._potential_available(model_potential)
+                @test PDMPSamplers._potential(model_potential, x_test) ≈ gradient_potential
+                @test out == gradient_snapshot
+
+                model_copy = copy(model_potential)
+                @test model_copy.grad.f.model.stanmodel != model_potential.grad.f.model.stanmodel
+                @test PDMPSamplers._potential(model_copy, x_test) ≈ gradient_potential
+
+                stats = PDMPSamplers.StatisticCounter()
+                counted_model = PDMPSamplers.with_stats(model_potential, stats)
+                @test PDMPSamplers._last_gradient_potential(counted_model) ≈ gradient_potential
+                @test PDMPSamplers._potential(counted_model, x_test) ≈ gradient_potential
+                @test stats.potential_calls == 1
+                @test stats.∇f_calls == 0
+                @test PDMPSamplers._get_counter_grid_endpoint_gradient_calls(stats) == 0
+                @test stats.fd_curvature_gradient_calls == 0
+                @test PDMPSamplers._get_counter_grid_acceptance_gradient_calls(stats) == 0
+
+                unavailable = PDMPModel(d, FullGradient((out, x) -> copyto!(out, x)))
+                @test !PDMPSamplers._potential_available(unavailable)
+                @test_throws ArgumentError PDMPSamplers._potential(unavailable, x_test)
+                @test_throws PDMPSamplers._SupportBoundaryProbeError PDMPSamplers._potential(model_potential, fill(NaN, d))
+                err = try
+                    PDMPSamplers._potential(model_potential, fill(NaN, d))
+                    nothing
+                catch err
+                    err
+                end
+                msg = sprint(showerror, err)
+                @test occursin("BridgeStan log_density failed", msg)
+                @test occursin("code -1", msg)
             end
 
             @testset "fast_log_density_hvp!" begin
@@ -135,7 +177,7 @@ else
                 result = model_unit_hvp.hvp(x_test, v_test)
                 @test norm(result - v_test) < 1e-8
 
-                model_copy_hvp = PDMPSamplers._copy_model(model_unit_hvp)
+                model_copy_hvp = copy(model_unit_hvp)
                 @test model_copy_hvp.grad.f.model.stanmodel != model_unit_hvp.grad.f.model.stanmodel
                 @test model_copy_hvp.hvp.model.stanmodel != model_unit_hvp.hvp.model.stanmodel
                 @test model_copy_hvp.hvp(x_test, v_test) ≈ result
@@ -146,9 +188,9 @@ else
                 model_hvp = PDMPModel(sm_hvp; hvp=true)
                 flow_hvp = ZigZag(d)
                 x0_hvp = randn(d)
-                θ0_hvp = PDMPSamplers.initialize_velocity(flow_hvp, d)
+                θ0_hvp = PDMPSamplers.initialize_velocity(Random.default_rng(), flow_hvp, d)
                 ξ0_hvp = SkeletonPoint(x0_hvp, θ0_hvp)
-                trace_hvp, stats_hvp = pdmp_sample(ξ0_hvp, flow_hvp, model_hvp, alg, 0.0, 1000.0; progress=false)
+                trace_hvp, stats_hvp = only(pdmp_sample(ξ0_hvp, flow_hvp, model_hvp, alg, 0.0, 1000.0; progress=false))
                 @test length(trace_hvp) > 10
                 @test stats_hvp.∇f_calls > 0
                 @test stats_hvp.reflections_accepted > 0

@@ -10,7 +10,7 @@
     alg = GridThinningStrategy()
 
     x0 = ones(d)
-    θ0 = PDMPSamplers.initialize_velocity(flow, d)
+    θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
     ξ0 = SkeletonPoint(x0, θ0)
     T_run = 5_000.0
 

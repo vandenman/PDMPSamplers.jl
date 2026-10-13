@@ -6,7 +6,7 @@ function _stopping_setup(; d::Int=3)
     grad = FullGradient(Base.Fix1(neg_gradient!, target))
     model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
     alg = GridThinningStrategy()
-    ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+    ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
     return ξ0, flow, model, alg
 end
 
@@ -34,6 +34,10 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test_throws ArgumentError OnlineESSCriterion(1.0; check_every=0)
         @test_throws ArgumentError OnlineESSCriterion(1.0; min_samples=1)
         @test_throws ArgumentError OnlineESSCriterion(1.0; batch_size=0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=-1.0, max_time=10.0, stable_time=1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=10.0, max_time=10.0, stable_time=1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=1.0, max_time=10.0, stable_time=-1.0)
+        @test_throws ArgumentError AdaptiveWarmupCriterion(; min_time=1.0, max_time=10.0, stable_time=1.0, check_every=0)
         @test_throws ArgumentError AnyCriterion()
         @test_throws ArgumentError AllCriteria()
 
@@ -47,14 +51,45 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test_throws ArgumentError stop_after()
     end
 
+    @testset "AdaptiveWarmupCriterion unit behavior" begin
+        state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        stats = PDMPSamplers.DevelStatisticCounter()
+        criterion = AdaptiveWarmupCriterion(;
+            min_time=2.0, max_time=10.0, stable_time=1.0,
+            min_events=2, check_every=1)
+
+        PDMPSamplers.initialize!(criterion, state, nothing, stats)
+        @test !PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+
+        state.t[] = 1.5
+        PDMPSamplers._inc_counter_reflections_events(stats)
+        PDMPSamplers._inc_counter_reflections_events(stats)
+        PDMPSamplers.update!(criterion, state, nothing, stats, :reflect)
+        @test !PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+
+        state.t[] = 2.25
+        PDMPSamplers.update!(criterion, state, nothing, stats, :reflect)
+        @test PDMPSamplers.is_satisfied(criterion, state, nothing, stats)
+        @test PDMPSamplers.stop_reason(criterion) == :warmup_stabilized
+
+        capped = AdaptiveWarmupCriterion(;
+            min_time=2.0, max_time=3.0, stable_time=10.0,
+            min_events=100, check_every=10)
+        state.t[] = 0.0
+        PDMPSamplers.initialize!(capped, state, nothing, stats)
+        state.t[] = 3.0
+        @test PDMPSamplers.is_satisfied(capped, state, nothing, stats)
+        @test PDMPSamplers.stop_reason(capped) == :reached_time
+    end
+
     @testset "Backward compatible default" begin
         Random.seed!(1201)
         ξ0a, flowa, modela, alga = _stopping_setup()
-        trace_a, stats_a = pdmp_sample(ξ0a, flowa, modela, alga, 0.0, 200.0, 50.0; progress=false)
+        trace_a, stats_a = only(pdmp_sample(ξ0a, flowa, modela, alga, 0.0, 200.0, 50.0; progress=false))
 
         Random.seed!(1201)
         ξ0b, flowb, modelb, algb = _stopping_setup()
-        trace_b, stats_b = pdmp_sample(
+        trace_b, stats_b = only(pdmp_sample(
             ξ0b,
             flowb,
             modelb,
@@ -65,7 +100,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             stop=FixedTimeCriterion(200.0),
             warmup_stop=FixedTimeCriterion(50.0),
             progress=false
-        )
+        ))
 
         @test length(trace_a) == length(trace_b)
         @test stats_a.reflections_events == stats_b.reflections_events
@@ -74,12 +109,26 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test stats_a.sticky_events == stats_b.sticky_events
         @test stats_a.stop_reason == :reached_time
         @test stats_b.stop_reason == :reached_time
+        @test stats_a.initialization_elapsed_time >= 0
+        @test stats_a.warmup_phase_elapsed_time >= stats_a.warmup_elapsed_time
+        @test stats_a.main_phase_elapsed_time >= stats_a.main_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.warmup_adapter_finish_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.main_sampler_initialization_elapsed_time
+        @test stats_a.transition_elapsed_time >=
+            stats_a.algorithm_warmup_finish_elapsed_time
+        @test stats_a.finalization_elapsed_time >= 0
+        accounted = stats_a.initialization_elapsed_time +
+            stats_a.warmup_phase_elapsed_time + stats_a.transition_elapsed_time +
+            stats_a.main_phase_elapsed_time + stats_a.finalization_elapsed_time
+        @test stats_a.elapsed_time >= accounted
     end
 
     @testset "Unit criteria in sampler" begin
         Random.seed!(991)
         ξ0, flow, model, alg = _stopping_setup()
-        trace_event, stats_event = pdmp_sample(
+        trace_event, stats_event = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -90,7 +139,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             warmup_stop=FixedTimeCriterion(0.0),
             stop=EventCountCriterion(20),
             progress=false
-        )
+        ))
         total_events = stats_event.reflections_events + stats_event.refreshment_events + stats_event.sticky_events
         @test total_events >= 20
         @test stats_event.stop_reason == :reached_event_budget
@@ -98,7 +147,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
 
         Random.seed!(992)
         ξ0, flow, model, alg = _stopping_setup()
-        _, stats_wall = pdmp_sample(
+        _, stats_wall = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -109,12 +158,12 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             warmup_stop=FixedTimeCriterion(0.0),
             stop=WallTimeCriterion(1e-6),
             progress=false
-        )
+        ))
         @test stats_wall.stop_reason == :reached_wall_time
 
         Random.seed!(993)
         ξ0, flow, model, alg = _stopping_setup()
-        trace_ess, stats_ess = pdmp_sample(
+        trace_ess, stats_ess = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -125,13 +174,13 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             warmup_stop=FixedTimeCriterion(0.0),
             stop=ESSCriterion(0.1; check_every=1, min_trace_length=5),
             progress=false
-        )
+        ))
         @test stats_ess.stop_reason == :reached_ess
         @test length(trace_ess) >= 5
 
         Random.seed!(994)
         ξ0, flow, model, alg = _stopping_setup()
-        _, stats_total_wall = pdmp_sample(
+        _, stats_total_wall = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -142,12 +191,12 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             warmup_stop=FixedTimeCriterion(0.0),
             stop=TotalWallTimeCriterion(1e-6),
             progress=false
-        )
+        ))
         @test stats_total_wall.stop_reason == :reached_wall_time
 
         Random.seed!(995)
         ξ0, flow, model, alg = _stopping_setup()
-        trace_online, stats_online = pdmp_sample(
+        trace_online, stats_online = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -158,7 +207,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             warmup_stop=FixedTimeCriterion(0.0),
             stop=OnlineESSCriterion(0.1; check_every=1, min_samples=5, batch_size=3),
             progress=false
-        )
+        ))
         @test stats_online.stop_reason == :reached_ess
         @test length(trace_online) >= 5
     end
@@ -222,16 +271,99 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test crit_online.target_ess == crit_online_copy.target_ess
     end
 
+    @testset "Finite deadlines constrain searches and are recorded" begin
+        checked_gradient = FullGradient(function (out, x)
+            x[1] <= 0.1 + 16eps(0.1) ||
+                error("gradient probe crossed the requested time horizon")
+            fill!(out, 0.0)
+            return out
+        end)
+        checked_model = PDMPModel(1, checked_gradient, nothing)
+        checked_trace, _ = only(pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            BouncyParticle(1, 0.0),
+            checked_model,
+            # The zero gradient has a zero-curvature certificate. This checks
+            # the search horizon without finite-difference probes beyond it.
+            GridThinningStrategy(curvature_bound=0.0),
+            0.0, 0.1;
+            progress=false,
+        ))
+        @test checked_trace.times == [0.0, 0.1]
+
+        ξ0, flow, model, alg = _stopping_setup(d=1)
+        composite_trace, composite_stats = only(pdmp_sample(
+            ξ0, flow, model, alg, 0.0, 10.0, 0.0;
+            warmup_stop=FixedTimeCriterion(0.0),
+            stop=AnyCriterion(FixedTimeCriterion(0.25), EventCountCriterion(10_000)),
+            progress=false,
+        ))
+        @test last_event_time(composite_trace) == 0.25
+        @test composite_stats.stop_reason == :reached_time
+
+        zero_gradient = FullGradient((out, x) -> (fill!(out, 0.0); out))
+        factorized_trace, _ = only(pdmp_sample(
+            SkeletonPoint([1.0], [1.0]),
+            ZigZag(1),
+            PDMPModel(1, zero_gradient, nothing),
+            GridThinningStrategy(),
+            0.0, 0.25;
+            progress=false,
+        ))
+        @test factorized_trace isa PDMPSamplers.FactorizedTrace
+        @test last_event_time(factorized_trace) == 0.25
+        @test length(factorized_trace) == 2
+
+        coordinate_model = PDMPModel(
+            1, CoordinateWiseGradient((x, i) -> 0.0), nothing)
+        coordinate_trace, coordinate_stats = only(pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            ZigZag(1),
+            coordinate_model,
+            ThinningStrategy(LocalBounds([0.0])),
+            0.0, 0.25;
+            progress=false,
+        ))
+        @test length(coordinate_trace) == 2
+        @test last_event_time(coordinate_trace) == 0.25
+        @test coordinate_stats.stop_reason == :reached_time
+
+        adaptive_gradient = FullGradient(function (out, x)
+            x[1] <= 0.1 + 16eps(0.1) ||
+                error("adaptive warmup crossed max_time")
+            fill!(out, 0.0)
+            return out
+        end)
+        adaptive_criterion = AdaptiveWarmupCriterion(;
+            min_time=0.0, max_time=0.1, stable_time=1.0,
+            min_events=10_000, check_every=1)
+        adaptive_state = PDMPState(0.0, SkeletonPoint([0.0], [1.0]))
+        PDMPSamplers.initialize!(
+            adaptive_criterion, adaptive_state, nothing,
+            PDMPSamplers.DevelStatisticCounter())
+        @test PDMPSamplers._step_horizon(
+            adaptive_criterion, adaptive_state) == 0.1
+        pdmp_sample(
+            SkeletonPoint([0.0], [1.0]),
+            BouncyParticle(1, 0.0),
+            PDMPModel(1, adaptive_gradient, nothing),
+            GridThinningStrategy(curvature_bound=0.0),
+            0.0, 0.1, 1.0;
+            warmup_stop=adaptive_criterion,
+            progress=false,
+        )
+    end
+
     @testset "EventCountCriterion is phase-local" begin
         Random.seed!(1234)
         ξ0, flow, model, alg = _stopping_setup()
-        trace, stats = pdmp_sample(
+        trace, stats = only(pdmp_sample(
             ξ0, flow, model, alg,
             0.0, 10_000.0, 0.0;
             warmup_stop=EventCountCriterion(20),
             stop=EventCountCriterion(10),
             progress=false
-        )
+        ))
         total = stats.reflections_events + stats.refreshment_events + stats.sticky_events
         @test total >= 30
     end
@@ -240,13 +372,13 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         Random.seed!(1235)
         ξ0, flow, model, alg = _stopping_setup()
         criterion = stop_after(; ess=0.1, ess_mode=:online, events=50, ess_batch_size=3)
-        trace, stats = pdmp_sample(
+        trace, stats = only(pdmp_sample(
             ξ0, flow, model, alg,
             0.0, 10_000.0, 0.0;
             warmup_stop=FixedTimeCriterion(0.0),
             stop=criterion,
             progress=false
-        )
+        ))
         @test stats.stop_reason in (:reached_ess, :reached_event_budget)
         @test length(trace) > 1
     end
@@ -258,12 +390,12 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         grad_nf = FullGradient(Base.Fix1(neg_gradient!, target))
         model_nf = PDMPModel(3, grad_nf, Base.Fix1(neg_hvp!, target))
         alg_nf = GridThinningStrategy()
-        ξ0_nf = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(flow_nf, 3))
-        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(flow_nf, model_nf, alg_nf, 0.0, ξ0_nf)
+        ξ0_nf = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(Random.default_rng(), flow_nf, 3))
+        state, model_, alg_, cache, stats = PDMPSamplers.initialize_state(Random.default_rng(), flow_nf, model_nf, alg_nf, 0.0, ξ0_nf)
         trace_manager = PDMPSamplers.TraceManager(state, flow_nf, alg_nf, 0.0)
 
-        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :warmup)
-        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :main)
+        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :warmup, :reflect)
+        PDMPSamplers.record_event!(trace_manager, state, flow_nf, nothing, :main, :reflect)
 
         @test isone(length(PDMPSamplers.get_warmup_trace(trace_manager)))
         @test isone(length(PDMPSamplers.get_main_trace(trace_manager)))

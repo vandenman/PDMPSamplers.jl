@@ -1,48 +1,31 @@
 # TODO: these fields are not necessarily part of the dynamics, but rather used in the thinning algorithm...
 # maybe they belong there?
 
-struct ZigZag{T,S,S2,R} <: FactorizedDynamics
+struct ZigZag{T,S} <: FactorizedDynamics
     Γ::T
     μ::S
-    σ::S2       # reserved for partial-refreshment features
-    λref::Float64
-    ρ::Float64  # reserved for partial-refreshment features
-    ρ̄::R        # reserved for partial-refreshment features
 end
-ZigZag(Γ, μ, σ=(Vector(diag(Γ))).^(-0.5); λref=0.0, ρ=0.0) = ZigZag(Γ, μ, σ, λref, ρ, sqrt(1-ρ^2))
 ZigZag(d::Integer) = ZigZag(I(d), zeros(d))
 
 refresh_rate(::ZigZag) = 0.0
+"""
+    initialize_velocity(rng, flow, d) -> Vector{Float64}
+
+Draw an initial velocity of dimension `d` from the invariant velocity
+distribution of `flow`, as `pdmp_sample` does when none is given.
+"""
 initialize_velocity(rng::Random.AbstractRNG, ::ZigZag, d::Integer) = rand(rng, (-1., 1.), d)
 refresh_velocity!(::Random.AbstractRNG, ::SkeletonPoint, ::ZigZag) = nothing
 refresh_velocity!(::SkeletonPoint, ::ZigZag) = nothing
 function reflect!(rng::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag, cache)
 
     θ = ξ.θ
-    # Single-pass weighted sampling: compute cumulative sum on-the-fly
-    total_rate = zero(eltype(∇ϕ))
-    for i in eachindex(θ)
-        total_rate += λ_i(i, ξ, ∇ϕ[i], flow)
-    end
-    if ispositive(total_rate)
-        u = rand(rng) * total_rate
-        cumsum = zero(total_rate)
-        i₀ = firstindex(θ)
-        for i in eachindex(θ)
-            cumsum += λ_i(i, ξ, ∇ϕ[i], flow)
-            if cumsum >= u
-                i₀ = i
-                break
-            end
-        end
-    else
-        i₀ = rand(rng, eachindex(θ))
-    end
+    i₀ = _rand_posdot_index(rng, θ, ∇ϕ)
     θ[i₀] = -θ[i₀]
     return i₀
 end
 
-λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::ZigZag)   = sum(i->λ_i(i, ξ, ∇ϕ[i], flow), eachindex(ξ.θ))
+λ(ξ::SkeletonPoint, ∇ϕ::AbstractVector, ::ZigZag) = posdot(ξ.θ, ∇ϕ)
 λ_i(i::Integer, ξ::SkeletonPoint, ∇ϕ_i::Real, ::ZigZag) = pos(ξ.θ[i] * ∇ϕ_i)
 
 function ∂λ∂t(state::AbstractPDMPState, ∇U_xt::AbstractVector, curvature_input::AbstractVector, ::ZigZag)
@@ -73,41 +56,6 @@ function move_forward_time!(ξ::SkeletonPoint, τ::Real, ::ZigZag)
     ξ.x .+= τ .* ξ.θ
 end
 
-function rate_derivatives_for_grid!(
-    values::AbstractMatrix,
-    derivatives::AbstractMatrix,
-    provider::Union{Tuple,GradHVPProvider},
-    state::AbstractPDMPState,
-    ::ZigZag,
-    t_grid::AbstractVector,
-    n_points::Integer,
-)
-    x0 = state.ξ.x
-    θ = state.ξ.θ
-    n_channels = length(θ)
-    size(values, 1) >= n_channels && size(values, 2) >= n_points ||
-        throw(ArgumentError("values matrix is too small"))
-    size(derivatives, 1) >= n_channels && size(derivatives, 2) >= n_points ||
-        throw(ArgumentError("derivatives matrix is too small"))
-    grad = _provider_grad(provider)
-    hvp = _provider_hvp(provider)
-    for k in 1:n_points
-        x = @view derivatives[:, k]
-        @inbounds for j in 1:n_channels
-            x[j] = x0[j] + t_grid[k] * θ[j]
-        end
-        ∇U = grad(x)
-        Hθ = hvp(x, θ)
-        value_col = @view values[:, k]
-        derivative_col = @view derivatives[:, k]
-        for j in 1:n_channels
-            value_col[j] = θ[j] * ∇U[j]
-            derivative_col[j] = θ[j] * Hθ[j]
-        end
-    end
-    return values, derivatives
-end
-
 # fallbacks for AD (mostly ForwardDiff) that allocates new arrays
 # move_forward_time(ξ::SkeletonPoint, τ::Real, ::ZigZag) = SkeletonPoint(ξ.x .+ τ .* ξ.θ, ξ.θ)
 
@@ -118,7 +66,7 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::Real, i::Integer, flow::ZigZag)
     return i
 end
 
-# The canonical freezing_time for ZigZag is defined in
+# The canonical sticking_time for ZigZag is defined in
 # src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.
 
 # actually part of thinning

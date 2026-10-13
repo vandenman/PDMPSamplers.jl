@@ -47,8 +47,6 @@ import ForwardDiff
         hvp_result2 = model_fg_hvp.hvp(x_test, [0.0, 1.0])
         @test hvp_result2 isa AbstractVector
 
-        err = @test_throws ArgumentError PDMPModel(x -> -sum(abs2, x))
-        @test occursin("Use PDMPModel(LogDensity(f)", err.value.msg)
     end
 
     @testset "LogDensity + HVP" begin

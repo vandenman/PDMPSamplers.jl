@@ -40,7 +40,7 @@ end
         target = gen_data(MvNormal, d, 1.0)
         flow = pdmp_type(d)
         x = randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         state = PDMPState(0.0, SkeletonPoint(x, θ))
         move_forward_time!(state, 0.5, flow)
 
@@ -65,7 +65,7 @@ end
         target = gen_data(MvNormal, d, 1.0)
         flow = pdmp_type(d)
         x = randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         state = PDMPState(0.0, SkeletonPoint(x, θ))
         move_forward_time!(state, 0.3, flow)
 
@@ -85,7 +85,7 @@ end
             dot(w, Hv)
         end
 
-        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, (grad_func, hvp_func), false)
+        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func), false)
         provider = PDMPSamplers.VHVProvider(grad_func, vhv_func)
         rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(state, flow, provider, false)
 
@@ -98,7 +98,7 @@ end
         target = gen_data(MvNormal, d, 1.0)
         flow = ZigZag(d)
         x = randn(d)
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         state = PDMPState(0.0, SkeletonPoint(x, θ))
         move_forward_time!(state, 0.3, flow)
 
@@ -118,7 +118,7 @@ end
             dot(w, Hv)
         end
 
-        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, (grad_func, hvp_func), false)
+        rate_vec, deriv_vec = PDMPSamplers.get_rate_and_deriv(state, flow, PDMPSamplers.GradHVPProvider(grad_func, hvp_func), false)
         provider = PDMPSamplers.VHVProvider(grad_func, vhv_func)
         rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(state, flow, provider, false)
 
@@ -198,10 +198,10 @@ end
         flow = pdmp_type(d)
         alg = GridThinningStrategy(; N=10, t_max=2.0)
         x0 = randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 500.0))
         @test length(trace) > 10
         @test all(isfinite, mean(trace))
     end
@@ -213,11 +213,10 @@ end
         model = PDMPModel(d, grad, DI.AutoForwardDiff(), true)
         flow = BouncyParticle(d, 1.0)
         alg = GridThinningStrategy(; N=10, t_max=2.0)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         rng = Random.Xoshiro(2026)
         state, model_, alg_, cache, _ = PDMPSamplers.initialize_state(rng, flow, model, alg, 0.0, ξ0)
-        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model_.grad, cache)
-        provider = PDMPSamplers._make_grad_provider(grad_func, model_, flow, alg_)
+        provider = PDMPSamplers._grid_event_provider(model_, flow, alg_, nothing)
         @test provider isa PDMPSamplers.WithStatsJoint
     end
 end

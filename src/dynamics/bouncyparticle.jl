@@ -1,24 +1,20 @@
 """
-    BouncyParticle(λ) <: ContinuousDynamics
-Input: argument `Γ`, a sparse precision matrix approximating target precision.
-Bouncy particle sampler,  `λ` is the refreshment rate, which has to be
-strictly positive.
+    BouncyParticle(Γ, μ, λref=0.1) <: ContinuousDynamics
+
+Bouncy particle sampler with reference precision `Γ`, reference mean `μ`,
+and refreshment rate `λref`.
 """
-struct BouncyParticle{T, S, R, V, LT} <: NonFactorizedDynamics
+struct BouncyParticle{T, S, R} <: NonFactorizedDynamics
     Γ::T
     μ::S
     λref::R
-    ρ::R  # reserved for partial-refreshment features
-    U::V  # reserved for partial-refreshment features
-    L::LT
+    function BouncyParticle(Γ::T, μ::S, λref::R) where {T,S,R}
+        cholesky(Symmetric(Γ)) # Validate the precision used by analytic bounds.
+        return new{T,S,R}(Γ, μ, λref)
+    end
 end
 
-function BouncyParticle(Γ, μ, λref = 0.1; ρ=0.0)
-    L = cholesky(Symmetric(Γ)).L
-    σ = Vector(diag(Γ)).^(-0.5)
-    return BouncyParticle(Γ, μ, λref, ρ, σ, L)
-end
-
+BouncyParticle(Γ, μ) = BouncyParticle(Γ, μ, 0.1)
 BouncyParticle(d::Integer) = BouncyParticle(I(d), zeros(d), 0.1)
 BouncyParticle(d::Integer, λref::Real) = BouncyParticle(I(d), zeros(d), λref)
 
@@ -36,7 +32,13 @@ function move_forward_time!(state::PDMPState, τ::Real, flow::BouncyParticle)
 end
 function move_forward_time!(state::StickyPDMPState, τ::Real, flow::BouncyParticle)
     state.t[] += τ
-    move_forward_time!(state.ξ, τ, flow)
+    # Frozen sticky coordinates are boundary states, not points moving with
+    # their retained velocity. Advancing the complete SkeletonPoint here
+    # transports a frozen coordinate away from x = θ = 0 and makes the next
+    # state validation fail. Boomerang's sticky flow uses the same rule.
+    @inbounds for i in eachindex(state.free, state.ξ.x, state.ξ.θ)
+        state.free[i] && (state.ξ.x[i] += τ * state.ξ.θ[i])
+    end
     # LinearAlgebra.axpy!(τ, state.ξ.θ, state.ξ.x)
     state
 end
@@ -66,9 +68,20 @@ end
 
 reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache) = reflect!(state, ∇ϕ, flow, cache)
 function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::BouncyParticle, cache)
-    # this does not work in general! we'd need some kind of sub-cache here as well...
-    subcache = (; z = view(cache.z, 1:sum(state.free)))
-    reflect!(substate(state), view(∇ϕ, state.free), flow, subcache)
+    numerator = zero(eltype(state.ξ.θ))
+    denominator = zero(eltype(state.ξ.θ))
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ)
+        if state.free[i]
+            numerator += state.ξ.θ[i] * ∇ϕ[i]
+            denominator += abs2(∇ϕ[i])
+        end
+    end
+    iszero(denominator) && return nothing
+    coefficient = 2 * numerator / denominator
+    @inbounds for i in eachindex(state.free, state.ξ.θ, ∇ϕ)
+        state.free[i] && (state.ξ.θ[i] -= coefficient * ∇ϕ[i])
+    end
+    return nothing
 end
 
 λ(ξ::SkeletonPoint, ∇ϕx::AbstractVector, flow::BouncyParticle) = pos(dot(∇ϕx, ξ.θ))
@@ -76,7 +89,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
 )
     x = state.ξ.x
     θ = state.ξ.θ
@@ -90,7 +103,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
     cached_gradient::AbstractVector,
 )
     θ = state.ξ.θ
@@ -133,18 +146,18 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    grad_and_nothing::Tuple{G,Nothing},
-) where {G}
-    ∇U = grad_and_nothing[1](state.ξ.x)
+    provider::GradientOnlyProvider,
+)
+    ∇U = provider.grad(state.ξ.x)
     return dot(∇U, state.ξ.θ), 0.0
 end
 
 function rate_and_derivative(
     state::AbstractPDMPState,
     ::BouncyParticle,
-    ::Tuple{G,Nothing},
+    ::GradientOnlyProvider,
     cached_gradient::AbstractVector,
-) where {G}
+)
     return dot(cached_gradient, state.ξ.θ), 0.0
 end
 
@@ -170,7 +183,7 @@ function rate_and_derivative(
     return dot(fd.grad_buf, θ), vhv
 end
 
-# The canonical freezing_time for BouncyParticle is defined in
+# The canonical sticking_time for BouncyParticle is defined in
 # src/poisson_time_strategies/sticky.jl, dispatching on Union{BouncyParticle,ZigZag}.
 
 # Bounds computation for BPS
@@ -190,7 +203,7 @@ function ab(ξ::SkeletonPoint, c::AbstractVector, flow::BouncyParticle, cache)
     a = c_val + A
     b = pos(B)
 
-    refresh_time = rand_refresh_time(flow)
+    refresh_time = rand_refresh_time(Random.default_rng(), flow)
     # refresh_time = ispositive(refresh_rate(flow)) ? rand(Exponential(inv(refresh_rate(flow)))) : Inf
     # refresh_time = flow.λref > 0 ? flow.λref : Inf
     return (a, b, refresh_time)

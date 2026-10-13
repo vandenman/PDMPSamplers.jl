@@ -82,7 +82,7 @@ function PDMPModel(model::DynamicPPL.Model, backend::ADTypes.AbstractADType; nee
         nothing
     end
 
-    return PDMPModel(d, FullGradient(grad_f!), hvp_f, vhv_f, false, false, joint_f)
+    return PDMPModel(d, FullGradient(grad_f!), hvp_f, vhv_f, false, joint_f)
 end
 
 end # module

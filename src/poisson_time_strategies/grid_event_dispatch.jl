@@ -1,0 +1,193 @@
+_grid_fd_provider(alg::GridAdaptiveState, stats) = FiniteDiffVHV(alg.grad_provider, alg.fd_buf, alg.fd_grad_buf, alg.fd_w_buf, stats)
+
+function _grid_event_provider(model::PDMPModel, flow::ContinuousDynamics, alg::GridAdaptiveState, stats)
+    return _with_grid_event_provider(identity, model, flow, alg, stats)
+end
+
+# Call `f(provider)` with the selected rate-derivative provider. Each branch
+# passes one concrete provider type: returning the provider as a `Union` of
+# the finite-difference and the exact provider makes Julia (1.13.1) box it on
+# every event search.
+@inline function _with_grid_event_provider(f::F, model::PDMPModel,
+        flow::ContinuousDynamics, alg::GridAdaptiveState, stats) where {F}
+    backend = _selected_curvature_backend(alg.curvature_backend, model, flow)
+    backend === :finite_difference && return f(_grid_fd_provider(alg, stats))
+    alg.exact_provider === nothing && throw(ArgumentError(
+        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
+    return f(alg.exact_provider)
+end
+
+function _next_event_time_resolved_provider!(rng::Random.AbstractRNG,
+    provider, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL,
+    alg::GridAdaptiveState, state::AbstractPDMPState, cache,
+    stats::AbstractStatisticCounter, max_horizon::Float64,
+    include_refresh::Bool, max_horizon_event::Symbol,
+    probe_failure_handler::GridBoundaryProbe)::GridEvent where {FL<:ContinuousDynamics}
+    if !has_direct_deterministic_rate_cell_bound(provider) &&
+            alg.bound === :value_quadratic &&
+            _can_use_global_value_quadratic_grid(flow, alg.curvature_bound)
+        return _next_event_time_grid!(rng, GradientOnlyProvider(alg.grad_provider),
+            model, flow, alg, state, cache, stats, max_horizon, include_refresh,
+            max_horizon_event, probe_failure_handler)
+    end
+    return _next_event_time_grid!(rng, provider, model, flow, alg, state, cache,
+        stats, max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+@inline function _has_exact_curvature_provider(model::PDMPModel, flow::ContinuousDynamics)
+    return (model.joint !== nothing && _joint_compatible(flow)) ||
+        model.vhv !== nothing || model.hvp !== nothing
+end
+
+function _selected_curvature_backend(backend::Symbol, model::PDMPModel, flow::ContinuousDynamics)
+    backend === :finite_difference && return :finite_difference
+    has_exact = _has_exact_curvature_provider(model, flow)
+    backend === :exact && !has_exact && throw(ArgumentError(
+        "curvature_backend=:exact requires a compatible joint, VHV, or HVP provider"))
+    return has_exact ? :exact : :finite_difference
+end
+
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
+    max_horizon::Float64=Inf, include_refresh::Bool=true, max_horizon_event::Symbol=:horizon_hit)::GridEvent where {FL<:ContinuousDynamics}
+    return _next_event_time_with_probe(rng, model, flow, alg, state, cache, stats,
+        max_horizon, include_refresh, max_horizon_event, NoGridBoundaryProbe())
+end
+
+function next_event_time(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
+    max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol,
+    detect_boundaries::Bool)::GridEvent where {FL<:ContinuousDynamics}
+    detect_boundaries || return next_event_time(rng, model, flow, alg, state, cache, stats, max_horizon, include_refresh, max_horizon_event)
+    probe_failure_handler = _grid_probe_failure_handler(state, flow, model, GridThinningStrategy)
+    return _next_event_time_with_probe(rng, model, flow, alg, state, cache, stats,
+        max_horizon, include_refresh, max_horizon_event, probe_failure_handler)
+end
+
+function _next_event_time_with_probe(rng::Random.AbstractRNG, model::PDMPModel{<:GlobalGradientStrategy}, flow::FL, alg::GridAdaptiveState, state::AbstractPDMPState, cache, stats::AbstractStatisticCounter,
+    max_horizon::Float64, include_refresh::Bool, max_horizon_event::Symbol,
+    probe_failure_handler::GridBoundaryProbe)::GridEvent where {FL<:ContinuousDynamics}
+    # A provider-owned direct interval certificate supersedes derivative-based
+    # value-quadratic construction for this event search.  Probe only the first
+    # deterministic cell; `_grid_bound_modes` repeats the call and carries the
+    # certified value into the ordinary grid builder.
+    return _with_grid_event_provider(model, flow, alg, stats) do provider
+        _next_event_time_resolved_provider!(rng, provider, model, flow, alg,
+            state, cache, stats, max_horizon, include_refresh,
+            max_horizon_event, probe_failure_handler)
+    end
+end
+
+function _grid_bound_modes(alg::GridAdaptiveState, state::AbstractPDMPState,
+        flow::ContinuousDynamics, provider, stats::Union{Nothing,AbstractStatisticCounter}=nothing)
+    use_direct = has_direct_deterministic_rate_cell_bound(provider)
+    direct_started = use_direct && stats !== nothing ? time_ns() : UInt64(0)
+    direct_first = use_direct ? Float64(deterministic_rate_cell_bound(provider,
+        state, flow, alg.pcb.t_grid[1], alg.pcb.t_grid[2])) : 0.0
+    use_direct && stats !== nothing && _inc_counter_grid_bound_seconds(
+        stats, (time_ns() - direct_started) * 1.0e-9)
+    # Tangent cells must use the signed scalar rate or signed Zig-Zag
+    # components. Clipping endpoints first can hide a positive interior.
+    use_value_only = !use_direct && provider isa GradientOnlyProvider &&
+        alg.bound === :value_quadratic && alg.curvature_bound !== nothing
+    use_single_pass_signed = !use_direct && !use_value_only &&
+        _can_use_signed_grid(state, flow, provider)
+    return (;
+        use_direct,
+        direct_first,
+        use_value_only,
+        use_single_pass_signed,
+    )
+end
+
+function _build_grid_bound_prefix!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::ContinuousDynamics, provider, alg::GridAdaptiveState,
+    stats::AbstractStatisticCounter, state_cache::AbstractPDMPState, effective_horizon::Float64, cumulative_exp::Float64,
+    probe_failure_handler::GridBoundaryProbe, modes; cached_gradient=nothing, cached_y0::Float64=NaN, cached_d0::Float64=NaN,
+    start_cell::Integer=1, initial_integral::Float64=0.0)
+
+    _inc_counter_grid_bound_evaluations(stats)
+    _grid_t0 = time_ns()
+    if modes.use_direct
+        cumulative = initial_integral
+        n_cells_bounded = start_cell - 1
+        for cell in start_cell:_grid_cell_count(
+                pcb.t_grid, length(pcb.Λ_vals), effective_horizon)
+            left = pcb.t_grid[cell]
+            right = min(pcb.t_grid[cell + 1], effective_horizon)
+            value = cell == 1 ? modes.direct_first :
+                deterministic_rate_cell_bound(provider, state, flow, left, right)
+            value === nothing && throw(ArgumentError(
+                "direct deterministic cell certificate disappeared within one grid"))
+            isfinite(value) && value >= 0 || throw(DomainError(value,
+                "direct deterministic cell certificate must be finite and nonnegative"))
+            pcb.Λ_vals[cell] = nextfloat(Float64(value))
+            pcb.y_vals[cell] = NaN
+            pcb.d_vals[cell] = NaN
+            cumulative += pcb.Λ_vals[cell] * (right - left)
+            n_cells_bounded = cell
+            cumulative >= cumulative_exp && break
+        end
+        if n_cells_bounded < length(pcb.Λ_vals)
+            for cell in (n_cells_bounded + 1):length(pcb.Λ_vals)
+                pcb.Λ_vals[cell] = 0.0
+            end
+        end
+        _inc_counter_grid_builds(stats)
+        _inc_counter_grid_points_evaluated(stats,
+            max(0, n_cells_bounded - start_cell + 1))
+    elseif modes.use_value_only
+        copyto!(state_cache, state)
+        left = pcb.t_grid[start_cell]
+        !iszero(left) && move_forward_time!(state_cache, left, flow)
+        if start_cell == 1
+            if cached_gradient === nothing
+                _inc_counter_grid_endpoint_evaluations(stats)
+                _inc_counter_grid_endpoint_gradient_calls(stats)
+                pcb.y_vals[1] = _value_rate_at_state!(probe_failure_handler,
+                    state_cache, flow, provider.grad, 0.0, 0.0)
+            else
+                _inc_counter_grid_cached_endpoint_reuses(stats)
+                pcb.y_vals[1] = pos(λ(state_cache, cached_gradient, flow))
+            end
+        end
+        cumulative = initial_integral
+        n_cells_bounded = start_cell - 1
+        for cell in start_cell:length(pcb.Λ_vals)
+            left, right = pcb.t_grid[cell], pcb.t_grid[cell + 1]
+            left >= effective_horizon && break
+            move_forward_time!(state_cache, right - left, flow)
+            _inc_counter_grid_endpoint_evaluations(stats)
+            _inc_counter_grid_endpoint_gradient_calls(stats)
+            pcb.y_vals[cell + 1] = _value_rate_at_state!(probe_failure_handler,
+                state_cache, flow, provider.grad, left, right)
+            residual = _evaluate_curvature_bound(alg.curvature_bound,
+                state, flow, left, right, stats)
+            # In value-only mode the derivative storage holds cell curvature
+            # certificates, which also permit tightening the unvisited tail.
+            pcb.d_vals[cell] = residual === nothing ? NaN : residual
+            pcb.Λ_vals[cell] = residual === nothing ?
+                _tangent_value_cell_bound(state, flow, alg, stats, left, right,
+                    probe_failure_handler) :
+                _value_quadratic_cell_bound(pcb.y_vals[cell],
+                    pcb.y_vals[cell + 1], right - left, residual)
+            cumulative += pcb.Λ_vals[cell] * (right - left)
+            n_cells_bounded = cell
+            cumulative >= cumulative_exp && break
+        end
+        fill!(view(pcb.Λ_vals, (n_cells_bounded + 1):length(pcb.Λ_vals)), 0.0)
+        _inc_counter_grid_builds(stats)
+        _inc_counter_grid_points_evaluated(stats,
+            max(0, n_cells_bounded - start_cell + 1) + (start_cell == 1))
+    elseif modes.use_single_pass_signed
+        n_cells_bounded = construct_rate_bound_grid!(pcb, state, flow, provider,
+            alg.bound === :value_quadratic ? alg.curvature_bound : nothing;
+            cached_gradient, early_stop_threshold=cumulative_exp, state_cache, stats, max_time=effective_horizon,
+            rate_value_buf=alg.rate_value_buf, rate_derivative_buf=alg.rate_derivative_buf, probe_failure_handler, start_cell, initial_integral)
+    else
+        n_cells_bounded = construct_upper_bound_grad_and_hess!(pcb, state, flow, provider, false;
+            cached_y0, cached_d0, early_stop_threshold=cumulative_exp, stats, state_cache, max_time=effective_horizon,
+            probe_failure_handler, start_cell, initial_integral)
+    end
+    _record_grid_schedule!(stats, alg)
+    built_area = _piecewise_constant_area(pcb)
+    _inc_counter_grid_bound_seconds(stats, (time_ns() - _grid_t0) * 1.0e-9)
+    return n_cells_bounded, built_area
+end

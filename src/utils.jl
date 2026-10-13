@@ -1,19 +1,50 @@
 
-if VERSION < v"1.13.0"
+@static if VERSION < v"1.13"
     ispositive(x::Real) = x > zero(x)
     isnegative(x::Real) = x < zero(x)
 else
-    # code for Julia ≥ 1.13
+    import Base: ispositive, isnegative
 end
 
 pos(x) = max(zero(x), x)
+
+@inline _grid_cell_count(t_grid, N, max_time) = isfinite(max_time) ?
+    max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+
+@inline function posdot(x, y)
+    # TODO:
+    # a Vector{Float64} method could perhaps use signbit(x) * signbit(y) * x * y?
+    # same goes for pos(x::Float64 = signbit(x) * x?
+    # need to benchmark if this is faster though
+    value = zero(promote_type(eltype(x), eltype(y)))
+    @inbounds for i in eachindex(x, y)
+        value += pos(x[i] * y[i])
+    end
+    return value
+end
+
+function _rand_posdot_index(rng::Random.AbstractRNG, x, y)
+    total = posdot(x, y)
+    ispositive(total) || return rand(rng, eachindex(x))
+    threshold = rand(rng) * total
+    cumulative = zero(total)
+    selected = firstindex(x)
+    @inbounds for i in eachindex(x, y)
+        cumulative += pos(x[i] * y[i])
+        selected = i
+        cumulative >= threshold && break
+    end
+    return selected
+end
 
 # TODO: remove these!
 function idot(A, j, x)
     return dot((@view A[:, j]), x)
 end
 
-struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}}
+abstract type AbstractRateDerivativeProvider end
+
+struct VHVProvider{G,V,W<:Union{Nothing,AbstractVector}} <: AbstractRateDerivativeProvider
     grad::G
     vhv::V
     w_buf::W
@@ -29,22 +60,29 @@ end
 (p::GradientProvider)(x::AbstractVector) =
     compute_gradient!(x, p.θ, p.gradient_strategy, p.flow, p.cache)
 
-struct GradHVPProvider{G,H}
+struct GradHVPProvider{G,H} <: AbstractRateDerivativeProvider
     grad::G
     hvp::H
 end
-_provider_grad((grad, hvp)::Tuple) = grad
-_provider_hvp((grad, hvp)::Tuple) = hvp
+
+struct GradientOnlyProvider{G} <: AbstractRateDerivativeProvider
+    grad::G
+end
+
 _provider_grad(provider::GradHVPProvider) = provider.grad
 _provider_hvp(provider::GradHVPProvider) = provider.hvp
+_provider_grad(provider::GradientOnlyProvider) = provider.grad
 
-struct FiniteDiffVHV{G}
+struct FiniteDiffVHV{G,S} <: AbstractRateDerivativeProvider
     grad::G
     buf::Vector{Float64}
     grad_buf::Vector{Float64}
     w_buf::Vector{Float64}
+    stats::S
 end
 FiniteDiffVHV(grad, buf::Vector{Float64}) =
     FiniteDiffVHV(grad, buf, similar(buf), similar(buf))
 FiniteDiffVHV(grad, buf::Vector{Float64}, w_buf::Vector{Float64}) =
     FiniteDiffVHV(grad, buf, similar(buf), w_buf)
+FiniteDiffVHV(grad, buf::Vector{Float64}, grad_buf::Vector{Float64}, w_buf::Vector{Float64}) =
+    FiniteDiffVHV(grad, buf, grad_buf, w_buf, nothing)

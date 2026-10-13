@@ -2,26 +2,25 @@ struct Boomerang{U, T, S, LT} <: NonFactorizedDynamics
     Γ::U
     μ::T
     λref::S
-    ρ::S  # reserved for partial-refreshment features
+    ρ::S  # velocity persistence at refreshment
     L::LT
     ΣL::LT  # cholesky(Symmetric(Γ)).L
 end
 
 """
-    MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+    MutableBoomerang{U, T, S, LT} <: NonFactorizedDynamics
 
 Mutable version of `Boomerang` for adaptation during warmup.
-Same fields as `Boomerang` plus `eigen_cache` for dense/low-rank Γ (Phase 2+).
+Same fields as `Boomerang`.
 Created via the `AdaptiveBoomerang` convenience constructors.
 """
-mutable struct MutableBoomerang{U, T, S, LT, ET} <: NonFactorizedDynamics
+mutable struct MutableBoomerang{U, T, S, LT} <: NonFactorizedDynamics
     Γ::U
     μ::T
     λref::S
     const ρ::S
     L::LT
     ΣL::LT
-    eigen_cache::ET  # nothing for diagonal Γ; reserved for Phase 2+
 end
 
 """
@@ -31,6 +30,15 @@ Union type matching both `Boomerang` and `MutableBoomerang`.
 All Boomerang dynamics methods dispatch on this type.
 """
 const AnyBoomerang = Union{Boomerang, MutableBoomerang}
+
+# Log-linear Gaussian scale slabs have harmonic log scales along every
+# Boomerang flight, so Boomerang-family flows use the certified harmonic clock;
+# the generic three-argument fallback would otherwise select
+# ExponentialSumAggregateClock and then SummedRateClock.
+default_aggregate_unstick_clock(provider::AbstractLogLinearIndependentGaussianSlab,
+                                model_prior::AbstractModelPrior,
+                                ::AnyBoomerang) =
+    HarmonicLogLinearAggregateClock(provider, model_prior)
 
 
 """
@@ -181,7 +189,7 @@ function lowrank_quadform(lrp::LowRankPrecision, v::AbstractVector)
 end
 
 """
-    lowrank_sample!(θ, lrp)
+    lowrank_sample!(rng, θ, lrp)
 
 Sample θ ~ N(0, Σ) where Σ = D + VΛV'.
 Uses θ = D^{1/2}ε₁ + V Λ^{1/2}ε₂ with ε₁ ~ N(0,I_d), ε₂ ~ N(0,I_r).
@@ -197,7 +205,6 @@ function lowrank_sample!(rng::Random.AbstractRNG, θ::AbstractVector, lrp::LowRa
     mul!(θ, lrp.V, buf_r1, 1.0, 1.0)  # θ += V Λ^{1/2} ε₂
     return θ
 end
-lowrank_sample!(θ::AbstractVector, lrp::LowRankPrecision) = lowrank_sample!(Random.default_rng(), θ, lrp)
 function Boomerang(Γ, μ, λ = 0.1; ρ=0.0)
     if Γ isa Diagonal
         return Boomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L)
@@ -220,17 +227,16 @@ function Base.copy(flow::MutableBoomerang)
     MutableBoomerang(
         copy(flow.Γ), copy(flow.μ), flow.λref, flow.ρ,
         flow.L === nothing ? nothing : copy(flow.L),
-        flow.ΣL === nothing ? nothing : copy(flow.ΣL),
-        flow.eigen_cache === nothing ? nothing : deepcopy(flow.eigen_cache)
+        flow.ΣL === nothing ? nothing : copy(flow.ΣL)
     )
 end
 
 function MutableBoomerang(Γ, μ, λ = 0.1; ρ=0.0)
     if Γ isa Diagonal
-        return MutableBoomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L, nothing)
+        return MutableBoomerang(Γ, μ, λ, ρ, cholesky(Symmetric(Γ)).L, cholesky(inv(Γ)).L)
     else
         Γs = Symmetric(Γ)
-        return MutableBoomerang(Γs, μ, λ, ρ, cholesky(Γs).L, cholesky(inv(Γs)).L, nothing)
+        return MutableBoomerang(Γs, μ, λ, ρ, cholesky(Γs).L, cholesky(inv(Γs)).L)
     end
 end
 
@@ -255,14 +261,14 @@ function AdaptiveBoomerang(d::Integer; λref=0.1, ρ=0.0, scheme=:diagonal, rank
         μ = zeros(d)
         L = LowerTriangular(Matrix{Float64}(I, d, d))
         ΣL = LowerTriangular(Matrix{Float64}(I, d, d))
-        MutableBoomerang(Γ, μ, Float64(λref), Float64(ρ), L, ΣL, nothing)
+        MutableBoomerang(Γ, μ, Float64(λref), Float64(ρ), L, ΣL)
     elseif scheme == :lowrank
         r = min(rank, d - 1)
         r < 1 && error("Low-rank scheme requires d ≥ 2 and rank ≥ 1.")
         lrp = LowRankPrecision(d, r)
         lowrank_precompute!(lrp)
         μ = zeros(d)
-        MutableBoomerang(lrp, μ, Float64(λref), Float64(ρ), nothing, nothing, nothing)
+        MutableBoomerang(lrp, μ, Float64(λref), Float64(ρ), nothing, nothing)
     else
         error("Unknown adaptation scheme: $scheme. Use :diagonal, :fullrank, or :lowrank.")
     end
@@ -294,25 +300,8 @@ function refresh_velocity!(rng::Random.AbstractRNG, θ::AbstractVector, flow::An
     end
     return θ
 end
-function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::AnyBoomerang)
-    ΣL = flow.ΣL
-    # ΣL = cholesky(Symmetric(L*L')).L  # could cache this if many stickies
-    ΣLs = view(ΣL, state.free, :)
-    θ = state.ξ.θ
-    randn!(rng, θ)
-    u = similar(θ, sum(state.free))
-    mul!(u, ΣLs, θ)
-    j = 1
-    for i in eachindex(θ)
-        if state.free[i]
-            θ[i] = u[j]
-            j += 1
-        else
-            θ[i] = zero(eltype(θ))
-        end
-    end
-    return θ
-end
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::AnyBoomerang) = draw_stratum_velocity!(rng, state, flow)
 
 reflect!(::Random.AbstractRNG, ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(ξ, ∇ϕ, flow, cache)
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
@@ -327,7 +316,11 @@ function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::AnyBoomerang, 
 end
 
 reflect!(::Random.AbstractRNG, state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache) = reflect!(state, ∇ϕ, flow, cache)
-function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
+
+# Reference implementation retained both for non-diagonal Boomerang factors and
+# for regression/benchmark comparisons with the diagonal specialization below.
+function _reflect_sticky_boomerang_generic!(state::StickyPDMPState,
+        ∇ϕ::AbstractVector, flow::AnyBoomerang, cache)
     free = state.free
     θ_free = view(state.ξ.θ, free)
     ∇ϕ_free = view(∇ϕ, free)
@@ -349,6 +342,47 @@ function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::AnyBoomer
     return nothing
 end
 
+reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+    flow::AnyBoomerang, cache) =
+    _reflect_sticky_boomerang_generic!(state, ∇ϕ, flow, cache)
+
+@inline function _reflect_sticky_diagonal!(
+        state::StickyPDMPState, ∇ϕ::AbstractVector,
+        diagonal::AbstractVector, cache)
+    θ = state.ξ.θ
+    free = state.free
+    z = cache.z
+    numerator = zero(promote_type(eltype(θ), eltype(∇ϕ), eltype(diagonal)))
+    denominator = zero(typeof(numerator))
+    @inbounds for i in eachindex(θ, ∇ϕ, free, diagonal, z)
+        if free[i]
+            zi = abs2(diagonal[i]) * ∇ϕ[i]
+            z[i] = zi
+            numerator += θ[i] * ∇ϕ[i]
+            denominator += ∇ϕ[i] * zi
+        end
+    end
+    iszero(denominator) && return nothing
+    reflection_coeff = 2 * numerator / denominator
+    @inbounds for i in eachindex(θ, free, z)
+        free[i] && (θ[i] -= reflection_coeff * z[i])
+    end
+    return nothing
+end
+
+# Diagonal adaptive Boomerang stores the covariance factor directly as a
+# Diagonal.  On a sticky stratum, Σ[free,free]g therefore needs only one pass;
+# Boolean matrix views and the two generic matrix products are unnecessary.
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::Boomerang{U,T,S,LT}, cache) where {U,T,S,LT<:Diagonal}
+    return _reflect_sticky_diagonal!(state, ∇ϕ, flow.ΣL.diag, cache)
+end
+
+function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::MutableBoomerang{U,T,S,LT}, cache) where {U,T,S,LT<:Diagonal}
+    return _reflect_sticky_diagonal!(state, ∇ϕ, flow.ΣL.diag, cache)
+end
+
 
 function move_forward_time!(state::AbstractPDMPState, τ::Real, flow::AnyBoomerang)
     state.t[] += τ
@@ -362,7 +396,7 @@ function move_forward_time!(state::StickyPDMPState, τ::Real, flow::AnyBoomerang
     state
 end
 
-function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::BitVector)
+function move_forward_time!(ξ::SkeletonPoint, τ::Real, flow::AnyBoomerang, free::AbstractVector{Bool})
     x, θ = ξ.x, ξ.θ
     μ = flow.μ
     s, c = sincos(τ)
@@ -417,7 +451,7 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
 )
     grad = _provider_grad(provider)
     return _boomerang_rate_and_derivative(
@@ -427,14 +461,28 @@ end
 function rate_and_derivative(
     state::AbstractPDMPState,
     flow::AnyBoomerang,
-    provider::Union{Tuple,GradHVPProvider},
+    provider::GradHVPProvider,
     cached_gradient::AbstractVector,
 )
     return _boomerang_rate_and_derivative(
         state, flow, _provider_grad(provider), _provider_hvp(provider), cached_gradient)
 end
 
-function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
+# With a vector-Hessian-vector provider (e.g. dependent slabs), as in
+# `_get_rate_and_deriv_vhv`: `provider.vhv` is the curvature of the raw target
+# gradient, and the Boomerang `∂λ∂t` subtracts the reference contribution itself.
+function rate_and_derivative(state::AbstractPDMPState, flow::AnyBoomerang, provider::VHVProvider)
+    ∇U = provider.grad(state.ξ.x)
+    return dot(∇U, state.ξ.θ), ∂λ∂t(state, ∇U, _compute_vhv_scalar(provider, state, ∇U, flow), flow)
+end
+
+function rate_and_derivative(state::AbstractPDMPState, flow::AnyBoomerang, provider::VHVProvider,
+    cached_gradient::AbstractVector)
+    return dot(cached_gradient, state.ξ.θ),
+        ∂λ∂t(state, cached_gradient, _compute_vhv_scalar(provider, state, cached_gradient, flow), flow)
+end
+
+function sticking_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
     x = ξ.x[i]
     θ = ξ.θ[i]
     μ = flow.μ[i]
@@ -453,10 +501,17 @@ function freezing_time(ξ::SkeletonPoint, flow::AnyBoomerang, i::Integer)
         sqrtu = sqrt(u)
         t1 = mod(2atan(sqrtu - θ, denom), 2π)
         t2 = mod(-2atan(sqrtu + θ, denom), 2π)
+        # At the boundary one of the roots is the current time.  Select the
+        # other root as the next crossing; replacing the zero root with a full
+        # period before taking `max` incorrectly skipped the next boundary
+        # crossing for every nonzero boundary velocity.
+        if iszero(x)
+            next_crossing = max(t1, t2)
+            return iszero(next_crossing) ? oftype(next_crossing, 2π) : next_crossing
+        end
         # t = 0 means "now", not a future crossing; replace with 2π (full period)
         iszero(t1) && (t1 = oftype(t1, 2π))
         iszero(t2) && (t2 = oftype(t2, 2π))
-        iszero(x) && return max(t1, t2)
         return min(t1, t2)
     end
 end
@@ -524,26 +579,13 @@ function refresh_velocity!(rng::Random.AbstractRNG, θ::AbstractVector, flow::Lo
     return θ
 end
 
-function refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState, flow::LowRankMutableBoomerang)
-    lrp = flow.Γ
-    θ = state.ξ.θ
-    # Sample θ_free ~ N(0, Σ[free,free]) where Σ = D + VΛV'
-    buf_r = lrp.buf_r1
-    randn!(rng, buf_r)
-    buf_r .*= lrp.Λsqrt  # Λ^{1/2} ε₂
-    for i in eachindex(θ)
-        if state.free[i]
-            val = lrp.Dsqrt[i] * randn(rng)
-            for k in eachindex(buf_r)
-                val += lrp.V[i, k] * buf_r[k]
-            end
-            θ[i] = val
-        else
-            θ[i] = zero(eltype(θ))
-        end
-    end
-    return θ
-end
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::LowRankMutableBoomerang) = draw_stratum_velocity!(rng, state, flow)
+# Low-rank flows carry no Cholesky factor, so the diagonal-ΣL fast paths never
+# apply; these methods only resolve the dispatch ambiguity with them.
+refresh_velocity!(rng::Random.AbstractRNG, state::StickyPDMPState,
+    flow::MutableBoomerang{U,T,S,LT}) where {U<:LowRankPrecision,T,S,LT<:Diagonal} =
+    draw_stratum_velocity!(rng, state, flow)
 
 function reflect!(ξ::SkeletonPoint, ∇ϕ::AbstractVector, flow::LowRankMutableBoomerang, cache)
     θ = ξ.θ
@@ -594,6 +636,11 @@ function reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector, flow::LowRankMu
     end
     return nothing
 end
+
+reflect!(state::StickyPDMPState, ∇ϕ::AbstractVector,
+        flow::MutableBoomerang{U,T,S,LT}, cache) where {U<:LowRankPrecision,T,S,LT<:Diagonal} =
+    invoke(reflect!, Tuple{StickyPDMPState,AbstractVector,LowRankMutableBoomerang,Any},
+        state, ∇ϕ, flow, cache)
 
 function correct_gradient!(∇ϕ::AbstractVector, x::AbstractVector, ::AbstractVector, flow::LowRankMutableBoomerang, cache)
     z = cache.z

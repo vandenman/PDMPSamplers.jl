@@ -1,6 +1,26 @@
 @isdefined(PDMPSamplers) || include(joinpath(@__DIR__, "testsetup.jl"))
 using LinearAlgebra
 
+struct _TypedBoundaryProbeError <: PDMPSamplers._SupportBoundaryProbeError end
+
+mutable struct _RecordingAggregateClock <: PDMPSamplers.AbstractAggregateUnstickClock
+    coordinates::Vector{Int}
+    horizons::Vector{Float64}
+end
+Base.copy(clock::_RecordingAggregateClock) =
+    _RecordingAggregateClock(copy(clock.coordinates), Float64[])
+PDMPSamplers.stickable_coordinates(clock::_RecordingAggregateClock) =
+    clock.coordinates
+function PDMPSamplers.sample_time(::Random.AbstractRNG,
+        clock::_RecordingAggregateClock, ::ContinuousDynamics,
+        ::StickyPDMPState, horizon::Real, ::BitVector)
+    push!(clock.horizons, Float64(horizon))
+    return isfinite(horizon) ? Float64(horizon) / 2 : 1.0
+end
+PDMPSamplers.sample_label(::Random.AbstractRNG,
+    clock::_RecordingAggregateClock, ::ContinuousDynamics,
+    ::StickyPDMPState, ::BitVector) = first(clock.coordinates)
+
 @testset "Support-boundary handling" begin
 
     # ── Synthetic model with a boundary at x[1] >= 1.0 ──
@@ -60,7 +80,7 @@ using LinearAlgebra
         opts = SupportBoundaryOptions()
 
         loc = @inferred PDMPSamplers.localize_support_boundary!(model, ctx, opts)
-        tau_star, tau_safe = loc
+        tau_star, tau_safe = loc.estimated_boundary_time, loc.safe_time
 
         # Boundary should be near x[1] = 1.0, i.e., t ≈ 1.0
         @test loc isa PDMPSamplers.SupportBoundaryLocalization
@@ -79,12 +99,12 @@ using LinearAlgebra
 
         # Tight tolerance
         opts_tight = SupportBoundaryOptions(; time_rtol=1e-12, time_atol=1e-12, max_bisection_steps=60)
-        tau_tight, _ = PDMPSamplers.localize_support_boundary!(model, ctx, opts_tight)
+        tau_tight = PDMPSamplers.localize_support_boundary!(model, ctx, opts_tight).estimated_boundary_time
         @test tau_tight ≈ 1.0 atol=1e-6
 
         # Loose tolerance, few steps
         opts_loose = SupportBoundaryOptions(; time_rtol=0.1, time_atol=0.1, max_bisection_steps=5)
-        tau_loose, _ = PDMPSamplers.localize_support_boundary!(model, ctx, opts_loose)
+        tau_loose = PDMPSamplers.localize_support_boundary!(model, ctx, opts_loose).estimated_boundary_time
         @test tau_loose ≈ 1.0 atol=0.2
     end
 
@@ -97,7 +117,7 @@ using LinearAlgebra
         )
 
         opts = SupportBoundaryOptions(; max_bisection_steps=3, time_rtol=0.0, time_atol=0.0)
-        tau, _ = PDMPSamplers.localize_support_boundary!(model, ctx, opts)
+        tau = PDMPSamplers.localize_support_boundary!(model, ctx, opts).estimated_boundary_time
         # After only 3 bisection steps from [0, 2], range should be roughly 2.0/8 = 0.25
         @test 0.5 <= tau <= 2.0
     end
@@ -110,7 +130,7 @@ using LinearAlgebra
             x0, v, 0.0, 1.0, ErrorException("test"), BouncyParticle, FullGradient,
         )
 
-        tau_star, _ = PDMPSamplers.localize_support_boundary!(model, ctx, SupportBoundaryOptions())
+        tau_star = PDMPSamplers.localize_support_boundary!(model, ctx, SupportBoundaryOptions()).estimated_boundary_time
         # Boundary should be near x[1] = 1.0 => t ≈ 0.5
         @test tau_star ≈ 0.5 atol=1e-3
     end
@@ -231,6 +251,102 @@ using LinearAlgebra
         @test result.stats[1].support_boundary_refresh_attempts >= result.stats[1].support_boundary_events
     end
 
+    @testset "support-boundary BPS refresh rebuilds sticky deadlines" begin
+        rng = PDMPSamplers.Random.Xoshiro(20260702)
+        model = _make_boundary_model()
+        flow = _make_boundary_flow()
+        public_alg = Sticky(_make_boundary_alg(; N=8, t_max=0.5), fill(0.5, d_boundary))
+        # The first sticky deadline (3.0) lies beyond the support boundary (0.8).
+        initial = SkeletonPoint([0.2, -3.0], [1.0, 1.0])
+        state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
+            rng, flow, model, public_alg, 0.0, initial,
+        )
+        trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
+        old_deadlines = copy(alg.sticky_times)
+        ctx = PDMPSamplers.BoundaryContext(
+            copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0, 1.0,
+            ErrorException("test"), BouncyParticle, GridThinningStrategy,
+        )
+        opts = SupportBoundaryOptions(;
+            detect_boundaries=true,
+            mode=:line_search_truncated_refresh,
+            max_refresh_attempts=1,
+            refresh_probe_time=0.0,
+        )
+
+        localization = PDMPSamplers.localize_support_boundary!(model_, ctx, opts)
+        @test localization.safe_time > 0.0
+        result = PDMPSamplers._boundary_refresh_from_localization!(
+            rng, state, model_, flow, alg, cache, stats, trace_manager, ctx, localization, opts;
+            phase=:main,
+        )
+
+        @test result === :refresh
+        @test alg.sticky_times != old_deadlines
+        @test all(i -> alg.sticky_times[i] == state.t[] +
+            PDMPSamplers.sticking_time(state.ξ, flow, i), alg.stickable_indices)
+        @test last(first(alg.sticky_pq)) == minimum(alg.sticky_times)
+    end
+
+    @testset "aggregate BPS boundary refresh rebuilds both schedules" begin
+        function aggregate_boundary_grad!(out, x)
+            x[2] >= 1.0 && error("outside support")
+            out .= x
+            return out
+        end
+        d = 3
+        model = PDMPModel(d, FullGradient(aggregate_boundary_grad!))
+        flows = (
+            BouncyParticle(Matrix{Float64}(I, d, d), zeros(d)),
+            PreconditionedBPS(Matrix{Float64}(I, d, d), zeros(d)),
+        )
+        for (flow_index, flow) in pairs(flows)
+            rng = PDMPSamplers.Random.Xoshiro(20260710 + flow_index)
+            clock = _RecordingAggregateClock(collect(1:d), Float64[])
+            public_alg = AggregateSticky(
+                _make_boundary_alg(; N=8, t_max=0.5), clock, trues(d))
+            initial = SkeletonPoint([0.0, 0.3, -0.4], [0.0, 1.0, -1.0])
+            state, model_, alg, cache, stats = PDMPSamplers.initialize_state(
+                rng, flow, model, public_alg, 0.0, initial)
+            trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
+            old_deadlines = copy(alg.sticky_times)
+            old_aggregate_time = alg.aggregate_unstick_time
+            old_horizon_calls = length(alg.clock.horizons)
+            ctx = PDMPSamplers.BoundaryContext(
+                copy(state.ξ.x), copy(state.ξ.θ), state.t[], 0.0,
+                1.0, ErrorException("test"), typeof(flow),
+                GridThinningStrategy)
+            opts = SupportBoundaryOptions(; detect_boundaries=true,
+                mode=:line_search_truncated_refresh, max_refresh_attempts=1,
+                refresh_probe_time=0.0)
+
+            localization = PDMPSamplers.localize_support_boundary!(model_, ctx, opts)
+            @test localization.safe_time > 0.0
+            result = PDMPSamplers._boundary_refresh_from_localization!(
+                rng, state, model_, flow, alg, cache, stats, trace_manager,
+                ctx, localization, opts; phase=:main)
+
+            @test result === :refresh
+            @test alg.sticky_times != old_deadlines
+            @test length(alg.clock.horizons) == old_horizon_calls + 1
+            _, earliest_stick = isempty(alg.sticky_pq) ? (0, Inf) :
+                first(alg.sticky_pq)
+            refreshed_horizon = max(0.0, earliest_stick - state.t[])
+            @test last(alg.clock.horizons) == refreshed_horizon
+            expected_unstick_delay = isfinite(refreshed_horizon) ?
+                refreshed_horizon / 2 : 1.0
+            @test alg.aggregate_unstick_time == state.t[] +
+                expected_unstick_delay
+            @test alg.aggregate_unstick_time != old_aggregate_time ||
+                refreshed_horizon != first(alg.clock.horizons)
+            @test all(i -> !haskey(alg.sticky_pq, i) ||
+                alg.sticky_pq[i] == alg.sticky_times[i], eachindex(alg.sticky_times))
+            @test all(i -> !state.free[i] || alg.sticky_times[i] == state.t[] +
+                PDMPSamplers.sticking_time(state.ξ, flow, i),
+                alg.stickable_indices)
+        end
+    end
+
     @testset "pdmp_sample — line_search_truncated_refresh recovers for PreconditionedBPS" begin
         model = _make_boundary_model()
         flow = PreconditionedBPS(Matrix{Float64}(I, d_boundary, d_boundary), zeros(d_boundary))
@@ -253,7 +369,7 @@ using LinearAlgebra
         previous_state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
         state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
         trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
-        PDMPSamplers.record_event!(trace_manager, previous_state, flow, nothing, :main)
+        PDMPSamplers.record_event!(trace_manager, previous_state, flow, nothing, :main, :reflect)
 
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
@@ -285,7 +401,7 @@ using LinearAlgebra
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
         )
-        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model.grad, cache)
+        grad_func = PDMPSamplers.GradientProvider(state.ξ.θ, flow, model.grad, cache)
         grad_and_hvp = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d_boundary), zeros(d_boundary), zeros(d_boundary))
         probe = PDMPSamplers.GridBoundaryProbeHandler(copy(state), flow, model, GridThinningStrategy)
 
@@ -302,21 +418,21 @@ using LinearAlgebra
         @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
-    @testset "_get_rate_and_deriv_or_throw treats BridgeStan-style zero-bracket failures as probe failures" begin
+    @testset "_get_rate_and_deriv_or_throw treats typed zero-bracket failures as probe failures" begin
         rng = PDMPSamplers.Random.Xoshiro(8)
-        function bridgestan_like_grad!(out, x)
-            x[1] == 1.0 && error("BridgeStan gradient failed (code -1)")
+        function typed_probe_failure_grad!(out, x)
+            x[1] == 1.0 && throw(_TypedBoundaryProbeError())
             out .= x
             return out
         end
-        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        model = PDMPModel(d_boundary, FullGradient(typed_probe_failure_grad!))
         flow = _make_boundary_flow()
         alg = _make_boundary_alg(; N=20, t_max=2.0)
         state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
         )
-        grad_func = PDMPSamplers.make_grad_U_func(state, flow, model.grad, cache)
+        grad_func = PDMPSamplers.GradientProvider(state.ξ.θ, flow, model.grad, cache)
         grad_and_hvp = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d_boundary), zeros(d_boundary), zeros(d_boundary))
         probe = PDMPSamplers.GridBoundaryProbeHandler(copy(state), flow, model, GridThinningStrategy)
 
@@ -333,19 +449,19 @@ using LinearAlgebra
         @test err.ctx.t_invalid > err.ctx.t_valid
     end
 
-    @testset "_throw_grid_boundary_error treats BridgeStan-style positive-bracket failures as probe failures" begin
-        function bridgestan_like_grad!(out, x)
+    @testset "_throw_grid_boundary_error treats typed positive-bracket failures as probe failures" begin
+        function typed_probe_failure_grad!(out, x)
             out .= x
             return out
         end
-        model = PDMPModel(d_boundary, FullGradient(bridgestan_like_grad!))
+        model = PDMPModel(d_boundary, FullGradient(typed_probe_failure_grad!))
         flow = _make_boundary_flow()
         original_state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
         current_state = PDMPState(1.0, SkeletonPoint([1.0, 0.0], [1.0, 0.0]))
 
         err = try
             PDMPSamplers._throw_grid_boundary_error(
-                current_state, original_state, flow, model, ErrorException("BridgeStan gradient failed (code -1)");
+                current_state, original_state, flow, model, _TypedBoundaryProbeError();
                 t_valid=0.25, t_invalid=1.0,
             )
             nothing
@@ -428,7 +544,7 @@ using LinearAlgebra
         @test state.ξ.x[1] ≈ 0.375
     end
 
-    @testset "line_search_truncated_refresh shrinks refresh probe time" begin
+    @testset "support-boundary refresh validates the forward probe" begin
         function _probe_grad!(out, x)
             x[1] >= 0.5 && error("Outside support: x[1] = $(x[1])")
             out .= x
@@ -442,66 +558,9 @@ using LinearAlgebra
         cache = PDMPSamplers.add_gradient_to_cache(
             PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
         )
-        opts = SupportBoundaryOptions(; refresh_probe_time=0.02, max_bisection_steps=10)
 
-        @test !PDMPSamplers._short_forward_probe_is_valid(state, model, flow, cache, opts.refresh_probe_time)
-        @test PDMPSamplers._short_forward_probe_is_valid(state, model, flow, cache, opts)
-    end
-
-    @testset "grid safety limit routes through support-boundary handling" begin
-        rng = PDMPSamplers.Random.Xoshiro(42)
-        model = _make_boundary_model()
-        flow = _make_boundary_flow()
-        alg = _make_boundary_alg(; N=20, t_max=2.0)
-        state = PDMPState(0.0, SkeletonPoint([0.0, 0.0], [1.0, 0.0]))
-        trace_manager = PDMPSamplers.TraceManager(state, flow, alg, 0.0)
-        cache = PDMPSamplers.add_gradient_to_cache(
-            PDMPSamplers.initialize_cache(rng, flow, model.grad, alg, state.t[], state.ξ), state.ξ,
-        )
-        stats = PDMPSamplers.StatisticCounter()
-        ctx = PDMPSamplers.BoundaryContext(
-            copy(state.ξ.x), copy(state.ξ.θ), state.t[],
-            0.0, 2.0, ErrorException("Safety limit reached"), BouncyParticle, GridThinningStrategy,
-        )
-
-        try
-            PDMPSamplers._handle_grid_safety_limit!(
-                rng, state, model, flow, alg, cache, stats, trace_manager, ctx,
-                SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search); phase=:main,
-            )
-            @test false
-        catch err
-            @test err isa SupportBoundaryError
-            @test err.localized
-            @test occursin("Grid thinning", err.message)
-        end
-
-        ctx_valid_horizon = PDMPSamplers.BoundaryContext(
-            copy(state.ξ.x), copy(state.ξ.θ), state.t[],
-            0.0, 0.5, ErrorException("Safety limit reached"), BouncyParticle, GridThinningStrategy,
-        )
-        try
-            PDMPSamplers._handle_grid_safety_limit!(
-                rng, state, model, flow, alg, cache, stats, trace_manager, ctx_valid_horizon,
-                SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search); phase=:main,
-            )
-            @test false
-        catch err
-            @test err isa SupportBoundaryError
-            @test !err.localized
-            io = IOBuffer()
-            showerror(io, err)
-            @test !occursin("Hint: use support_boundary_options", String(take!(io)))
-        end
-
-        opts = SupportBoundaryOptions(; detect_boundaries=true, mode=:line_search_truncated_refresh, max_refresh_attempts=1, refresh_probe_time=0.0)
-        result = PDMPSamplers._handle_grid_safety_limit!(
-            rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase=:main,
-        )
-
-        @test result === :refresh
-        @test stats.support_boundary_events == 1
-        @test stats.support_boundary_refresh_attempts == 1
+        @test !PDMPSamplers._short_forward_probe_is_valid!(copy(state), state, model, flow, cache, 0.02)
+        @test PDMPSamplers._short_forward_probe_is_valid!(copy(state), state, model, flow, cache, 0.005)
     end
 
     @testset "pdmp_sample — line_search_truncated_refresh unsupported flow" begin
@@ -541,7 +600,8 @@ using LinearAlgebra
             @test false
         catch err
             @test !(err isa SupportBoundaryError)
-            @test occursin("MethodError", sprint(showerror, err))
+            @test err isa ErrorException
+            @test err.msg == "bad hvp"
         end
     end
 

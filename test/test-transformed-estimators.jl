@@ -3,6 +3,21 @@
 import QuadGK
 
 @testset "Transformed estimators" begin
+    @testset "frozen Boomerang coordinates retain their transformed value" begin
+        flow = Boomerang(Diagonal([1.0]), [1.0], 0.0)
+        trace = PDMPTrace([0.0, 1.0], zeros(1, 2), zeros(1, 2),
+            flow, falses(1, 2))
+        @test mean(trace, [IdentityTransform()]) == mean(trace) == [0.0]
+        @test var(trace, [IdentityTransform()]) == var(trace) == [0.0]
+        @test mean(trace, [LowerBoundTransform(2.0)]) == [3.0]
+        @test var(trace, [LowerBoundTransform(2.0)]) == [0.0]
+        wrapped = PDMPSamplers.PreconditionedDynamics(
+            PDMPSamplers.IdentityPreconditioner(), flow)
+        wrapped_trace = PDMPTrace(trace.times, trace.positions, trace.velocities,
+            wrapped, trace.free_masks)
+        @test mean(wrapped_trace, [IdentityTransform()]) == [0.0]
+        @test var(wrapped_trace, [IdentityTransform()]) == [0.0]
+    end
 
     # ──────────────────────────────────────────────────────────────────────────
     # Level 1: segment integral correctness (unit tests vs QuadGK)
@@ -149,8 +164,8 @@ import QuadGK
         @testset "$pdmp_type" for pdmp_type in (ZigZag, BouncyParticle, Boomerang)
 
             flow = pdmp_type(Σ_inv, μ_unc)
-            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(flow, d))
-            trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false)
+            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
+            trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false))
 
             dt_disc = mean(diff(PDMPSamplers.event_times(trace)))
             samples = Matrix(PDMPDiscretize(trace, dt_disc))
@@ -205,8 +220,8 @@ import QuadGK
             transforms_db = [DoubleBoundTransform(0.0, 1.0) for _ in 1:d]
 
             flow = BouncyParticle(Σ_inv, μ_unc)
-            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(flow, d))
-            trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false)
+            ξ0 = SkeletonPoint(μ_unc .+ 0.1 * randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
+            trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false))
 
             dt_disc = mean(diff(PDMPSamplers.event_times(trace)))
             samples = Matrix(PDMPDiscretize(trace, dt_disc))
@@ -243,8 +258,8 @@ import QuadGK
 
         @testset "$pdmp_type" for pdmp_type in (ZigZag, BouncyParticle, Boomerang)
             flow = pdmp_type(Γ, μ)
-            ξ0 = SkeletonPoint(μ .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-            trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false)
+            ξ0 = SkeletonPoint(μ .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
+            trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T_sim; progress=false))
 
             @test mean(trace, id_transforms) ≈ mean(trace) atol = 1e-10
             @test var(trace, id_transforms) ≈ var(trace) atol = 1e-10

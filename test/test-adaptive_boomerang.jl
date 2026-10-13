@@ -14,7 +14,6 @@
         @test flow.Γ == Diagonal(ones(d))
         @test flow.λref == 0.1
         @test flow.ρ == 0.0
-        @test flow.eigen_cache === nothing
 
         # Custom initial guess
         Γ0 = Diagonal([2.0, 3.0])
@@ -38,13 +37,13 @@
         flow = AdaptiveBoomerang(d)
 
         # initialize_velocity
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         @test length(θ) == d
         @test all(isfinite, θ)
 
         # refresh_velocity!
         ξ = SkeletonPoint(randn(d), randn(d))
-        PDMPSamplers.refresh_velocity!(ξ, flow)
+        PDMPSamplers.refresh_velocity!(Random.default_rng(), ξ, flow)
         @test all(isfinite, ξ.θ)
 
         # move_forward_time!
@@ -59,7 +58,7 @@
         ∇ϕ = randn(d)
         cache = (; z=similar(ξ2.x))
         θ_before = copy(ξ2.θ)
-        PDMPSamplers.reflect!(ξ2, ∇ϕ, flow, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), ξ2, ∇ϕ, flow, cache)
         @test all(isfinite, ξ2.θ)
 
         # λ
@@ -87,7 +86,7 @@
 
         flow = AdaptiveBoomerang(d)
         x0 = μ_true + randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -96,7 +95,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adaptation quality: μ should be close to true (element-wise)
         for i in 1:d
@@ -137,7 +136,7 @@
 
         flow = AdaptiveBoomerang(d)
         x0 = mean(D) + randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -146,7 +145,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adapted μ should be roughly correct (element-wise)
         for i in 1:d
@@ -173,7 +172,7 @@
 
         flow = AdaptiveBoomerang(d)
         x0 = randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -182,7 +181,7 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         trace_mean = mean(trace)
 
@@ -203,7 +202,7 @@
 
         flow = AdaptiveBoomerang(d; λref=1.0)
         x0 = randn(d) .* 0.1
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, slab_target))
@@ -212,11 +211,11 @@
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         @test length(trace) > 100
         @test all(isfinite, mean(trace))
-        @test all(isfinite, flow.μ)
+        @test all(iszero, flow.μ)
         @test all(x -> x > 0, diag(flow.Γ))
     end
 
@@ -235,7 +234,7 @@
         samples = zeros(d, n_samples)
         for j in 1:n_samples
             θ = randn(d)
-            PDMPSamplers.refresh_velocity!(θ, flow)
+            PDMPSamplers.refresh_velocity!(Random.default_rng(), θ, flow)
             samples[:, j] = θ
         end
 
@@ -255,7 +254,7 @@
         @test stats.total_time == 0.0
         @test stats.sum_x_dt == zeros(d)
         @test stats.sum_x2_dt == zeros(d)
-        @test stats.sum_xy_dt === nothing
+        @test isempty(stats.sum_xy_dt)
 
         μ = PDMPSamplers.stats_mean(stats)
         σ² = PDMPSamplers.stats_var(stats)
@@ -263,10 +262,37 @@
         @test σ² == ones(d)
 
         stats_fr = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
-        @test stats_fr.sum_xy_dt !== nothing
+        @test !isempty(stats_fr.sum_xy_dt)
         @test size(stats_fr.sum_xy_dt) == (d, d)
     end
 
+end
+
+@testset "Sticky full-rank and low-rank adaptation stationarity" begin
+    for (seed, scheme) in ((0xaf41, :fullrank), (0xaf42, :lowrank))
+        Random.seed!(seed)
+        d = 4
+        D, κ, target = gen_data(
+            SpikeAndSlabDist{BetaBernoulli,ZeroMeanIsoNormal}, d)
+        flow = AdaptiveBoomerang(d; λref=0.5, scheme,
+            rank=(scheme === :lowrank ? 2 : min(d - 1, 5)))
+        initial = SkeletonPoint(0.2 .* randn(d),
+            PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
+        model = PDMPModel(d,
+            FullGradient(Base.Fix1(neg_gradient!, target)),
+            Base.Fix1(neg_hvp!, target))
+        trace, stats = only(pdmp_sample(initial, flow, model,
+            Sticky(GridThinningStrategy(), κ, trues(d)),
+            0.0, 50_000.0, 5_000.0; seed, progress=show_progress,
+            statistic_counter=PDMPSamplers.DevelStatisticCounter))
+
+        @test stats.grid_resets_from_dynamics_adaptation > 0
+        @test stats.sticky_freezes > 100
+        @test stats.sticky_unfreezes > 100
+        @test all(isfinite, flow.μ)
+        scheme === :lowrank && @test flow.Γ isa PDMPSamplers.LowRankPrecision
+        test_approximation(trace, D; elapsed=stats.elapsed_time)
+    end
 end
 
 @testset "Adaptive Boomerang (Phase 2: fullrank)" begin
@@ -283,10 +309,9 @@ end
         @test flow.Γ ≈ I(d)
         @test flow.L isa LowerTriangular
         @test flow.ΣL isa LowerTriangular
-        @test flow.eigen_cache === nothing
 
         # Dynamics methods work with dense types
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         @test length(θ) == d
         @test all(isfinite, θ)
 
@@ -298,7 +323,7 @@ end
         ξ = SkeletonPoint(randn(d), randn(d))
         ∇ϕ = randn(d)
         cache = (; z=similar(ξ.x))
-        PDMPSamplers.reflect!(ξ, ∇ϕ, flow, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), ξ, ∇ϕ, flow, cache)
         @test all(isfinite, ξ.θ)
     end
 
@@ -319,7 +344,7 @@ end
         samples = zeros(d, n_samples)
         for j in 1:n_samples
             θ = randn(d)
-            PDMPSamplers.refresh_velocity!(θ, flow)
+            PDMPSamplers.refresh_velocity!(Random.default_rng(), θ, flow)
             samples[:, j] = θ
         end
 
@@ -343,7 +368,7 @@ end
 
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
         x0 = mean(D) + randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -352,7 +377,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adapted μ should be roughly correct
         for i in 1:d
@@ -394,7 +419,7 @@ end
 
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
         x0 = mean(D) + randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -403,7 +428,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Core correctness: posterior mean
         trace_mean = mean(trace)
@@ -428,7 +453,7 @@ end
 
         flow = AdaptiveBoomerang(d; scheme=:fullrank)
         x0 = randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -437,7 +462,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         trace_mean = mean(trace)
         @test length(trace) > 100
@@ -555,7 +580,7 @@ end
         n_samples = 50_000
         samples = zeros(d, n_samples)
         for j in 1:n_samples
-            PDMPSamplers.lowrank_sample!(view(samples, :, j), lrp)
+            PDMPSamplers.lowrank_sample!(Random.default_rng(), view(samples, :, j), lrp)
         end
         emp_cov = cov(samples')
         for j in 1:d, i in j:d
@@ -571,13 +596,13 @@ end
         flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
 
         # initialize_velocity
-        θ = PDMPSamplers.initialize_velocity(flow, d)
+        θ = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         @test length(θ) == d
         @test all(isfinite, θ)
 
         # refresh_velocity!
         ξ = SkeletonPoint(randn(d), randn(d))
-        PDMPSamplers.refresh_velocity!(ξ, flow)
+        PDMPSamplers.refresh_velocity!(Random.default_rng(), ξ, flow)
         @test all(isfinite, ξ.θ)
 
         # move_forward_time!
@@ -590,7 +615,7 @@ end
         ξ2 = SkeletonPoint(randn(d), randn(d))
         ∇ϕ = randn(d)
         cache = (; z=similar(ξ2.x))
-        PDMPSamplers.reflect!(ξ2, ∇ϕ, flow, cache)
+        PDMPSamplers.reflect!(Random.default_rng(), ξ2, ∇ϕ, flow, cache)
         @test all(isfinite, ξ2.θ)
 
         # correct_gradient!
@@ -625,7 +650,7 @@ end
         samples = zeros(d, n_samples)
         for j in 1:n_samples
             θ = randn(d)
-            PDMPSamplers.refresh_velocity!(θ, flow)
+            PDMPSamplers.refresh_velocity!(Random.default_rng(), θ, flow)
             samples[:, j] = θ
         end
 
@@ -649,7 +674,7 @@ end
 
         flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
         x0 = mean(D) + randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -658,7 +683,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         # Adapted μ should be roughly correct
         for i in 1:d
@@ -692,7 +717,7 @@ end
 
         flow = AdaptiveBoomerang(d; scheme=:lowrank, rank=2)
         x0 = randn(d)
-        θ0 = PDMPSamplers.initialize_velocity(flow, d)
+        θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
         ξ0 = SkeletonPoint(x0, θ0)
 
         grad = FullGradient(Base.Fix1(neg_gradient!, target))
@@ -701,7 +726,7 @@ end
 
         T = 100_000.0
         t_warmup = 10_000.0
-        trace, stats = pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress)
+        trace, stats = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T, t_warmup; progress=show_progress))
 
         trace_mean = mean(trace)
         @test length(trace) > 100

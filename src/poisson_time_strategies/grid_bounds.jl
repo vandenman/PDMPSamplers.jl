@@ -29,30 +29,6 @@ function (bound::PiecewiseConstantBound)(t::Real)
     return bound.Λ_vals[i]
 end
 
-"""
-    construct_upper_bound(x₀, v₀, flow, U, t_max, N)
-
-Constructs a piecewise-constant upper bound for the event rate λ(t)
-using the grid-based method from Andral & Kamatani (2024).
-
-# Arguments
-- `x₀`, `v₀`: Initial position and velocity.
-- `flow`: The deterministic dynamics (e.g., BouncyParticle, Boomerang).
-- `U`: The potential energy function `U(x)`.
-- `t_max`: The time horizon for the bound.
-- `N`: The number of grid segments.
-
-# Returns
-- A `PiecewiseConstantBound` object.
-"""
-function construct_upper_bound(ξ::SkeletonPoint, flow, ∇U!::Function, t_max::Real, N::Int)
-
-    pcb = PiecewiseConstantBound(Vector{eltype(ξ.x)}(undef, N + 1), Vector{eltype(ξ.x)}(undef, N))
-    recompute_time_grid!(pcb, t_max, N)
-    construct_upper_bound!(pcb, ξ, flow, ∇U!)
-    return pcb
-end
-
 function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integer)
     resize!(pcb.t_grid, N + 1)
     resize!(pcb.Λ_vals, N)
@@ -60,24 +36,6 @@ function recompute_time_grid!(pcb::PiecewiseConstantBound, t_max::Real, N::Integ
     resize!(pcb.d_vals, N + 1)
     pcb.t_grid .= range(0.0, t_max, N + 1)
 end
-
-function make_grad_U_func(θ::AbstractVector, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return GradientProvider(θ, flow, gradient_strategy, cache)
-end
-function make_grad_U_func(state::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return make_grad_U_func(state.ξ.θ, flow, gradient_strategy, cache)
-end
-
-function make_hvp_func(flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return function (x, θ)
-        dot(compute_gradient!(x, θ, gradient_strategy, flow, cache), θ)
-        # dot(compute_gradient_uncorrected!(x, θ, gradient_strategy, flow, cache), θ)
-    end
-end
-function make_hvp_func(::AbstractPDMPState, flow::ContinuousDynamics, gradient_strategy::GradientStrategy, cache)
-    return make_hvp_func(flow, gradient_strategy, cache)
-end
-
 
 function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state::AbstractPDMPState, flow::FL,
     grad_and_hess_or_grad_and_hvp, add_rate::Bool=true;
@@ -97,20 +55,11 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
 
     state_t = state_cache === nothing ? copy(state) : (copyto!(state_cache, state); state_cache)
     iszero(t_grid[1]) || error("t_grid[1] must be zero, got $(t_grid[1])")
-    n_time_cells = isfinite(max_time) ? max(0, min(N, searchsortedfirst(t_grid, max_time) - 1)) : N
+    n_time_cells = _grid_cell_count(t_grid, N, max_time)
     start_cell = clamp(Int(start_cell), 1, N + 1)
     start_cell > n_time_cells && return start_cell - 1
-    used_batched_rate_derivatives = _supports_constant_grid_rate_derivatives(flow, grad_and_hess_or_grad_and_hvp) &&
-        !_uses_builtin_grid_provider(grad_and_hess_or_grad_and_hvp) && n_time_cells > 0
-
-    loaded_batched_points = start_cell == 1 ? 0 : start_cell
-    λ_refresh = add_rate ? refresh_rate(flow) : 0.0
     if start_cell > 1
         move_forward_time!(state_t, t_grid[start_cell], flow)
-    elseif used_batched_rate_derivatives
-        loaded_batched_points = _load_constant_rate_derivatives!(
-            pcb, grad_and_hess_or_grad_and_hvp, state, flow, 1, n_time_cells + 1,
-            loaded_batched_points, λ_refresh, stats)
     elseif isnan(cached_y0)
         if stats !== nothing
             _inc_counter_grid_endpoint_evaluations(stats)
@@ -144,21 +93,15 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
         end
 
         Δt = t_grid[i] - t_grid[i-1]
-        if used_batched_rate_derivatives
-            loaded_batched_points = _load_constant_rate_derivatives!(
-                pcb, grad_and_hess_or_grad_and_hvp, state, flow, i, n_time_cells + 1,
-                loaded_batched_points, λ_refresh, stats)
-        else
-            move_forward_time!(state_t, Δt, flow)
-            if stats !== nothing
-                _inc_counter_grid_endpoint_evaluations(stats)
-                _inc_counter_grid_endpoint_gradient_calls(stats)
-                _inc_counter_grid_endpoint_hessian_calls(stats)
-            end
-            y_vals[i], d_vals[i] = _get_rate_and_deriv_or_throw(
-                probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
-                t_valid=t_grid[i-1], t_invalid=t_grid[i])
+        move_forward_time!(state_t, Δt, flow)
+        if stats !== nothing
+            _inc_counter_grid_endpoint_evaluations(stats)
+            _inc_counter_grid_endpoint_gradient_calls(stats)
+            _inc_counter_grid_endpoint_hessian_calls(stats)
         end
+        y_vals[i], d_vals[i] = _get_rate_and_deriv_or_throw(
+            probe_failure_handler, state_t, flow, grad_and_hess_or_grad_and_hvp, add_rate;
+            t_valid=t_grid[i-1], t_invalid=t_grid[i])
 
         # Compute bound for interval [i-1] immediately so we can track cumulative integral
         _compute_cell_bound!(Λ_vals, t_grid, y_vals, d_vals, i - 1)
@@ -188,19 +131,10 @@ function construct_upper_bound_grad_and_hess!(pcb::PiecewiseConstantBound, state
     return N_evaluated
 end
 
-_supports_constant_grid_rate_derivatives(::ContinuousDynamics, provider) = false
-_supports_constant_grid_rate_derivatives(flow::BouncyParticle, provider) = _supports_rate_derivatives(provider, flow)
-_supports_constant_grid_rate_derivatives(pd::PreconditionedDynamics, provider) =
-    _supports_constant_grid_rate_derivatives(pd.dynamics, provider)
-
-function _constant_rate_derivative_from_signed(g::Real, dg::Real, λ_refresh::Real)
-    return pos(g) + λ_refresh, ispositive(g) ? dg : zero(dg)
-end
-
 _grid_rate_derivative_chunk_points() = 16
 
-function _load_rate_derivative_chunk!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing}, transform)
+function _load_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
+    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing}, state_cache::AbstractPDMPState)
     target_point <= loaded_points && return loaded_points
     start_point = loaded_points + 1
     stop_point = min(max_points, max(target_point, loaded_points + _grid_rate_derivative_chunk_points()))
@@ -212,26 +146,8 @@ function _load_rate_derivative_chunk!(pcb::PiecewiseConstantBound, provider, sta
     values = reshape(@view(pcb.y_vals[start_point:stop_point]), 1, n_points)
     derivatives = reshape(@view(pcb.d_vals[start_point:stop_point]), 1, n_points)
     _fill_rate_derivatives!(
-        values, derivatives, provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points)
-    for (offset, point) in enumerate(start_point:stop_point)
-        pcb.y_vals[point], pcb.d_vals[point] = transform(values[1, offset], derivatives[1, offset])
-    end
+        values, derivatives, provider, state, flow, @view(pcb.t_grid[start_point:stop_point]), n_points, state_cache)
     return stop_point
-end
-
-function _load_constant_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState,
-    flow::ContinuousDynamics, target_point::Integer, max_points::Integer, loaded_points::Integer, λ_refresh::Real,
-    stats::Union{AbstractStatisticCounter,Nothing})
-    transform = (g, dg) -> _constant_rate_derivative_from_signed(g, dg, λ_refresh)
-    return _load_rate_derivative_chunk!(
-        pcb, provider, state, flow, target_point, max_points, loaded_points, stats, transform)
-end
-
-function _load_rate_derivatives!(pcb::PiecewiseConstantBound, provider, state::AbstractPDMPState, flow::ContinuousDynamics,
-    target_point::Integer, max_points::Integer, loaded_points::Integer, stats::Union{AbstractStatisticCounter,Nothing})
-    return _load_rate_derivative_chunk!(
-        pcb, provider, state, flow, target_point, max_points, loaded_points, stats,
-        (g, dg) -> (g, dg))
 end
 
 function _compute_cell_bound!(Λ_vals::Vector, t_grid::Vector, y_vals::Vector, d_vals::Vector, i::Int)
@@ -248,29 +164,6 @@ function _tangent_intersection_bound(tᵢ::Float64, tᵢ₊₁::Float64, yᵢ::F
     end
     return max(yᵢ, yᵢ₊₁, mᵢ)
 end
-
-function construct_upper_bound!(pcb::PiecewiseConstantBound, ξ::SkeletonPoint, flow::ContinuousDynamics, ∇U!::Function, use_hvp::Bool=true)
-    construct_upper_bound!(pcb, PDMPState(0.0, ξ), flow, ∇U!, use_hvp)
-end
-function construct_upper_bound!(pcb::PiecewiseConstantBound, state::PDMPState, flow::ContinuousDynamics, ∇U!::Function,
-    use_hvp::Bool=true)
-
-    use_hvp || error("Only HVP mode is supported")
-
-    g = similar(state.ξ.x)
-    out = similar(g)
-    ∇U = Base.Fix1(∇U!, out)
-    f = (x, v) -> dot(∇U(x), v)
-    prep = DI.prepare_gradient(f, DI.AutoMooncake(), g, DI.Constant(copy(g)))
-
-    # Avoid boxing prep by wrapping it in a struct or passing it explicitly
-    hvp = let prep = prep, g = g, f = f
-        (x, v) -> DI.gradient!(f, g, prep, DI.AutoMooncake(), x, DI.Constant(v))
-    end
-
-    return construct_upper_bound_grad_and_hess!(pcb, state, flow, (∇U, hvp))
-end
-
 
 function propose_event_time(rng::Random.AbstractRNG, pcb::PiecewiseConstantBound, u::Real=rand(rng, Exponential()), refresh_rate::Real=0.0)
 

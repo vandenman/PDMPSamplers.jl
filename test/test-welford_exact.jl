@@ -139,12 +139,12 @@ import QuadGK
         flow_immutable = Boomerang(d)
         μ_ref = flow_immutable.μ
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow_immutable, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow_immutable, d))
         target = gen_data(Distributions.MvNormal, d, 1.0)
         grad   = FullGradient(Base.Fix1(neg_gradient!, target))
         model  = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg    = GridThinningStrategy()
-        trace, _ = pdmp_sample(ξ0, flow_immutable, model, alg, 0.0, 2000.0; progress=false)
+        trace, _ = only(pdmp_sample(ξ0, flow_immutable, model, alg, 0.0, 2000.0; progress=false))
 
         # Build accumulator from trace skeleton events
         ws_trace = PDMPSamplers.WelfordBoomerangStats(d; fullrank=true)
@@ -374,10 +374,10 @@ import QuadGK
         model  = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
         alg    = GridThinningStrategy()
 
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
         # Run WITHOUT adaptation (NoAdaptation) to keep reference fixed
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
-                               progress=false, adapter=PDMPSamplers.NoAdaptation())
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, 3000.0;
+                               progress=false, adapter=PDMPSamplers.NoAdaptation()))
 
         ws_trace = PDMPSamplers.WelfordBoomerangStats(d)
         for k in eachindex(trace.times)
@@ -413,6 +413,29 @@ import QuadGK
         μ_buf = zeros(d)
         allocs_mean = minimum(@allocated(PDMPSamplers.stats_mean!(μ_buf, ws)) for _ in 1:10)
         @test allocs_mean == 0
+    end
+
+    @testset "Sticky free-time welford_update!" begin
+        d = 3
+        flow = AdaptiveBoomerang(d; scheme=:diagonal)
+        ws = PDMPSamplers.WelfordBoomerangStats(d)
+        x0 = [1.0, 0.0, -2.0]
+        θ0 = zeros(d)
+        free0 = BitVector([true, false, true])
+        PDMPSamplers.welford_update!(ws, x0, θ0, free0, 0.0, flow)
+        PDMPSamplers.welford_update!(ws, x0, θ0, free0, 1.0, flow)
+
+        @test ws.total_time ≈ 1.0
+        @test ws.free_time ≈ [1.0, 0.0, 1.0]
+        @test ws.free_sum_x_dt[1] ≈ sin(1.0)
+        @test ws.free_sum_x_dt[2] == 0.0
+        @test ws.free_sum_x_dt[3] ≈ -2.0 * sin(1.0)
+
+        allocs = minimum(
+            @allocated(PDMPSamplers.welford_update!(ws, x0, θ0, free0, 1.5 + 0.1 * i, flow))
+            for i in 1:20
+        )
+        @test allocs == 0
     end
 
 end

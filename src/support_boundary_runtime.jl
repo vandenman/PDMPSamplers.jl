@@ -5,6 +5,8 @@ struct BoundaryHandling{M} <: BoundaryPolicy
 end
 
 _boundary_policy(opts::SupportBoundaryOptions) = opts.detect_boundaries ? BoundaryHandling{opts.mode}(opts) : NoBoundaryHandling()
+_detect_boundaries(::NoBoundaryHandling) = false
+_detect_boundaries(::BoundaryHandling) = true
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -14,19 +16,52 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::NoBoundaryHandling,
+    ::BoundaryPolicy,
+    max_horizon::Real,
 ) = next_event_time(rng, model, flow, alg, state, cache, stats)
 
-_next_event_time_for_step(
+function _next_event_time_for_step(
     rng::Random.AbstractRNG,
     model::PDMPModel,
     flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
+    alg::SubsamplingThinningState,
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
     ::BoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats)
+    max_horizon::Real,
+)
+    throw(ArgumentError(
+        "support-boundary detection is not yet supported by SubsampledControlVariate ThinningStrategy"))
+end
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::SubsamplingThinningState,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::NoBoundaryHandling,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+        Float64(max_horizon), true, :horizon_hit)
+end
+
+_next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::Union{StickyLoopState,AggregateStickyLoopState},
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+) = next_event_time(rng, model, flow, alg, state, cache, stats,
+                    Float64(max_horizon), _detect_boundaries(policy))
 
 _next_event_time_for_step(
     rng::Random.AbstractRNG,
@@ -36,8 +71,52 @@ _next_event_time_for_step(
     state::AbstractPDMPState,
     cache::NamedTuple,
     stats::AbstractStatisticCounter,
-    ::BoundaryHandling,
-) = next_event_time(rng, model, flow, alg, state, cache, stats, Inf, true, :horizon_hit, true)
+    policy::BoundaryPolicy,
+    max_horizon::Real,
+) = next_event_time(rng, model, flow, alg, state, cache, stats,
+                    Float64(max_horizon), true, :horizon_hit,
+                    _detect_boundaries(policy))
+
+function _next_event_time_for_step(
+    rng::Random.AbstractRNG,
+    model::PDMPModel,
+    flow::ContinuousDynamics,
+    alg::RootsPoissonTimeStrategy,
+    state::AbstractPDMPState,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    ::BoundaryPolicy,
+    max_horizon::Real,
+)
+    return next_event_time(rng, model, flow, alg, state, cache, stats,
+                           Float64(max_horizon), true, :horizon_hit)
+end
+
+function _bounded_inner_event_time(
+    rng::Random.AbstractRNG,
+    model::PDMPModel{<:GlobalGradientStrategy},
+    flow::ContinuousDynamics,
+    inner_alg_state::RootsPoissonTimeStrategy,
+    state::StickyPDMPState,
+    cache,
+    stats::AbstractStatisticCounter,
+    max_horizon::Float64,
+    ::Bool=false,
+)
+    return next_event_time(rng, model, flow, inner_alg_state, state, cache, stats,
+                           max_horizon, false, :sticky_horizon_hit)
+end
+
+function _cap_event_time_for_step(τ::Real, event_type::Symbol, meta,
+        max_horizon::Real, max_horizon_event::Symbol=:horizon_hit)
+    if isfinite(max_horizon) && τ > max_horizon
+        return Float64(max_horizon), max_horizon_event, EmptyMeta()
+    elseif isfinite(max_horizon) && τ == max_horizon &&
+            event_type === :horizon_hit
+        return Float64(max_horizon), max_horizon_event, EmptyMeta()
+    end
+    return τ, event_type, meta
+end
 
 # The default hot path deliberately has no support-boundary try/catch or option
 # plumbing; boundary recovery is handled by the typed BoundaryHandling method.
@@ -51,15 +130,84 @@ function _step!(
     stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     ::NoBoundaryHandling,
-    phase::Symbol
+    phase::Symbol,
+    max_horizon::Real=Inf,
+    max_horizon_event::Symbol=:horizon_hit,
 ) where {FL<:ContinuousDynamics}
-    τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling())
-    @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+    τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, NoBoundaryHandling(), max_horizon)
+    capped = isfinite(max_horizon) &&
+        (τ > max_horizon ||
+         (τ == max_horizon && event_type === :horizon_hit))
+    if capped
+        τ = Float64(max_horizon)
+        event_type = max_horizon_event
+    end
+    @assert ispositive(τ) || (iszero(τ) && event_type in
+        (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-    needs_saving, saving_args = _handle_event_no_boundary!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
-    needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+    # Keep the two metadata types on separate compiled paths.  Merging a
+    # GradientMeta with an EmptyMeta before dispatch boxes the former for each
+    # physical event, even when both values already exist in reusable caches.
+    needs_saving, saving_args = if capped
+        _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+            cache, event_type, EmptyMeta(), stats, phase)
+    else
+        _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+            cache, event_type, meta, stats, phase)
+    end
+    needs_saving && record_event!(trace_manager, state, flow, saving_args,
+        phase, event_type)
 
     return event_type
+end
+
+# The sticky scheduler can return three metadata shapes.  Consuming each
+# branch where it is constructed keeps the mixed return tuple out of the
+# physical-step call path while preserving the public next_event_time API.
+function _step!(
+    rng::Random.AbstractRNG,
+    state::StickyPDMPState,
+    model_::PDMPModel{<:GlobalGradientStrategy},
+    flow::FL,
+    alg_::A,
+    cache::NamedTuple,
+    stats::AbstractStatisticCounter,
+    trace_manager::TraceManager,
+    ::NoBoundaryHandling,
+    phase::Symbol,
+    max_horizon::Real=Inf,
+    max_horizon_event::Symbol=:horizon_hit,
+) where {FL<:ContinuousDynamics,A<:Union{StickyLoopState,AggregateStickyLoopState}}
+    horizon = Float64(max_horizon)
+    consume = function (τ, event_type, meta)
+        capped = isfinite(horizon) &&
+            (τ > horizon || (τ == horizon && event_type === :horizon_hit))
+        if capped
+            τ = horizon
+            event_type = max_horizon_event
+        end
+        @assert ispositive(τ) || (iszero(τ) && event_type in
+            (:sticky, :horizon_hit, :anchor_selection_boundary))
+        if !capped && event_type === :sticky
+            needs_saving = _handle_sticky_event_no_boundary!(rng, τ,
+                model_, flow, alg_, state, stats, meta.i)
+            needs_saving && record_event!(trace_manager, state, flow,
+                meta.i, phase, event_type)
+            return event_type
+        end
+        needs_saving, saving_args = if capped
+            _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+                cache, event_type, EmptyMeta(), stats, phase)
+        else
+            _handle_event_no_boundary!(rng, τ, model_, flow, alg_, state,
+                cache, event_type, meta, stats, phase)
+        end
+        needs_saving && record_event!(trace_manager, state, flow,
+            saving_args, phase, event_type)
+        return event_type
+    end
+    return _next_sticky_event_consume(consume, rng, model_, flow, alg_,
+        state, cache, stats, horizon, false)
 end
 
 function _step!(
@@ -72,23 +220,27 @@ function _step!(
     stats::AbstractStatisticCounter,
     trace_manager::TraceManager,
     boundary_policy::BoundaryHandling,
-    phase::Symbol
+    phase::Symbol,
+    max_horizon::Real=Inf,
+    max_horizon_event::Symbol=:horizon_hit,
 ) where {FL<:ContinuousDynamics}
     support_boundary_options = boundary_policy.opts
     try
-        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy)
+        τ, event_type, meta = _next_event_time_for_step(rng, model_, flow, alg_, state, cache, stats, boundary_policy, max_horizon)
+        τ, event_type, meta = _cap_event_time_for_step(τ, event_type,
+            meta, max_horizon, max_horizon_event)
 
-        @assert ispositive(τ) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
+        @assert ispositive(τ) || (iszero(τ) && event_type in
+            (:sticky, :horizon_hit, :anchor_selection_boundary)) "Proposed event time τ ($τ) is non-positive. Sampler is stuck!"
 
-        needs_saving, saving_args = handle_event!(rng, τ, model_.grad, flow, alg_, state, cache, event_type, meta, stats)
-        needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+        needs_saving, saving_args = handle_event!(rng, τ, model_, flow, alg_, state, cache, event_type, meta, stats, phase)
+        needs_saving && record_event!(trace_manager, state, flow, saving_args,
+            phase, event_type)
 
         return event_type
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
-        elseif err isa _GridSafetyLimitException
-            return _handle_grid_safety_limit!(rng, state, model_, flow, alg_, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
         elseif err isa SupportBoundaryError
             rethrow(err)
         else
@@ -119,102 +271,6 @@ function _handle_step_boundary!(
     else
         _handle_boundary!(model, ctx, opts)
     end
-end
-
-function _throw_grid_safety_support_error(model::PDMPModel, ctx::BoundaryContext, opts::SupportBoundaryOptions; message::String)
-    if !_support_boundary_probe_is_valid(model, ctx, ctx.t_invalid)
-        localization = localize_support_boundary!(model, ctx, opts)
-        throw(_build_boundary_error(ctx, opts; localized=true, localization,
-            message="Grid thinning reached its safety limit after entering an invalid support region."))
-    end
-
-    throw(_build_boundary_error(ctx, opts; message))
-end
-
-function _line_search_truncated_refresh_from_current_state!(
-    rng::Random.AbstractRNG,
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
-    cache::NamedTuple,
-    stats::AbstractStatisticCounter,
-    trace_manager::TraceManager,
-    ctx::BoundaryContext,
-    opts::SupportBoundaryOptions;
-    phase::Symbol
-)
-    if !_supports_line_search_truncated_refresh_state(state, flow)
-        _throw_grid_safety_support_error(model, ctx, opts;
-            message="Grid thinning reached its safety limit; :line_search_truncated_refresh is only implemented for BPS-family flows.")
-    end
-
-    x_current = copy(state.ξ.x)
-    θ_current = copy(state.ξ.θ)
-    t_current = state.t[]
-    state_probe = _boundary_probe_state(alg, state)
-
-    for _ in 1:opts.max_refresh_attempts
-        copyto!(state.ξ.x, x_current)
-        copyto!(state.ξ.θ, θ_current)
-        state.t[] = t_current
-
-        try
-            _check_gradient_probe_finite(compute_gradient!(state, model.grad, flow, cache))
-        catch
-            _throw_grid_safety_support_error(model, ctx, opts;
-                message="Grid thinning reached its safety limit, and the current state is not a valid refresh point.")
-        end
-
-        refresh_velocity!(rng, state, flow)
-        _inc_counter_support_boundary_refresh_attempts(stats)
-
-        if _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, opts)
-            _inc_counter_support_boundary_events(stats)
-            _inc_counter_refreshment_events(stats)
-            _set_counter_last_rejected(stats, false)
-            _invalidate_cached_gradient!(alg)
-            record_event!(trace_manager, state, flow, nothing, phase)
-            return :refresh
-        end
-
-        _inc_counter_support_boundary_refresh_failures(stats)
-    end
-
-    copyto!(state.ξ.x, x_current)
-    copyto!(state.ξ.θ, θ_current)
-    state.t[] = t_current
-    _throw_grid_safety_support_error(model, ctx, opts;
-        message="Grid thinning reached its safety limit, and no valid refreshed direction was found.")
-end
-
-function _handle_grid_safety_limit!(
-    rng::Random.AbstractRNG,
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    alg::PoissonTimeStrategy,
-    cache::NamedTuple,
-    stats::AbstractStatisticCounter,
-    trace_manager::TraceManager,
-    ctx::BoundaryContext,
-    opts::SupportBoundaryOptions;
-    phase::Symbol
-)
-    opts.detect_boundaries || throw(ctx.original_error)
-    if opts.mode === :error
-        throw(ctx.original_error)
-    elseif opts.mode === :line_search_truncated_refresh
-        return _line_search_truncated_refresh_from_current_state!(rng, state, model, flow, alg, cache, stats, trace_manager, ctx, opts; phase)
-    elseif opts.mode === :line_search
-        if _linear_boundary_flow(flow)
-            _throw_grid_safety_support_error(model, ctx, opts;
-                message="Grid thinning reached its safety limit while support-boundary diagnostics were enabled.")
-        else
-            throw(ctx.original_error)
-        end
-    end
-    throw(ArgumentError("Unknown support-boundary mode: $(opts.mode)"))
 end
 
 _public_algorithm_type(alg::PoissonTimeStrategy) = typeof(alg)
@@ -253,7 +309,7 @@ _supports_line_search_truncated_refresh(::ContinuousDynamics) = false
 _supports_line_search_truncated_refresh(::BouncyParticle) = true
 _supports_line_search_truncated_refresh(flow::PreconditionedDynamics) = _supports_line_search_truncated_refresh(flow.dynamics)
 _supports_line_search_truncated_refresh_state(::AbstractPDMPState, flow::ContinuousDynamics) = _supports_line_search_truncated_refresh(flow)
-_supports_line_search_truncated_refresh_state(::StickyPDMPState, ::ContinuousDynamics) = false
+_supports_line_search_truncated_refresh_state(::StickyPDMPState, flow::ContinuousDynamics) = _supports_line_search_truncated_refresh(flow)
 _supports_capped_boundary_search(::PoissonTimeStrategy) = false
 _supports_capped_boundary_search(::GridAdaptiveState) = true
 
@@ -278,17 +334,6 @@ function _move_to_boundary_safe_point!(state::AbstractPDMPState, flow::Continuou
     return state
 end
 
-function _short_forward_probe_is_valid(
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    cache::NamedTuple,
-    probe_time::Float64
-)
-    state_probe = copy(state)
-    return _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, probe_time)
-end
-
 function _short_forward_probe_is_valid!(
     state_probe::AbstractPDMPState,
     state::AbstractPDMPState,
@@ -306,34 +351,6 @@ function _short_forward_probe_is_valid!(
     catch
         return false
     end
-end
-
-function _short_forward_probe_is_valid(
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    cache::NamedTuple,
-    opts::SupportBoundaryOptions,
-)
-    state_probe = copy(state)
-    return _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, opts)
-end
-
-function _short_forward_probe_is_valid!(
-    state_probe::AbstractPDMPState,
-    state::AbstractPDMPState,
-    model::PDMPModel,
-    flow::ContinuousDynamics,
-    cache::NamedTuple,
-    opts::SupportBoundaryOptions,
-)
-    probe_time = opts.refresh_probe_time
-    for _ in 0:opts.max_bisection_steps
-        _short_forward_probe_is_valid!(state_probe, state, model, flow, cache, probe_time) && return true
-        probe_time *= 0.5
-        probe_time > 0.0 || break
-    end
-    return false
 end
 
 function _try_move_to_valid_boundary_safe_point!(
@@ -546,19 +563,18 @@ function _handle_capped_boundary_event!(
     support_boundary_options::SupportBoundaryOptions,
 )
     needs_saving, saving_args = try
-        handle_event!(rng, τ, model.grad, flow, alg, state, cache, event_type, meta, stats)
+        handle_event!(rng, τ, model, flow, alg, state, cache, event_type, meta, stats, phase)
     catch err
         if err isa _ProbeFailureException
             return _handle_step_boundary!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
-        elseif err isa _GridSafetyLimitException
-            return _handle_grid_safety_limit!(rng, state, model, flow, alg, cache, stats, trace_manager, err.ctx, support_boundary_options; phase)
         elseif err isa SupportBoundaryError
             rethrow(err)
         else
             rethrow()
         end
     end
-    needs_saving && record_event!(trace_manager, state, flow, saving_args, phase)
+    needs_saving && record_event!(trace_manager, state, flow, saving_args,
+        phase, event_type)
     return event_type
 end
 
@@ -591,7 +607,10 @@ function _boundary_refresh_from_localization!(
             _inc_counter_refreshment_events(stats)
             _set_counter_last_rejected(stats, false)
             _invalidate_cached_gradient!(alg)
-            record_event!(trace_manager, state, flow, nothing, phase)
+            if alg isa Union{StickyLoopState,AggregateStickyLoopState} && state isa StickyPDMPState
+                _update_sticky_schedule_after_refresh!(rng, alg, state, flow)
+            end
+            record_event!(trace_manager, state, flow, nothing, phase, :refresh)
             return :refresh
         end
 
@@ -638,8 +657,8 @@ function _line_search_truncated_refresh_boundary!(
         τ, event_type, meta = try
             next_event_time(rng, model, flow, alg, state, cache, stats, safe_time, true, :support_boundary, true)
         catch err
-            if err isa _ProbeFailureException || err isa _GridSafetyLimitException
-                0.0, :support_boundary, GradientMeta(cache.∇ϕx)
+            if err isa _ProbeFailureException
+                0.0, :support_boundary, _gradient_meta(cache)
             else
                 rethrow()
             end

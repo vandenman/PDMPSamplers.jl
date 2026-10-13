@@ -12,7 +12,7 @@
 
         # ξ = ξ0; t_max = 30.; n_test_points = 101
         grad = FullGradient(∇f!)
-        cache = PDMPSamplers.initialize_cache(flow, grad, ThinningStrategy(GlobalBounds(c[1], length(ξ.x))), 0.0, ξ)
+        cache = PDMPSamplers.initialize_cache(Random.default_rng(), flow, grad, ThinningStrategy(GlobalBounds(c[1], length(ξ.x))), 0.0, ξ)
         cache = PDMPSamplers.add_gradient_to_cache(cache, ξ)
 
 
@@ -86,7 +86,7 @@
                                 ∇ϕᵢ!::Function, c::AbstractVector;
                                 t_max::Real = 10.0, n_test_points::Int = 100)
 
-        cache = PDMPSamplers.initialize_cache(flow, CoordinateWiseGradient(∇ϕᵢ!), ThinningStrategy(LocalBounds(c)), 0.0, ξ)
+        cache = PDMPSamplers.initialize_cache(Random.default_rng(), flow, CoordinateWiseGradient(∇ϕᵢ!), ThinningStrategy(LocalBounds(c)), 0.0, ξ)
         cache = PDMPSamplers.add_gradient_to_cache(cache, ξ)
 
         test_times = range(0.0, t_max, n_test_points)
@@ -122,8 +122,8 @@
     """
     function test_bound_consistency(flow::FactorizedDynamics, ξ::SkeletonPoint, c::AbstractVector)
 
-        cache_full = PDMPSamplers.initialize_cache(flow, FullGradient((out,x)->out.=0), ThinningStrategy(GlobalBounds(c[1], length(ξ.x))), 0.0, ξ)
-        cache_coord = PDMPSamplers.initialize_cache(flow, CoordinateWiseGradient((x,i)->0.0), ThinningStrategy(LocalBounds(c)), 0.0, ξ)
+        cache_full = PDMPSamplers.initialize_cache(Random.default_rng(), flow, FullGradient((out,x)->out.=0), ThinningStrategy(GlobalBounds(c[1], length(ξ.x))), 0.0, ξ)
+        cache_coord = PDMPSamplers.initialize_cache(Random.default_rng(), flow, CoordinateWiseGradient((x,i)->0.0), ThinningStrategy(LocalBounds(c)), 0.0, ξ)
 
         # Get global bounds
         a_global, b_global, _ = PDMPSamplers.ab(ξ, c, flow, cache_full)
@@ -163,7 +163,7 @@
         # Test multiple random initial conditions
         for _ in 1:5
             x0 = randn(d)
-            θ0 = PDMPSamplers.initialize_velocity(flow, d)
+            θ0 = PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d)
             ξ0 = SkeletonPoint(x0, θ0)
 
             # Conservative bounds

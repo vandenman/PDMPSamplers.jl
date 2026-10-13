@@ -1,30 +1,44 @@
-struct PDMPChains{T<:AbstractPDMPTrace,S}
+struct PDMPTerminalState{F}
+    t::Float64
+    position::Vector{Float64}
+    physical_velocity::Vector{Float64}
+    stored_frozen_velocity::Vector{Float64}
+    free::BitVector
+    flow::F
+end
+
+function PDMPTerminalState(state::AbstractPDMPState, flow)
+    stored = state isa StickyPDMPState ? copy(state.stored_velocity) :
+        zeros(Float64, length(state.ξ))
+    free = state isa StickyPDMPState ? copy(state.free) : trues(length(state.ξ))
+    return PDMPTerminalState(Float64(state.t[]), Float64.(state.ξ.x),
+        Float64.(state.ξ.θ), stored, free, deepcopy(flow))
+end
+
+struct PDMPChains{T<:AbstractPDMPTrace,S,E}
     traces::Vector{T}
     stats::Vector{S}
+    initial_states::Vector{E}
+    retained_initial_states::Vector{E}
+    terminal_states::Vector{E}
 end
 
 n_chains(chains::PDMPChains) = length(chains.traces)
 
 Base.getindex(chains::PDMPChains, i::Integer) = (chains.traces[i], chains.stats[i])
+terminal_state(chains::PDMPChains, i::Integer=1) = chains.terminal_states[i]
+initial_state(chains::PDMPChains, i::Integer=1) = chains.initial_states[i]
+retained_initial_state(chains::PDMPChains, i::Integer=1) =
+    chains.retained_initial_states[i]
 Base.firstindex(chains::PDMPChains) = 1
 Base.lastindex(chains::PDMPChains) = n_chains(chains)
 Base.length(chains::PDMPChains) = n_chains(chains)
 Base.eachindex(chains::PDMPChains) = eachindex(chains.traces)
 
-function Base.iterate(chains::PDMPChains)
-    nchains = n_chains(chains)
-    iszero(nchains) && return nothing
-    isone(nchains) && return chains.traces[1], Val(:stats)
-    return (chains.traces[1], chains.stats[1]), 2
-end
-function Base.iterate(chains::PDMPChains, i::Int)
+function Base.iterate(chains::PDMPChains, i::Int=1)
     i > n_chains(chains) && return nothing
-    return (chains.traces[i], chains.stats[i]), i + 1
+    return chains[i], i + 1
 end
-function Base.iterate(chains::PDMPChains, ::Val{:stats})
-    return chains.stats[1], Val(:done)
-end
-Base.iterate(::PDMPChains, ::Val{:done}) = nothing
 
 function Base.only(chains::PDMPChains)
     nchains = n_chains(chains)
@@ -120,18 +134,6 @@ function Base.show(io::IO, chains::PDMPChains)
     n_events = [length(chains.traces[i]) for i in 1:nc]
     print(io, "PDMPChains with $nc chain$(isone(nc) ? "" : "s") ($(join(n_events, ", ")) events)")
 
-    total_lazy_low_tightness = sum(stat.lazy_fallback_low_tightness for stat in chains.stats)
-    total_lazy_bound_violation = sum(stat.lazy_fallback_bound_violation for stat in chains.stats)
-    total_lazy_attempts = sum(stat.lazy_proposal_attempts for stat in chains.stats)
-    total_lazy_rejections = sum(stat.lazy_proposal_rejections for stat in chains.stats)
-    total_grid_resets = sum(stat.grid_resets_from_dynamics_adaptation for stat in chains.stats)
-
-    if total_lazy_low_tightness > 0 || total_lazy_bound_violation > 0 || total_lazy_attempts > 0 || total_grid_resets > 0
-        print(io,
-            " | lazy_fallbacks(low_tightness=", total_lazy_low_tightness,
-            ", bound_violation=", total_lazy_bound_violation,
-            ") | lazy_proposals=", total_lazy_attempts,
-            "/", total_lazy_rejections,
-            " rejected | grid_resets=", total_grid_resets)
-    end
+    total_grid_resets = sum(_get_counter_grid_resets_from_dynamics_adaptation, chains.stats)
+    total_grid_resets > 0 && print(io, " | grid_resets=", total_grid_resets)
 end

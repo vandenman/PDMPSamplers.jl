@@ -22,18 +22,17 @@ end
     @testset "DensePreconditionedZigZag refresh is a no-op" begin
         Random.seed!(11)
         flow = DensePreconditionedZigZag(3)
-        flow.metric.L .= [2.0 0.0 0.0; 0.5 3.0 0.0; -0.25 0.75 4.0]
-        flow.metric.Linv .= inv(LowerTriangular(flow.metric.L))
+        set_dense_preconditioner!(flow.metric,
+            [2.0 0.0 0.0; 0.5 3.0 0.0; -0.25 0.75 4.0])
 
-        ξ = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(flow, 3))
+        ξ = SkeletonPoint(randn(3), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, 3))
         θ_before = copy(ξ.θ)
-        v_before = copy(flow.metric.v_canonical)
+        signs_before = LowerTriangular(flow.metric.L) \ ξ.θ
 
-        PDMPSamplers.refresh_velocity!(ξ, flow)
+        PDMPSamplers.refresh_velocity!(Random.default_rng(), ξ, flow)
 
         @test ξ.θ ≈ θ_before
-        @test flow.metric.v_canonical ≈ v_before
-        @test ξ.θ ≈ flow.metric.L * flow.metric.v_canonical
+        @test ξ.θ ≈ flow.metric.L * signs_before
     end
 
     @testset "Factorized trace bounds replay scalar coordinates" begin
@@ -53,9 +52,9 @@ end
         d = 2
         _, model, alg = _audit_target_setup(d)
         flow = ZigZag(d)
-        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(flow, d))
+        ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
 
-        trace, stats = pdmp_sample(
+        trace, stats = only(pdmp_sample(
             ξ0,
             flow,
             model,
@@ -66,7 +65,7 @@ end
             warmup_stop=FixedTimeCriterion(0.0),
             stop=FixedTimeCriterion(0.0),
             progress=false,
-        )
+        ))
 
         @test isone(length(trace))
         @test iszero(first(trace).time)
@@ -79,9 +78,14 @@ end
     @testset "PDMPChains iteration yields one item per chain" begin
         trace1 = _simple_trace(0.0)
         trace2 = _simple_trace(10.0)
-        chains = PDMPChains([trace1, trace2], [:stats1, :stats2])
+        chains = PDMPChains([trace1, trace2], [:stats1, :stats2],
+            [nothing, nothing], [nothing, nothing], [nothing, nothing])
 
         @test collect(chains) == [(trace1, :stats1), (trace2, :stats2)]
+        single = PDMPChains([trace1], [:stats1], [nothing], [nothing], [nothing])
+        @test collect(single) == [(trace1, :stats1)]
+        @test only(single) == (trace1, :stats1)
+        @test_throws ArgumentError only(chains)
     end
 
     @testset "TotalWallTimeCriterion copies share the same timer" begin
@@ -108,12 +112,6 @@ end
             neg_gradient!(target, out, x)
             out
         end
-
-        fd_hvp = PDMPSamplers.FiniteDiffHVP(grad_func, zeros(d))
-        rate_hvp, deriv_hvp = PDMPSamplers.get_rate_and_deriv(state, flow, fd_hvp)
-        @test iszero(rate_hvp)
-        @test iszero(deriv_hvp)
-        @test all(isfinite, fd_hvp.hvp_buf)
 
         fd_vhv = PDMPSamplers.FiniteDiffVHV(grad_func, zeros(d))
         rate_vhv, deriv_vhv = PDMPSamplers.get_rate_and_deriv(state, flow, fd_vhv)

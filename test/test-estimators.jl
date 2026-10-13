@@ -10,13 +10,15 @@
     grad = FullGradient(Base.Fix1(neg_gradient!, target))
     model = PDMPModel(d, grad, Base.Fix1(neg_hvp!, target))
     alg = GridThinningStrategy()
-    T = 100_000.0
+    # This is long enough for the distributional checks below, while keeping
+    # the event trace small enough for estimator tests to remain inexpensive.
+    T = 15_000.0
 
     @testset "$pdmp_type" for pdmp_type in (ZigZag, BouncyParticle, Boomerang)
 
         flow = pdmp_type(Γ, μ)
-        ξ0 = SkeletonPoint(μ .+ randn(d), PDMPSamplers.initialize_velocity(flow, d))
-        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress)
+        ξ0 = SkeletonPoint(μ .+ randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
+        trace, _ = only(pdmp_sample(ξ0, flow, model, alg, 0.0, T; progress=show_progress))
 
         # --- Discretized vs analytic estimators ---
         dt = mean(diff(PDMPSamplers.event_times(trace)))

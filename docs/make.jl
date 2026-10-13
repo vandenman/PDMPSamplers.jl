@@ -8,7 +8,9 @@ makedocs(;
     pages = [
         "Home" => "index.md",
         "Getting Started" => "getting-started.md",
+        "Dependent Slabs" => "dependent-slabs.md",
         "API" => "api.md",
+        "Extension Interface" => "extension-interface.md",
         "R Package" => "r.md",
     ],
     format = DocumenterVitepress.MarkdownVitepress(;
