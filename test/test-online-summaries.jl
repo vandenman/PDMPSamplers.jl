@@ -46,7 +46,7 @@
 
     function run(flow, algorithm, directory; online)
         storage = online ? StreamingTraceStorage(directory; buffer_events=4,
-            write_events=false, online_batches=16, online_end_time=8.0,
+            write_events=false, online_batches=16, online_duration=8.0,
             online_grid_spacing=0.5) : nothing
         initial = SkeletonPoint([0.7, -0.4, 1.1], [0.3, -0.8, 0.5])
         return pdmp_sample(initial, flow, gaussian_model(3), algorithm,

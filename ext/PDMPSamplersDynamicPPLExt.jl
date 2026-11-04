@@ -2,24 +2,51 @@ module PDMPSamplersDynamicPPLExt
 
 using PDMPSamplers
 using DynamicPPL
-import PDMPSamplers: PDMPModel, FullGradient, _make_vhv_from_logdensity, _make_joint_callable
+import PDMPSamplers: PDMPModel, FullGradient, _make_vhv_from_logdensity, _make_joint_callable,
+    _gradient_backend
 import DifferentiationInterface as DI
 import ADTypes
+
+const LDP = DynamicPPL.LogDensityProblems
+
+# Log density of `model` on the unconstrained (linked) scale, including the
+# log-Jacobian of the transforms.
+function _linked_logdensity_function(model::DynamicPPL.Model)
+    vi = DynamicPPL.link(DynamicPPL.VarInfo(model), model)
+    return DynamicPPL.LogDensityFunction(model, DynamicPPL.getlogjoint_internal, vi)
+end
+
+# A callable struct rather than a closure: AD backends such as Mooncake
+# deepcopy the function during preparation, which fails on captured modules.
+struct LinkedLogDensity{L}
+    ldf::L
+end
+(f::LinkedLogDensity)(x) = LDP.logdensity(f.ldf, x)
 
 """
     PDMPModel(model::DynamicPPL.Model, backend::ADTypes.AbstractADType; needs_hvp::Bool=false)
 
 Construct a `PDMPModel` from a DynamicPPL model.
 
+The model is sampled on the unconstrained scale, as Turing's samplers do: a
+parameter with bounded support, such as a standard deviation, is transformed
+to the real line (for example to its logarithm), and the log density includes
+the log-Jacobian of that transform. The starting point and the trace are on
+this scale.
+
 # Arguments
 - `model::DynamicPPL.Model`: A DynamicPPL model
-- `backend::ADTypes.AbstractADType`: The automatic differentiation backend to use for gradients and HVPs
-- `needs_hvp::Bool=false`: Whether to generate Hessian-vector product functions (required for GridThinningStrategy)
+- `backend::ADTypes.AbstractADType`: The automatic differentiation backend. Reverse-mode
+  backends such as `AutoMooncake()` cannot compute Hessian-vector products on their own;
+  use them with `needs_hvp=false`, or pass `DI.SecondOrder(outer, inner)` to differentiate
+  the `inner` gradient with the `outer` backend.
+- `needs_hvp::Bool=false`: Whether to prepare Hessian-vector products for
+  `GridThinningStrategy`. Without them, it computes curvature from gradients.
 
 # Example
 ```julia
-using DynamicPPL, Distributions, PDMPSamplers
-import Mooncake
+using DynamicPPL, Distributions, PDMPSamplers, ADTypes
+import ForwardDiff
 
 @model function normal_model(y)
     μ ~ Normal(0, 1)
@@ -29,27 +56,23 @@ end
 
 data = [1.2, 1.5, 1.8]
 model = normal_model(data)
-pdmp_model = PDMPModel(model, ADTypes.AutoMooncake(); needs_hvp=true)
+pdmp_model = PDMPModel(model, ADTypes.AutoForwardDiff(); needs_hvp=true)  # samples (μ, log σ)
 ```
 """
 function PDMPModel(model::DynamicPPL.Model, backend::ADTypes.AbstractADType; needs_hvp::Bool=false)
 
-    LDP = DynamicPPL.LogDensityProblems
-    ldf = DynamicPPL.LogDensityFunction(model)
+    ldf = _linked_logdensity_function(model)
     d = LDP.dimension(ldf)
-
-    # Wrap LogDensityFunction as a plain callable for DifferentiationInterface
-    f = let ldf = ldf
-        x -> LDP.logdensity(ldf, x)
-    end
+    f = LinkedLogDensity(ldf)
 
     # Prepare gradient function
     x = zeros(d)
     out = zeros(d)
 
-    prep_grad = DI.prepare_gradient(f, backend, x)
+    grad_backend = _gradient_backend(backend)
+    prep_grad = DI.prepare_gradient(f, grad_backend, x)
     grad_f! = (out, x) -> begin
-        DI.gradient!(f, out, prep_grad, backend, x)
+        DI.gradient!(f, out, prep_grad, grad_backend, x)
         out .= .-out
     end
 

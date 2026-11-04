@@ -110,8 +110,14 @@ end
 
 Run PDMP sampling with optional stopping criteria for warmup and main sampling phases.
 
-If `warmup_stop === nothing`, warmup uses `FixedTimeCriterion(t₀ + t_warmup)`.
-If `stop === nothing`, sampling uses `FixedTimeCriterion(T)`.
+The process starts at time `t₀`, runs a warmup of `t_warmup` time units, and
+then a main run of `T` time units: the main run covers
+`[t₀ + t_warmup, t₀ + t_warmup + T]`. Only the main run is used in summaries.
+
+If `warmup_stop === nothing`, warmup uses `FixedTimeCriterion(t_warmup)`.
+If `stop === nothing`, sampling uses `FixedTimeCriterion(T)`. All stopping
+criteria count from the start of their own phase, so with a data-driven
+`warmup_stop` the main run still lasts `T`.
 Provided criteria take precedence over time arguments.
 
 Warmup runs first with adaptation enabled and writes to the warmup trace.
@@ -122,7 +128,6 @@ Criteria are initialized per phase, so mutable criteria (e.g. `WallTimeCriterion
 are phase-local. An exception is `TotalWallTimeCriterion`, whose timer starts once globally
 and is not re-initialized per phase.
 """
-
 function pdmp_sample(
     ξ₀::SkeletonPoint, flow::ContinuousDynamics, model::PDMPModel,
     alg::PoissonTimeStrategy,
@@ -229,7 +234,7 @@ function _chain_trace_storage(storage::StreamingTraceStorage, chain::Integer)
         buffer_events=storage.buffer_events,
         write_events=storage.write_events,
         online_batches=storage.online_batches,
-        online_end_time=storage.online_end_time,
+        online_duration=storage.online_duration,
         online_grid_spacing=storage.online_grid_spacing,
         online_warmup_batches=storage.online_warmup_batches)
 end
@@ -552,8 +557,8 @@ _phase_criterion(c::EventCountCriterion, ::Real) =
 _phase_criterion(c::StoppingCriterion, ::Real) = c
 
 _step_horizon(::StoppingCriterion, state) = Inf
-_step_horizon(c::FixedTimeCriterion, state) = max(0.0, c.T - state.t[])
-_step_horizon(c::_CommonPhaseCriterion, state) = c.check_time ? max(0.0, c.T - state.t[]) : Inf
+_step_horizon(c::FixedTimeCriterion, state) = max(0.0, c.end_time - state.t[])
+_step_horizon(c::_CommonPhaseCriterion, state) = c.check_time ? max(0.0, c.end_time - state.t[]) : Inf
 _step_horizon(c::AdaptiveWarmupCriterion, state) =
     max(0.0, c.start_time + c.max_time - state.t[])
 _step_horizon(c::AnyCriterion, state) = minimum(child -> _step_horizon(child, state), c.criteria)
@@ -592,9 +597,8 @@ function _pdmp_sample_single(
     # it = Iterators.drop(aa, 3)
     # first(it)
 
-    if isnothing(warmup_stop)
-        t_warmup < (T - t₀) || throw(ArgumentError("t_warmup ($t_warmup) is larger than T - t₀ ($T - $t₀ = $(T - t₀)), which implies storing nothing at all. This is probably an error."))
-    end
+    isnothing(stop) && !(T > 0) && throw(ArgumentError("T must be positive, got $T"))
+    t_warmup >= 0 || throw(ArgumentError("t_warmup must be >= 0, got $t_warmup"))
 
     t_start = time_ns()
     initialization_allocated_start = Base.gc_bytes()
@@ -621,15 +625,18 @@ function _pdmp_sample_single(
         flow, warmup_grad, t_warmup, t₀;
         can_stick=_adaptation_can_stick(alg)) : adapter
 
-    warmup_criterion = _phase_criterion(warmup_stop, t_warmup_abs)
+    # Both durations are phase-local: the main run lasts T after the warmup ends.
+    warmup_criterion = _phase_criterion(warmup_stop, t_warmup)
     stop_criterion = _phase_criterion(stop, T)
     boundary_policy = _boundary_policy(support_boundary_options)
 
     # progressmanager = ProgressManager(progress, T, t₀, t_warmup, progress_stops)
     progress_stops = 300
+    # The progress bar spans the warmup and the main run.
+    T_float = Float64(t_warmup + T)
     if progress
         prg = ProgressMeter.Progress(progress_stops, dt=1)
-        tstop = Ref(T / progress_stops)
+        tstop = Ref(t₀ + T_float / progress_stops)
     else
         prg = nothing
         tstop = Ref(Inf)
@@ -638,7 +645,6 @@ function _pdmp_sample_single(
     _set_counter_initialization_allocated_bytes(
         stats, Float64(Base.gc_bytes() - initialization_allocated_start))
 
-    T_float = Float64(T)
     if !(isnothing(warmup_stop) && t_warmup_abs <= t₀)
         warmup_phase_start = time_ns()
         _run_phase_for_policy!(rng, warmup_criterion, state, phase_model, flow, phase_alg, phase_cache,

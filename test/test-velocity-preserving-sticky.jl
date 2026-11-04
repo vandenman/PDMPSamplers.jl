@@ -244,7 +244,7 @@ end
 
     second_run = pdmp_sample(
         SkeletonPoint(copy(endpoint.position), copy(endpoint.physical_velocity)),
-        endpoint.flow, model, strategy, endpoint.t, endpoint.t + 0.2;
+        endpoint.flow, model, strategy, endpoint.t, 0.2;
         seed=4, progress=false, initial_free=endpoint.free,
         initial_stored_velocity=endpoint.stored_frozen_velocity)
     restarted = terminal_state(second_run)

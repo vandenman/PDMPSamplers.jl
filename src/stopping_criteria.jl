@@ -24,14 +24,24 @@ stop_reason(criterion::StoppingCriterion, state, trace_manager, stats)::Symbol =
 """
     FixedTimeCriterion(T)
 
-Stop when the sampler's internal time reaches `T`.
+Stop when the process has run for `T` time units in the current phase.
+Like the other criteria, the budget is phase-local: it starts counting at
+`initialize!`, so a warmup does not use up the time of the main run.
 """
-struct FixedTimeCriterion <: StoppingCriterion
-    T::Float64
+mutable struct FixedTimeCriterion <: StoppingCriterion
+    const T::Float64
+    end_time::Float64
+    function FixedTimeCriterion(T::Real)
+        T >= 0 || throw(ArgumentError("T must be >= 0, got $T"))
+        return new(Float64(T), Float64(T))
+    end
 end
 
-FixedTimeCriterion(T::Real) = FixedTimeCriterion(Float64(T))
-is_satisfied(c::FixedTimeCriterion, state, trace_manager, stats) = state.t[] >= c.T
+function initialize!(c::FixedTimeCriterion, state, trace_manager, stats)
+    c.end_time = state.t[] + c.T
+    return nothing
+end
+is_satisfied(c::FixedTimeCriterion, state, trace_manager, stats) = state.t[] >= c.end_time
 stop_reason(::FixedTimeCriterion) = :reached_time # COV_EXCL_LINE
 
 """
@@ -68,7 +78,8 @@ stop_reason(::EventCountCriterion) = :reached_event_budget # COV_EXCL_LINE
 # FixedTimeCriterion/EventCountCriterion cases, reducing compile variants
 # without introducing dynamic dispatch in the event loop.
 mutable struct _CommonPhaseCriterion <: StoppingCriterion
-    const T::Float64
+    const T::Float64            # phase duration
+    end_time::Float64           # set by initialize!
     const max_events::Int
     const check_time::Bool
     const check_events::Bool
@@ -85,11 +96,12 @@ function _CommonPhaseCriterion(;
     event_source::Union{Nothing,EventCountCriterion}=nothing,
 )
     return _CommonPhaseCriterion(
-        T, Int(max_events), check_time, check_events, event_source, 0, :none)
+        T, T, Int(max_events), check_time, check_events, event_source, 0, :none)
 end
 
 function initialize!(c::_CommonPhaseCriterion, state, trace_manager, stats)
     c.reason = :none
+    c.end_time = state.t[] + c.T
     if c.check_events
         c.baseline = _get_counter_reflections_events(stats) + _get_counter_refreshment_events(stats) + _get_counter_sticky_events(stats)
         c.event_source !== nothing && (c.event_source.baseline = c.baseline)
@@ -98,7 +110,7 @@ function initialize!(c::_CommonPhaseCriterion, state, trace_manager, stats)
 end
 
 function is_satisfied(c::_CommonPhaseCriterion, state, trace_manager, stats)
-    if c.check_time && state.t[] >= c.T
+    if c.check_time && state.t[] >= c.end_time
         c.reason = :reached_time
         return true
     end
@@ -575,7 +587,11 @@ function Base.copy(c::OnlineESSCriterion)
     return copied
 end
 
-Base.copy(c::FixedTimeCriterion) = c
+function Base.copy(c::FixedTimeCriterion)
+    copied = FixedTimeCriterion(c.T)
+    copied.end_time = c.end_time
+    return copied
+end
 
 function Base.copy(c::AdaptiveWarmupCriterion)
     copied = AdaptiveWarmupCriterion(;

@@ -34,8 +34,12 @@ jobs:
             Pkg.instantiate()
             Pkg.precompile()
           '
+      - name: Smoke test Julia Stan examples
+        run: python3 docs/smoke/stan_workflows.py --language julia
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           JULIA_DEBUG: "Documenter"
         run: julia --project=docs docs/make.jl
+      - name: Check rendered R reference links
+        run: python3 docs/smoke/check_r_reference.py

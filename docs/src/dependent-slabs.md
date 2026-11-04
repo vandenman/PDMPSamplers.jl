@@ -1,5 +1,11 @@
 # Dependent Slabs
 
+This page assumes you know the basic sticky sampler from the
+[Variable selection](variable-selection.md) tutorial, which uses independent
+slabs.
+The [RI-CLPM example](examples/riclpm.md) shows the same correlated slab
+Stan model sampled from R and Julia.
+
 Dependent slab support is intended for sticky variable-selection samplers where the active coefficients have a joint Gaussian slab prior.
 Users should normally construct a model prior, a Gaussian slab prior, and an `AggregateSticky` strategy with a `GridThinningStrategy` inner clock.
 Choose the clock with `default_aggregate_unstick_clock(slab, model_prior, flow)`;
@@ -8,19 +14,20 @@ of clocks below).
 
 ## Support matrix
 
-"Experimental" marks dynamics whose release uses the boundary-proposal law
-(below). That law is exact and covered by correctness tests, but it is less
-exercised than the stored-velocity law, which all other dynamics use.
+All listed dynamics are supported. They differ in how a frozen coordinate is
+released (see below). Both release laws are exact and covered by correctness
+tests. The boundary-proposal law is only needed for dynamics with correlated
+velocities, so it has seen less use than the stored-velocity law.
 
 | Dynamics | Aggregate sticky support | Release velocity |
 | --- | --- | --- |
 | `ZigZag` | supported | stored velocity |
 | `BouncyParticle` | supported | stored velocity |
 | `Boomerang`, `MutableBoomerang`, and `AdaptiveBoomerang` with a diagonal covariance | supported | stored velocity |
-| `Boomerang`-family dynamics with a dense or low-rank covariance | experimental | boundary proposal |
+| `Boomerang`-family dynamics with a dense or low-rank covariance | supported | boundary proposal |
 | Identity- or diagonal-preconditioned `ZigZag` and `BouncyParticle` | supported | stored velocity |
 | Identity- or diagonal-preconditioned Boomerang-family dynamics | supported | as the underlying Boomerang |
-| Dense-preconditioned `ZigZag` and `BouncyParticle` | experimental | boundary proposal |
+| Dense-preconditioned `ZigZag` and `BouncyParticle` | supported | boundary proposal |
 
 Two release laws are used:
 
@@ -59,7 +66,7 @@ coefficient. The posterior negative gradient passed to `DependentSlabTarget`
 contains the likelihood, nuisance prior, and the coherent slab with **all beta
 coefficients active**.
 
-```julia
+```@example dependent-slabs
 using PDMPSamplers, LinearAlgebra
 d = 3
 beta = [1, 2]
@@ -88,13 +95,20 @@ can_stick = BitVector([true, true, false])
 clock = default_aggregate_unstick_clock(slab, model_prior, flow)
 alg = AggregateSticky(GridThinningStrategy(), clock, can_stick)
 
-initial = SkeletonPoint([0.1, -0.1, 0.0], [1.0, -1.0, 1.0])
-trace, stats = only(pdmp_sample(initial, flow, model, alg, 0.0, 100.0;
-    seed=42, progress=false))
+initial = SkeletonPoint([0.1, -0.1, 0.0], [1.0, -1.0, 1.0])   # position and velocity
+chains = pdmp_sample(initial, flow, model, alg, 0.0, 100.0; seed=42, progress=false)
 
-# free_masks[i, n] is true when coordinate i is active at stored event n.
-active_beta_at_events = trace.free_masks[beta, :]
-frozen_beta_at_events = .!active_beta_at_events
+# Posterior inclusion probabilities of the beta coefficients
+inclusion_probs(chains)[beta]
+```
+
+To see which coefficients are active over time, discretize the path. A frozen
+coefficient is exactly zero:
+
+```@example dependent-slabs
+draws = Matrix(PDMPDiscretize(chains, 1.0))
+active = draws[:, beta] .!= 0     # active[n, j]: beta coefficient j is in the model at draw n
+active[1:5, :]
 ```
 
 Do not pass a gradient that simply omits the slab, and do not use an ordinary
@@ -117,7 +131,9 @@ wrapper generally samples the wrong active-face distribution.
   full-state coordinates in `1:d`; the entire vector is validated even when
   `can_stick` selects only a subset. Custom aggregate clocks must implement
   this extension method explicitly.
-- A stored `free_masks[i, n] == false` means coordinate `i` is frozen at zero.
+- For dynamics with a non-factorized trace (`BouncyParticle` and the Boomerang
+  family), `trace.free_masks[i, n] == false` means coordinate `i` is frozen at
+  zero at stored event `n`.
 
 For fixed-covariance providers, active-face cache entries are keyed by the
 beta-block active mask. Any active-set transition invalidates the old stratum

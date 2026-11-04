@@ -107,9 +107,10 @@ function PDMPModel(d::Integer, ldf::LogDensity, backend::ADTypes.AbstractADType=
     # For now let's assume we create a closure that calls DI
     x = zeros(d)
     out = zeros(d)
-    prep_grad = DI.prepare_gradient(ldf.f, backend, x)
+    grad_backend = _gradient_backend(backend)
+    prep_grad = DI.prepare_gradient(ldf.f, grad_backend, x)
     grad_f = (out, x) -> begin
-        DI.gradient!(ldf.f, out, prep_grad, backend, x)
+        DI.gradient!(ldf.f, out, prep_grad, grad_backend, x)
         out .= .-out
     end
 
@@ -270,6 +271,14 @@ function _copy_callable(c::_VHVCallable)
     _make_vhv_from_grad(c.grad_f, length(c.x_buf), c.backend)
 end
 
+# A `DI.SecondOrder(outer, inner)` backend differentiates the gradient
+# (computed with `inner`) with `outer`, e.g. forward-over-reverse. Plain
+# backends are used for both.
+_gradient_backend(backend::ADTypes.AbstractADType) = backend
+_gradient_backend(backend::DI.SecondOrder) = DI.inner(backend)
+_derivative_backend(backend::ADTypes.AbstractADType) = backend
+_derivative_backend(backend::DI.SecondOrder) = DI.outer(backend)
+
 """
     _make_vhv_from_logdensity(logp, d, backend)
 
@@ -281,12 +290,13 @@ function _make_vhv_from_logdensity(logp, d::Integer, backend::ADTypes.AbstractAD
     x_buf = zeros(d)
     v_buf = zeros(d)
     w_buf = zeros(d)
+    grad_backend = _gradient_backend(backend)
     phi = t -> begin
         xt = x_buf .+ t .* v_buf
-        grad = DI.gradient(logp, backend, xt)
+        grad = DI.gradient(logp, grad_backend, xt)
         -dot(w_buf, grad)
     end
-    prep = DI.prepare_derivative(phi, backend, zero(Float64))
+    prep = DI.prepare_derivative(phi, _derivative_backend(backend), zero(Float64))
     return _VHVFromLogDensity(logp, phi, prep, backend, x_buf, v_buf, w_buf)
 end
 
@@ -304,7 +314,7 @@ function (c::_VHVFromLogDensity)(x::AbstractVector, v::AbstractVector, w::Abstra
     copyto!(c.x_buf, x)
     copyto!(c.v_buf, v)
     copyto!(c.w_buf, w)
-    return DI.derivative(c.phi, c.prep, c.backend, zero(eltype(x)))
+    return DI.derivative(c.phi, c.prep, _derivative_backend(c.backend), zero(eltype(x)))
 end
 
 function _copy_callable(c::_VHVFromLogDensity)

@@ -200,6 +200,42 @@ else
                 @test norm(sample_cov_hvp - Σ) < 0.75
             end
 
+            @testset "Constrained parameters are sampled unconstrained" begin
+                # λ ~ gamma(2, 1), y ~ poisson(λ): λ | y ~ gamma(2 + Σy, 1 + n).
+                # On η = log λ: -log p(η) = -(2 + Σy) η + (1 + n) exp(η) + const.
+                y_counts = [3, 1, 4, 1, 5, 2]
+                a_post = 2 + sum(y_counts)
+                b_post = 1 + length(y_counts)
+                pg_stan_file = joinpath(model_dir, "poisson_gamma.stan")
+                pg_data_file = joinpath(model_dir, "poisson_gamma.json")
+                write(pg_stan_file, """
+                data {
+                    int<lower=0> N;
+                    array[N] int<lower=0> y;
+                }
+                parameters {
+                    real<lower=0> lambda;
+                }
+                model {
+                    lambda ~ gamma(2, 1);
+                    y ~ poisson(lambda);
+                }
+                """)
+                JSON.json(pg_data_file, Dict("N" => length(y_counts), "y" => y_counts))
+                pg_model = PDMPModel(pg_stan_file, pg_data_file)
+                @test pg_model.d == 1
+
+                g = zeros(1)
+                PDMPSamplers.compute_gradient!(pg_model.grad, [-3.0], g)
+                @test g[1] ≈ -a_post + b_post * exp(-3.0)
+
+                chains = pdmp_sample([0.0], ZigZag(1), pg_model, GridThinningStrategy(), 0.0, 20_000.0;
+                    seed=1, progress=false)
+                λ_draws = exp.(Matrix(PDMPDiscretize(chains, 0.5)))
+                @test mean(λ_draws) ≈ a_post / b_post rtol=0.05
+                @test std(λ_draws) ≈ sqrt(a_post) / b_post rtol=0.1
+            end
+
             @testset "brms diamonds support-boundary regression" begin
                 fixture_dir = joinpath(@__DIR__, "fixtures")
                 brms_stan_file = joinpath(fixture_dir, "brms_diamonds_gaussian.stan")

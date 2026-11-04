@@ -31,9 +31,21 @@
         @test_throws ArgumentError pdmp_sample(ξ0, flow, model, alg, 0.0, T_run; n_chains=0, progress=false)
     end
 
-    @testset "t_warmup error" begin
+    @testset "time arguments" begin
         ξ0 = SkeletonPoint(randn(d), PDMPSamplers.initialize_velocity(Random.default_rng(), flow, d))
-        @test_throws ArgumentError pdmp_sample(ξ0, flow, model, alg, 0.0, 100.0, 200.0; progress=false)
+        @test_throws ArgumentError pdmp_sample(ξ0, flow, model, alg, 0.0, 100.0, -1.0; progress=false)
+        @test_throws ArgumentError pdmp_sample(ξ0, flow, model, alg, 0.0, 0.0; progress=false)
+
+        # T is the length of the main run, which starts when the warmup ends,
+        # also when the warmup is longer than T
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 5.0, 100.0, 200.0; progress=false)[1]
+        @test PDMPSamplers.first_event_time(trace) == 205.0
+        @test PDMPSamplers.last_event_time(trace) ≈ 305.0
+
+        # a data-driven warmup still leaves a main run of length T
+        trace, _ = pdmp_sample(ξ0, flow, model, alg, 0.0, 100.0;
+            warmup_stop=EventCountCriterion(50), progress=false)[1]
+        @test PDMPSamplers.last_event_time(trace) - PDMPSamplers.first_event_time(trace) ≈ 100.0
     end
 
     @testset "multi-chain sequential" begin
@@ -97,8 +109,57 @@
             @test e isa AbstractVector
             @test all(e .> 0)
 
-            disc = PDMPDiscretize(chains, 1.0)
+            # a discretization is one path, so the chain must be named
+            @test_throws ArgumentError PDMPDiscretize(chains, 1.0)
+            disc = PDMPDiscretize(chains, 1.0; chain=2)
             @test disc isa PDMPDiscretize
+
+            @testset "pooling across chains" begin
+                traces = chains.traces
+                durations = [PDMPSamplers.last_event_time(t) - PDMPSamplers.first_event_time(t) for t in traces]
+                w = durations ./ sum(durations)
+
+                @test mean(chains) ≈ w[1] * mean(traces[1]) + w[2] * mean(traces[2])
+                @test mean(chains; chain=2) == mean(traces[2])
+
+                # law of total variance
+                m = mean(chains)
+                within = w[1] * var(traces[1]) + w[2] * var(traces[2])
+                between = w[1] * (mean(traces[1]) .- m) .^ 2 + w[2] * (mean(traces[2]) .- m) .^ 2
+                @test var(chains) ≈ within .+ between
+                @test var(chains; chain=1) == var(traces[1])
+                @test diag(cov(chains)) ≈ var(chains)
+                @test diag(cor(chains)) ≈ ones(d)
+
+                c = PDMPSamplers.cdf(chains, 0.3; coordinate=1)
+                @test c ≈ w[1] * PDMPSamplers.cdf(traces[1], 0.3; coordinate=1) +
+                          w[2] * PDMPSamplers.cdf(traces[2], 0.3; coordinate=1)
+                for p in (0.1, 0.5, 0.9)
+                    q = Statistics.quantile(chains, p; coordinate=1)
+                    @test PDMPSamplers.cdf(chains, q; coordinate=1) ≈ p atol=1e-6
+                end
+                @test Statistics.quantile(chains, [0.1, 0.9]; coordinate=1) ≈
+                    [Statistics.quantile(chains, 0.1; coordinate=1), Statistics.quantile(chains, 0.9; coordinate=1)]
+                @test Statistics.median(chains; coordinate=2) ≈ Statistics.quantile(chains, 0.5; coordinate=2)
+                @test Statistics.median(chains; chain=1) == Statistics.median(traces[1])
+
+                @test ess(chains) ≈ ess(traces[1]) + ess(traces[2])
+
+                # transformed estimators pool the same way
+                tf = [LowerBoundTransform(0.0), IdentityTransform()]
+                mt = mean(chains, tf)
+                @test mt ≈ w[1] * mean(traces[1], tf) + w[2] * mean(traces[2], tf)
+                @test var(chains, tf) ≈ w[1] * (var(traces[1], tf) .+ (mean(traces[1], tf) .- mt) .^ 2) +
+                                        w[2] * (var(traces[2], tf) .+ (mean(traces[2], tf) .- mt) .^ 2)
+                @test std(chains, tf) ≈ sqrt.(var(chains, tf))
+                for p in (0.2, 0.7), j in 1:d
+                    q = Statistics.quantile(chains, p, tf; coordinate=j)
+                    @test PDMPSamplers.cdf(chains, q, tf; coordinate=j) ≈ p atol=1e-6
+                end
+                @test Statistics.median(chains, tf) ≈ Statistics.quantile(chains, 0.5, tf)
+                @test mean(chains, tf; chain=2) == mean(traces[2], tf)
+                @test Statistics.quantile(chains, 0.3, tf; chain=1) == Statistics.quantile(traces[1], 0.3, tf)
+            end
 
             # show
             buf = IOBuffer()
@@ -174,5 +235,23 @@
         ip = inclusion_probs(chains)
         @test ip isa AbstractVector
         @test all(0.0 .<= ip .<= 1.0)
+
+        two = pdmp_sample(ξ0, flow_ss, model_ss, alg_ss, 0.0, 20_000.0; n_chains=2, seed=[1, 2], progress=false)
+        durations = [PDMPSamplers.last_event_time(t) - PDMPSamplers.first_event_time(t) for t in two.traces]
+        w = durations ./ sum(durations)
+        @test inclusion_probs(two) ≈ w[1] * inclusion_probs(two.traces[1]) + w[2] * inclusion_probs(two.traces[2])
+        @test inclusion_probs(two; chain=2) == inclusion_probs(two.traces[2])
+    end
+
+    @testset "single chain summaries are unchanged" begin
+        Random.seed!(7)
+        one_chain = pdmp_sample(d, flow, model, alg, 0.0, 2_000.0; progress=false)
+        trace = one_chain.traces[1]
+        @test mean(one_chain) == mean(trace)
+        @test var(one_chain) == var(trace)
+        @test cov(one_chain) == cov(trace)
+        @test ess(one_chain) == ess(trace)
+        @test Statistics.quantile(one_chain, 0.3; coordinate=1) == Statistics.quantile(trace, 0.3; coordinate=1)
+        @test Matrix(PDMPDiscretize(one_chain, 1.0)) == Matrix(PDMPDiscretize(trace, 1.0))
     end
 end

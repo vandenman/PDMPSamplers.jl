@@ -15,6 +15,19 @@ function PDMPTerminalState(state::AbstractPDMPState, flow)
         Float64.(state.ξ.θ), stored, free, deepcopy(flow))
 end
 
+"""
+    PDMPChains
+
+The result of [`pdmp_sample`](@ref): one trace and its run statistics per
+chain. `chains[i]` returns `(trace, stats)` of chain `i`.
+
+The summaries `mean`, `var`, `std`, `cov`, `cor`, `quantile`, `median`, `cdf`,
+`inclusion_probs` and `ess` pool all chains by default, weighting each chain by
+the length of its run (`ess` sums the per-chain estimates). Pass `chain=i` to
+summarize one chain. The same holds for the transformed estimators
+(`mean(chains, transforms)` and so on). `PDMPDiscretize` reads off a single path, so it requires
+`chain=i` when there is more than one chain.
+"""
 struct PDMPChains{T<:AbstractPDMPTrace,S,E}
     traces::Vector{T}
     stats::Vector{S}
@@ -46,26 +59,161 @@ function Base.only(chains::PDMPChains)
     return chains[1]
 end
 
-Statistics.mean(chains::PDMPChains; chain::Integer=1)    = Statistics.mean(chains.traces[chain])
-Statistics.var(chains::PDMPChains; chain::Integer=1)     = Statistics.var(chains.traces[chain])
-Statistics.var(chains::PDMPChains, means::AbstractVector; chain::Integer=1) = Statistics.var(chains.traces[chain], means)
-Statistics.std(chains::PDMPChains; chain::Integer=1)     = Statistics.std(chains.traces[chain])
-Statistics.std(chains::PDMPChains, means::AbstractVector; chain::Integer=1) = Statistics.std(chains.traces[chain], means)
-Statistics.cov(chains::PDMPChains; chain::Integer=1)     = Statistics.cov(chains.traces[chain])
-Statistics.cov(chains::PDMPChains, means::AbstractVector; chain::Integer=1) = Statistics.cov(chains.traces[chain], means)
-Statistics.cor(chains::PDMPChains; chain::Integer=1)     = Statistics.cor(chains.traces[chain])
-Statistics.median(chains::PDMPChains; kwargs...)          = Statistics.median(chains.traces[1]; kwargs...)
+# Summaries of `PDMPChains` pool all chains by default; pass `chain=i` for one
+# chain. Pooling treats the chains as one process observed for their combined
+# time, so each chain is weighted by the length of its run.
 
-function Statistics.quantile(chains::PDMPChains, p; chain::Integer=1, kwargs...)
-    Statistics.quantile(chains.traces[chain], p; kwargs...)
+_chain_duration(trace::AbstractPDMPTrace) = last_event_time(trace) - first_event_time(trace)
+
+function _chain_weights(chains::PDMPChains)
+    durations = map(_chain_duration, chains.traces)
+    return durations ./ sum(durations)
 end
 
-cdf(chains::PDMPChains, q::Real; chain::Integer=1, kwargs...) = cdf(chains.traces[chain], q; kwargs...)
-ess(chains::PDMPChains; chain::Integer=1, kwargs...)           = ess(chains.traces[chain]; kwargs...)
-ess(chains::PDMPChains, means::AbstractVector, variances::AbstractVector; chain::Integer=1, kwargs...) = ess(chains.traces[chain], means, variances; kwargs...)
-inclusion_probs(chains::PDMPChains; chain::Integer=1)          = inclusion_probs(chains.traces[chain])
+_pool(chains::PDMPChains, chain::Integer) = false
+_pool(chains::PDMPChains, ::Nothing) = n_chains(chains) > 1
+_single(chains::PDMPChains, chain::Integer) = chains.traces[chain]
+_single(chains::PDMPChains, ::Nothing) = chains.traces[1]
 
-PDMPDiscretize(chains::PDMPChains, dt; chain::Integer=1) = PDMPDiscretize(chains.traces[chain], dt)
+# Time-weighted average of a per-chain summary.
+_pooled_average(f, chains::PDMPChains) =
+    sum(w * f(trace) for (w, trace) in zip(_chain_weights(chains), chains.traces))
+
+function Statistics.mean(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.mean(_single(chains, chain))
+    return _pooled_average(Statistics.mean, chains)
+end
+
+# Pooled variance: within-chain variance plus the spread of the chain means.
+function Statistics.var(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.var(_single(chains, chain))
+    return Statistics.var(chains, Statistics.mean(chains))
+end
+function Statistics.var(chains::PDMPChains, means::AbstractVector; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.var(_single(chains, chain), means)
+    return _pooled_average(trace -> Statistics.var(trace, means), chains)
+end
+
+Statistics.std(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing) =
+    sqrt.(Statistics.var(chains; chain))
+Statistics.std(chains::PDMPChains, means::AbstractVector; chain::Union{Nothing,Integer}=nothing) =
+    sqrt.(Statistics.var(chains, means; chain))
+
+function Statistics.cov(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.cov(_single(chains, chain))
+    return Statistics.cov(chains, Statistics.mean(chains))
+end
+function Statistics.cov(chains::PDMPChains, means::AbstractVector; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.cov(_single(chains, chain), means)
+    return _pooled_average(trace -> Statistics.cov(trace, means), chains)
+end
+
+function Statistics.cor(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.cor(_single(chains, chain))
+    Σ = Statistics.cov(chains)
+    s = sqrt.(LinearAlgebra.diag(Σ))
+    return Σ ./ (s * s')
+end
+
+function cdf(chains::PDMPChains, q::Real; coordinate::Integer, chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return cdf(_single(chains, chain), q; coordinate)
+    return _pooled_average(trace -> cdf(trace, q; coordinate), chains)
+end
+
+function _pooled_quantile(chains::PDMPChains, p::Real, coordinate::Integer)
+    bounds = [_trace_coordinate_bounds(trace, coordinate) for trace in chains.traces]
+    lo, hi = minimum(first, bounds), maximum(last, bounds)
+    return _invert_monotone_cdf(q -> cdf(chains, q; coordinate), lo, hi, p)
+end
+
+function Statistics.quantile(chains::PDMPChains, p::Real; coordinate::Integer=-1,
+        chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.quantile(_single(chains, chain), p; coordinate)
+    (0 < p < 1) || throw(DomainError(p, "Quantile probability must be in (0, 1)"))
+    if coordinate == -1
+        d = length(first(chains.traces[1]).position)
+        return [_pooled_quantile(chains, p, j) for j in 1:d]
+    end
+    return _pooled_quantile(chains, p, coordinate)
+end
+function Statistics.quantile(chains::PDMPChains, p::AbstractVector{<:Real}; coordinate::Integer,
+        chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.quantile(_single(chains, chain), p; coordinate)
+    all(x -> 0 < x < 1, p) || throw(DomainError(p, "All quantile probabilities must be in (0, 1)"))
+    return [_pooled_quantile(chains, pᵢ, coordinate) for pᵢ in p]
+end
+
+Statistics.median(chains::PDMPChains; coordinate::Integer=-1, chain::Union{Nothing,Integer}=nothing) =
+    Statistics.quantile(chains, 0.5; coordinate, chain)
+
+# The pooled ESS is the sum of the per-chain estimates.
+function ess(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing, kwargs...)
+    _pool(chains, chain) || return ess(_single(chains, chain); kwargs...)
+    return sum(ess(trace; kwargs...) for trace in chains.traces)
+end
+function ess(chains::PDMPChains, means::AbstractVector, variances::AbstractVector;
+        chain::Union{Nothing,Integer}=nothing, kwargs...)
+    _pool(chains, chain) || return ess(_single(chains, chain), means, variances; kwargs...)
+    return sum(ess(trace, means, variances; kwargs...) for trace in chains.traces)
+end
+
+function inclusion_probs(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return inclusion_probs(_single(chains, chain))
+    return _pooled_average(inclusion_probs, chains)
+end
+
+# Transformed estimators (see transformed_estimators.jl), pooled the same way.
+const _Transforms = AbstractVector{<:ParameterTransform}
+
+function Statistics.mean(chains::PDMPChains, transforms::_Transforms; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.mean(_single(chains, chain), transforms)
+    return _pooled_average(trace -> Statistics.mean(trace, transforms), chains)
+end
+
+function Statistics.var(chains::PDMPChains, transforms::_Transforms; chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.var(_single(chains, chain), transforms)
+    m = Statistics.mean(chains, transforms)
+    return _pooled_average(chains) do trace
+        Statistics.var(trace, transforms) .+ (Statistics.mean(trace, transforms) .- m) .^ 2
+    end
+end
+
+Statistics.std(chains::PDMPChains, transforms::_Transforms; chain::Union{Nothing,Integer}=nothing) =
+    sqrt.(Statistics.var(chains, transforms; chain))
+
+function cdf(chains::PDMPChains, q::Real, transforms::_Transforms; coordinate::Integer,
+        chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return cdf(_single(chains, chain), q, transforms; coordinate)
+    return _pooled_average(trace -> cdf(trace, q, transforms; coordinate), chains)
+end
+
+# The transforms are monotone, so a quantile of the transformed coordinate is
+# the transform of a quantile of the pooled untransformed coordinate.
+function Statistics.quantile(chains::PDMPChains, p::Real, transforms::_Transforms;
+        coordinate::Integer=-1, chain::Union{Nothing,Integer}=nothing)
+    _pool(chains, chain) || return Statistics.quantile(_single(chains, chain), p, transforms; coordinate)
+    (0 < p < 1) || throw(DomainError(p, "Quantile probability must be in (0, 1)"))
+    function transformed(j)
+        transform = transforms[j]
+        return transform(_pooled_quantile(chains, is_increasing(transform) ? p : 1 - p, j))
+    end
+    coordinate == -1 && return [transformed(j) for j in eachindex(transforms)]
+    return transformed(coordinate)
+end
+
+Statistics.median(chains::PDMPChains, transforms::_Transforms; coordinate::Integer=-1,
+        chain::Union{Nothing,Integer}=nothing) =
+    Statistics.quantile(chains, 0.5, transforms; coordinate, chain)
+
+# A discretization is a single path, so with several chains `chain` must be given.
+function _discretize_chain(chains::PDMPChains, chain::Union{Nothing,Integer})
+    chain === nothing && n_chains(chains) > 1 && throw(ArgumentError(
+        "chains has $(n_chains(chains)) chains; pass `chain=i` to discretize one of them"))
+    return _single(chains, chain)
+end
+
+PDMPDiscretize(chains::PDMPChains, dt; chain::Union{Nothing,Integer}=nothing) =
+    PDMPDiscretize(_discretize_chain(chains, chain), dt)
 
 """
     adaptive_dt(trace::AbstractPDMPTrace; n_batches=0) -> (dt, n_disc, ct_ess_min)
@@ -105,13 +253,13 @@ function adaptive_dt(trace::AbstractPDMPTrace; n_batches::Integer=0)
     return dt, n_disc, ct_ess_min
 end
 
-function adaptive_dt(chains::PDMPChains; chain::Integer=1, kwargs...)
-    adaptive_dt(chains.traces[chain]; kwargs...)
+function adaptive_dt(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing, kwargs...)
+    adaptive_dt(_discretize_chain(chains, chain); kwargs...)
 end
 
 """
     adaptive_discretize(trace::AbstractPDMPTrace; kwargs...)
-    adaptive_discretize(chains::PDMPChains; chain=1, kwargs...)
+    adaptive_discretize(chains::PDMPChains; chain=nothing, kwargs...)
 
 Discretize a PDMP trace using an adaptive number of points determined by
 the continuous-time ESS. Sets `n_disc = ceil(min(ct_ESS))` so that the
@@ -125,8 +273,8 @@ function adaptive_discretize(trace::AbstractPDMPTrace; kwargs...)
     return mat, n_disc, ct_ess_min
 end
 
-function adaptive_discretize(chains::PDMPChains; chain::Integer=1, kwargs...)
-    adaptive_discretize(chains.traces[chain]; kwargs...)
+function adaptive_discretize(chains::PDMPChains; chain::Union{Nothing,Integer}=nothing, kwargs...)
+    adaptive_discretize(_discretize_chain(chains, chain); kwargs...)
 end
 
 function Base.show(io::IO, chains::PDMPChains)

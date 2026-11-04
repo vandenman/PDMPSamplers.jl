@@ -328,8 +328,10 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
         @test last_event_time(coordinate_trace) == 0.25
         @test coordinate_stats.stop_reason == :reached_time
 
+        # Warmup is capped at max_time = 0.1 and the main run lasts T = 0.1,
+        # so no gradient probe may go beyond time 0.2.
         adaptive_gradient = FullGradient(function (out, x)
-            x[1] <= 0.1 + 16eps(0.1) ||
+            x[1] <= 0.2 + 16eps(0.2) ||
                 error("adaptive warmup crossed max_time")
             fill!(out, 0.0)
             return out
@@ -343,7 +345,7 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             PDMPSamplers.DevelStatisticCounter())
         @test PDMPSamplers._step_horizon(
             adaptive_criterion, adaptive_state) == 0.1
-        pdmp_sample(
+        adaptive_chains = pdmp_sample(
             SkeletonPoint([0.0], [1.0]),
             BouncyParticle(1, 0.0),
             PDMPModel(1, adaptive_gradient, nothing),
@@ -352,6 +354,9 @@ PDMPSamplers.stop_reason(c::MockCriterion) = c.reason
             warmup_stop=adaptive_criterion,
             progress=false,
         )
+        # the warmup stopped exactly at max_time; the main run then lasted T
+        @test first_event_time(adaptive_chains.traces[1]) == 0.1
+        @test last_event_time(adaptive_chains.traces[1]) ≈ 0.2
     end
 
     @testset "EventCountCriterion is phase-local" begin

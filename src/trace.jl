@@ -202,7 +202,7 @@ compact(trace::FactorizedTrace) = trace
 
 """
     StreamingTraceStorage(directory; buffer_events=4096, write_events=true,
-                          online_batches=0, online_end_time=NaN,
+                          online_batches=0, online_duration=NaN,
                           online_grid_spacing=NaN, online_warmup_batches=0)
 
 Opt-in bounded trace storage. Sampling writes immutable typed-event chunks to
@@ -217,7 +217,8 @@ are not physical trace records.
 
 With `online_batches > 0` the main phase also accumulates exact
 continuous-time batch integrals (see [`StreamingOnlineSummaries`](@ref)) over
-`online_batches` equal batches ending at `online_end_time`, plus
+`online_batches` equal batches covering the first `online_duration` time units
+of the main run (normally its whole length `T`), plus
 position/mask snapshots every `online_grid_spacing`, and writes them to
 `online_summaries.bin` in the main-phase directory. With `write_events=false`
 the main phase writes no event chunks, so memory and disk use do not grow with
@@ -232,19 +233,19 @@ struct StreamingTraceStorage
     buffer_events::Int
     write_events::Bool
     online_batches::Int
-    online_end_time::Float64
+    online_duration::Float64
     online_grid_spacing::Float64
     online_warmup_batches::Int
     function StreamingTraceStorage(directory::AbstractString;
             buffer_events::Integer=4096, write_events::Bool=true,
-            online_batches::Integer=0, online_end_time::Real=NaN,
+            online_batches::Integer=0, online_duration::Real=NaN,
             online_grid_spacing::Real=NaN, online_warmup_batches::Integer=0)
         buffer_events >= 1 || throw(ArgumentError(
             "streaming trace buffer_events must be positive"))
         online_batches >= 0 || throw(ArgumentError(
             "online_batches must be nonnegative"))
-        online_batches == 0 || isfinite(online_end_time) || throw(ArgumentError(
-            "online summaries require a finite online_end_time"))
+        online_batches == 0 || (isfinite(online_duration) && online_duration > 0) ||
+            throw(ArgumentError("online summaries require a finite, positive online_duration"))
         isnan(online_grid_spacing) || online_grid_spacing > 0 || throw(
             ArgumentError("online_grid_spacing must be positive or NaN"))
         write_events || online_batches > 0 || throw(ArgumentError(
@@ -252,7 +253,7 @@ struct StreamingTraceStorage
         online_warmup_batches >= 0 || throw(ArgumentError(
             "online_warmup_batches must be nonnegative"))
         new(abspath(String(directory)), Int(buffer_events), write_events,
-            Int(online_batches), Float64(online_end_time),
+            Int(online_batches), Float64(online_duration),
             Float64(online_grid_spacing), Int(online_warmup_batches))
     end
 end
@@ -271,7 +272,8 @@ linear flows only (NaN for Boomerang).
 """
 mutable struct StreamingOnlineSummaries
     n_batches::Int
-    end_time::Float64
+    duration::Float64       # length of the summarized phase
+    end_time::Float64       # start of the phase + duration, set by _online_begin!
     grid_spacing::Float64
     start_time::Float64
     width::Float64
@@ -302,8 +304,8 @@ mutable struct StreamingOnlineSummaries
 end
 
 function StreamingOnlineSummaries(d::Integer, n_batches::Integer,
-        end_time::Real, grid_spacing::Real)
-    StreamingOnlineSummaries(Int(n_batches), Float64(end_time),
+        duration::Real, grid_spacing::Real)
+    StreamingOnlineSummaries(Int(n_batches), Float64(duration), NaN,
         Float64(grid_spacing), NaN, NaN, NaN, NaN, 0.0,
         zeros(d), zeros(d), zeros(d), zeros(d), 0.0, 0.0, zeros(Int, d),
         Float64[], Float64[], Float64[], Float64[], Float64[], Float64[],
@@ -311,7 +313,7 @@ function StreamingOnlineSummaries(d::Integer, n_batches::Integer,
         Float64[], Float64[], UInt8[], zeros(d), zeros(d))
 end
 StreamingOnlineSummaries(d::Integer, storage::StreamingTraceStorage) =
-    StreamingOnlineSummaries(d, storage.online_batches, storage.online_end_time,
+    StreamingOnlineSummaries(d, storage.online_batches, storage.online_duration,
         storage.online_grid_spacing)
 
 const _STREAM_TRACE_MAGIC = UInt8[0x50, 0x44, 0x4d, 0x50, 0x54, 0x59, 0x50, 0x31]
@@ -437,7 +439,7 @@ function StreamingPDMPTrace(state::AbstractPDMPState, flow::ContinuousDynamics,
             StreamingOnlineSummaries(length(state.ξ.x), storage) : nothing
     elseif storage.online_warmup_batches > 0 && warmup_end > state.t[]
         StreamingOnlineSummaries(length(state.ξ.x),
-            storage.online_warmup_batches, warmup_end, NaN)
+            storage.online_warmup_batches, warmup_end - state.t[], NaN)
     else
         nothing
     end
@@ -591,9 +593,9 @@ end
 function _online_begin!(online::StreamingOnlineSummaries, state::AbstractPDMPState)
     t = Float64(state.t[])
     online.start_time = t
-    online.width = (online.end_time - t) / online.n_batches
-    online.width > 0 || throw(ArgumentError(
-        "online_end_time must lie after the retained-phase start"))
+    online.end_time = t + online.duration
+    online.width = online.duration / online.n_batches
+    online.width > 0 || throw(ArgumentError("online summaries need a positive duration"))
     online.next_batch_end = t + online.width
     online.cur_time = 0.0
     online.cur_size = 0.0

@@ -7,6 +7,8 @@ using Distributions
 using Statistics
 import ADTypes
 import ForwardDiff
+import Mooncake
+import DifferentiationInterface as DI
 
 @testset "DynamicPPL Extension" begin
 
@@ -100,5 +102,56 @@ import ForwardDiff
             sample_mean = vec(mean(samples, dims=1))
             @test norm(sample_mean - μ) < 1.0
         end
+    end
+
+    # Bounded parameters must be sampled on the unconstrained scale.
+    # λ ~ Gamma(2, 1) and y | λ ~ Poisson(λ) give λ | y ~ Gamma(2 + Σy, rate 1 + n).
+    # On η = log λ the negative log density (with Jacobian) is
+    # -(2 + Σy) η + (1 + n) exp(η).
+    @model function poisson_gamma(y)
+        λ ~ Gamma(2.0, 1.0)
+        for i in eachindex(y)
+            y[i] ~ Poisson(λ)
+        end
+    end
+    y_counts = [3, 1, 4, 1, 5, 2]
+    a_post = 2 + sum(y_counts)
+    b_post = 1 + length(y_counts)
+    posterior = Gamma(a_post, 1 / b_post)
+    neg_grad_η(η) = -a_post + b_post * exp(η)
+    neg_hess_η(η) = b_post * exp(η)
+
+    @testset "Constrained parameters are sampled unconstrained" begin
+        model = PDMPModel(poisson_gamma(y_counts), ADTypes.AutoForwardDiff(); needs_hvp=true)
+        @test model.d == 1
+
+        # η = -3 is valid on the unconstrained scale but outside the support of λ.
+        g = zeros(1)
+        PDMPSamplers.compute_gradient!(model.grad, [-3.0], g)
+        @test g[1] ≈ neg_grad_η(-3.0)
+        @test model.hvp([-3.0], [1.0])[1] ≈ neg_hess_η(-3.0)
+
+        chains = pdmp_sample([0.0], ZigZag(1), model, GridThinningStrategy(), 0.0, 20_000.0;
+            seed=1, progress=false)
+        λ_draws = exp.(Matrix(PDMPDiscretize(chains, 0.5)))
+        @test mean(λ_draws) ≈ mean(posterior) rtol=0.05
+        @test std(λ_draws) ≈ std(posterior) rtol=0.1
+    end
+
+    @testset "Mooncake (reverse mode) without HVP" begin
+        model = PDMPModel(poisson_gamma(y_counts), ADTypes.AutoMooncake(); needs_hvp=false)
+        g = zeros(1)
+        PDMPSamplers.compute_gradient!(model.grad, [0.5], g)
+        @test g[1] ≈ neg_grad_η(0.5)
+    end
+
+    @testset "SecondOrder backend for HVPs" begin
+        backend = DI.SecondOrder(ADTypes.AutoForwardDiff(), ADTypes.AutoForwardDiff())
+        model = PDMPModel(poisson_gamma(y_counts), backend; needs_hvp=true)
+        g = zeros(1)
+        PDMPSamplers.compute_gradient!(model.grad, [0.5], g)
+        @test g[1] ≈ neg_grad_η(0.5)
+        @test model.hvp([0.5], [1.0])[1] ≈ neg_hess_η(0.5)
+        @test model.vhv([0.5], [1.0], [1.0]) ≈ neg_hess_η(0.5)
     end
 end
