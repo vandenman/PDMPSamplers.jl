@@ -1,0 +1,16 @@
+Package: PDMPSamplersDocs
+Title: Documentation Build Environment
+Version: 0.0.0.9000
+Authors@R: person("Don", "van den Bergh", role = c("aut", "cre"),
+    email = "d.vandenbergh@uva.nl")
+Description: R dependencies for the shared Julia and R documentation site.
+License: MIT
+Imports:
+    digest,
+    jsonlite,
+    knitr,
+    pkgdown,
+    quarto,
+    xml2
+Config/renv/profiles/examples/dependencies: brms, JuliaCall, Matrix, rappdirs
+Config/renv/profiles/examples/remotes: JuliaCall=Non-Contradiction/JuliaCall

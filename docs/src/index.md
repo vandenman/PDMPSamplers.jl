@@ -41,13 +41,15 @@ features:
 <div class="vp-doc" style="width:80%; margin:auto">
 ```
 
-PDMPSamplers implements piecewise deterministic Markov process (PDMP)
-samplers for Bayesian inference. A PDMP moves along deterministic paths and
-changes direction at random event times, which depend on the gradient of the
-log posterior. The output is a continuous trajectory, and sticky versions of
-the samplers do spike-and-slab variable selection.
+PDMPSamplers implements piecewise deterministic Markov process (PDMP) samplers for Bayesian inference.
+A PDMP is a continuous time algorithm that moves along deterministic paths and changes direction at random event times that depend on the gradient of the log posterior.
+PDMPSamplers.jl is the Julia backend, and [PDMPSamplersR](r.md) uses JuliaCall to make the functionality available in R.
+The sampler needs a function that calculates the negative gradient of the log posterior.
+As this can be rather cumbersome, the software integrates with Stan, Turing, and brms (R only), so that it's possible to specify the models in more user friendly ways.
 
-Available for **Julia** and, through [PDMPSamplersR](r.md), for **R**.
+The PDMP approach has a few advantages over other MCMC samplers.
+Notably, the sticky versions of the samplers can do spike-and-slab [variable selection](variable-selection.md).
+Furthermore, the runtime of the algorithms can often be reduced using [subsampling](subsampling.md).
 
 ```@raw html
 </div>

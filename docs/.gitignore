@@ -1,7 +1,9 @@
 __site/
 .DS_Store
 node_modules/
+package.json
 package-lock.json
 news.md
 src/changelog.md
 build/
+src/public/r-api/

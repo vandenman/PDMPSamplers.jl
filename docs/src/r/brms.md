@@ -37,6 +37,12 @@ posterior summaries and plots. For Julia models, see the separate [Turing.jl gui
 
 See [Choosing a sampler](../choosing-a-sampler.md) for the dynamics and
 [Reading R results](results.md) for results returned by the lower-level R
-functions. The [R function reference](reference/sampling.md#r-brm_pdmp)
-lists all brms backend options; the same help is available in R with
+functions.
+
+```@raw html
+<p>The <a href="../r-api/reference/brm_pdmp.html" target="_self">R function reference</a>
+lists all brms backend options.</p>
+```
+
+The same help is available in R with
 `?PDMPSamplersR::brm_pdmp`.

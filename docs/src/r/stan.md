@@ -40,9 +40,12 @@ Start with [Variable selection](../variable-selection.md) and
 [Dependent slabs](../dependent-slabs.md) for the statistical setup.
 For large data sets, see [Subsampling](../subsampling.md).
 
-The [R function reference](reference/sampling.md#r-pdmp_sample_from_stanmodel)
-lists all options for `pdmp_sample_from_stanmodel`, including custom Stan
-subsampling. The same help is available in R with
+```@raw html
+<p>The <a href="../r-api/reference/pdmp_sample_from_stanmodel.html" target="_self">R function reference</a>
+lists all options for <code>pdmp_sample_from_stanmodel</code>, including custom Stan subsampling.</p>
+```
+
+The same help is available in R with
 `?PDMPSamplersR::pdmp_sample_from_stanmodel`.
 
 For paired R and Julia examples, continue with [Stan targets and variable

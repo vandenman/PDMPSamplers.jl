@@ -8,3 +8,6 @@ playground
 /benchmarks/*.csv
 /benchmarks/*.tsv
 /dev/build/
+/renv/
+.Renviron
+LocalPreferences.toml

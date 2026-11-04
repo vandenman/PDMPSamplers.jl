@@ -66,9 +66,11 @@ function trajectory_svg(paths, titles; lim=3.0, px=230, ellipse=nothing, show_ax
     sc(v) = pad + (v + lim) / (2lim) * (px - 2pad)
     sy(v) = px - sc(v)
     io = IOBuffer()
-    print(io, """<div style="display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin:1em 0">""")
+    columns = length(paths)
+    max_width = columns * px + (columns - 1) * 12
+    print(io, """<div style="display:grid;grid-template-columns:repeat($columns,minmax(0,1fr));gap:12px;max-width:$(max_width)px;margin:1em auto">""")
     for (P, title) in zip(paths, titles)
-        print(io, """<svg viewBox="0 0 $px $(px + 18)" width="$px" role="img" aria-label="$title trajectory">""")
+        print(io, """<svg viewBox="0 0 $px $(px + 18)" width="$px" style="display:block;width:100%;height:auto;min-width:0" role="img" aria-label="$title trajectory">""")
         print(io, """<rect x="$pad" y="$pad" width="$(px - 2pad)" height="$(px - 2pad)" fill="none" stroke="var(--vp-c-divider)"/>""")
         if show_axes
             print(io, """<line x1="$(sc(0))" y1="$pad" x2="$(sc(0))" y2="$(px - pad)" stroke="var(--vp-c-text-3)" stroke-dasharray="3 3"/>""")

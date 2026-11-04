@@ -1,33 +1,100 @@
 # Documentation development
 
-The Documenter/VitePress site contains the Julia and R guides. Build it from
-the PDMPSamplers.jl repository root:
+The Julia and R guides and the R function reference are published as one site.
+Documenter/VitePress builds the guides; pkgdown builds the R reference from
+the R package's help files.
+
+## Setup
+
+Install Julia, R, Quarto, and Pandoc, then run:
 
 ```sh
-julia --project=docs -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.instantiate()'
-julia --project=docs docs/make.jl
-python3 docs/serve.py
+docs/instantiate.sh
 ```
 
-Open <http://localhost:8000/> to preview the built site.
+This restores the R packages recorded in `docs/renv.lock` into
+`docs/renv/library` and instantiates the Julia documentation environment.
+The renv bootstrap also installs locally. No R packages are installed into
+your user or system library.
 
-The R function reference is generated from the R package's `man/*.Rd` files.
-After updating those help files, regenerate and check the pages:
+The R package dependencies are listed in `docs/DESCRIPTION`. Interactive R
+sessions started in `docs/` activate renv automatically; the R build and
+validation scripts also activate it when called directly.
+
+## Build and preview
+
+Use a checkout of PDMPSamplersR as the reference source:
 
 ```sh
-Rscript docs/generate_r_reference.R /path/to/PDMPSamplersR
-Rscript docs/generate_r_reference.R /path/to/PDMPSamplersR --check
-python3 docs/smoke/check_r_reference.py
+git clone https://github.com/vandenman/PDMPSamplersR.git /path/to/PDMPSamplersR
+docs/preview.sh /path/to/PDMPSamplersR
 ```
 
-The last check requires a fresh site build. The Stan smoke script runs the
-published examples with short trajectories. The R check requires an installed
-PDMPSamplersR package on the active R library path:
+This builds the reference and guides, checks the links, and starts VitePress.
+Open the local URL printed by the server. To build without starting a server,
+or preview an existing build:
 
 ```sh
-python3 docs/smoke/stan_workflows.py --language julia
-python3 docs/smoke/stan_workflows.py --language r
+docs/build.sh /path/to/PDMPSamplersR
+docs/preview.sh --no-build
 ```
 
-The R CI workflow checks out the Julia documentation from its default branch,
-so merge the Julia site PR before the R package PR.
+The scripts work from any working directory. Instead of passing the R source
+path each time, set `PDMPSAMPLERS_R_SOURCE`. By default they use the
+`r-package/` checkout at the repository root, as CI does.
+Set `JULIA` or `RSCRIPT` to select a different executable if needed.
+
+Rebuild after changing Julia examples, docstrings, or R help files. Generated
+reference HTML is ignored by Git. The R package's `_pkgdown.yml` supplies its
+reference grouping.
+
+## Saved R example output
+
+The Getting Started R tabs display output saved from actual runs. Local site
+builds reuse it and check that it matches the example code. After changing an
+R example, regenerate its output:
+
+```sh
+docs/update-examples.sh /path/to/PDMPSamplersR
+```
+
+This restores the separate `examples` renv profile, installs the checked-out
+R interface into that profile's library, executes the examples with knitr,
+and checks their estimated means and covariances. Commit the updated files
+in `docs/examples/output/` with the example changes. Ordinary local builds
+do not need the sampler runtime dependencies.
+
+CI always runs this command before building, so the published site shows
+output from the examples executed in that CI run. To update the examples
+profile's dependency versions, start R in `docs/` with `RENV_PROFILE=examples`,
+then run `renv::update()` and `renv::snapshot()`.
+
+## Update dependencies
+
+To intentionally update the R and Julia documentation dependencies:
+
+```sh
+docs/update.sh
+```
+
+Review and commit the changes to `docs/renv.lock` and any dependency
+declarations. Normal setup restores the lockfile without updating it.
+
+## Check examples
+
+The Stan smoke script runs selected published examples with short
+trajectories. The optional R mode also uses the docs renv library. To use it,
+start R in `docs/` and install the R interface there with
+`renv::install("/path/to/PDMPSamplersR")`. These sampler runtime dependencies
+are not needed to build the site.
+
+```sh
+julia --project=docs docs/smoke/stan_workflows.jl --language julia
+julia --project=docs docs/smoke/stan_workflows.jl --language r
+```
+
+## Deployment
+
+CI uses `docs/instantiate.sh` and `docs/build.sh`, then runs
+`docs/deploy.jl`. The deployment entry point also activates the R environment
+and validates links before publishing. Building does not deploy.

@@ -1,6 +1,12 @@
 using Documenter, DocumenterVitepress
 using PDMPSamplers
 
+include("check_example_outputs.jl")
+check_r_example_outputs()
+
+isfile(joinpath(@__DIR__, "src", "public", "r-api", "reference", "index.html")) ||
+    error("Build the R reference first: Rscript docs/build_r_reference.R /path/to/PDMPSamplersR")
+
 makedocs(;
     sitename = "PDMPSamplers",
     authors = "Don van den Bergh",
@@ -29,11 +35,6 @@ makedocs(;
             "brms models" => "r/brms.md",
             "Results" => "r/results.md",
             "Function reference" => "r/reference.md",
-            "Sampling functions" => "r/reference/sampling.md",
-            "Stan and subsampling functions" => "r/reference/stan-and-subsampling.md",
-            "Prior and selection functions" => "r/reference/priors-and-selection.md",
-            "Result functions" => "r/reference/results.md",
-            "Setup and transform functions" => "r/reference/setup-and-transforms.md",
         ],
         "API" => "api.md",
         "Extension Interface" => "extension-interface.md",
@@ -43,12 +44,4 @@ makedocs(;
         devbranch = "main",
         devurl = "dev",
     ),
-)
-
-DocumenterVitepress.deploydocs(;
-    repo = "github.com/vandenman/PDMPSamplers.jl.git",
-    target = joinpath(@__DIR__, "build"),
-    branch = "gh-pages",
-    devbranch = "main",
-    push_preview = true,
 )

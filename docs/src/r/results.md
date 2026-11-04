@@ -40,9 +40,12 @@ Stan samples on an unconstrained scale. For example, a positive parameter may
 appear as its logarithm in the path. Supply the corresponding transform to
 the summary functions, or transform discretized draws before interpreting
 them. Use `stan_parameter_mapping(stan_file, standata)` to check the
-unconstrained coordinate order before assigning names or transforms. The
-[result function reference](reference/results.md) documents the arguments for
-`mean.pdmp_result`, `discretize`, and the other summaries.
+unconstrained coordinate order before assigning names or transforms.
+
+```@raw html
+<p>The <a href="../r-api/reference/index.html" target="_self">result function reference</a>
+documents the arguments for <code>mean.pdmp_result</code>, <code>discretize</code>, and the other summaries.</p>
+```
 
 `brm_pdmp()` returns a `brmsfit` instead of a `pdmp_result`; use brms methods
 such as `summary(fit)` and `fixef(fit)` for that result.

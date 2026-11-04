@@ -37,6 +37,7 @@ PDMPSamplers.jl is not yet in the General registry. Install it from GitHub:
 ```julia
 using Pkg
 Pkg.add(url="https://github.com/vandenman/PDMPSamplers.jl")
+Pkg.add(["Distributions", "ADTypes", "ForwardDiff"])  # packages used in the example below
 ```
 
 ## Example
@@ -75,22 +76,6 @@ has tutorials on
 - [PDMPSamplersR](https://github.com/vandenman/PDMPSamplersR), the R interface
   ([getting started](https://vandenman.github.io/PDMPSamplers.jl/dev/r/getting-started)).
   It runs Stan models from R.
-
-## Citation
-
-If you use PDMPSamplers.jl, please cite it. The citation metadata is in
-[`CITATION.cff`](CITATION.cff); GitHub's "Cite this repository" button turns it
-into BibTeX or APA. In BibTeX:
-
-```bibtex
-@software{PDMPSamplers_jl,
-  author  = {van den Bergh, Don},
-  title   = {{PDMPSamplers.jl}: Piecewise deterministic {M}arkov process samplers for {B}ayesian inference},
-  version = {0.1.0},
-  year    = {2026},
-  url     = {https://github.com/vandenman/PDMPSamplers.jl}
-}
-```
 
 ## License
 

@@ -26,20 +26,41 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v3
-      - name: Install documentation dependencies
+      - name: Check out the R reference source
+        uses: actions/checkout@v7
+        with:
+          repository: vandenman/PDMPSamplersR
+          path: r-package
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: renv
+          working-directory: docs
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-pandoc@v2
+      - uses: quarto-dev/quarto-actions/setup@v2
+      - name: Install R system dependencies
         run: |
-          julia --project=docs -e '
-            using Pkg
-            Pkg.develop(PackageSpec(path=pwd()))
-            Pkg.instantiate()
-            Pkg.precompile()
-          '
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev
+      - name: Cache R documentation packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            docs/renv/library
+            ~/.cache/R/renv
+          key: docs-renv-${{ runner.os }}-${{ hashFiles('docs/renv.lock', 'docs/renv/profiles/examples/renv.lock') }}
+      - name: Install documentation dependencies
+        run: docs/instantiate.sh
       - name: Smoke test Julia Stan examples
-        run: python3 docs/smoke/stan_workflows.py --language julia
-      - name: Build and deploy
+        run: julia --project=docs docs/smoke/stan_workflows.jl --language julia
+      - name: Execute R examples and regenerate their output
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: docs/update-examples.sh r-package
+      - name: Build and validate documentation
+        run: docs/build.sh r-package
+      - name: Deploy validated documentation
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           JULIA_DEBUG: "Documenter"
-        run: julia --project=docs docs/make.jl
-      - name: Check rendered R reference links
-        run: python3 docs/smoke/check_r_reference.py
+        run: julia --project=docs docs/deploy.jl
